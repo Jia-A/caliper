@@ -1,9 +1,9 @@
 import { resolve } from "node:path";
-import { chromium } from "playwright";
+import { launchChromium } from "./browser.mjs";
 
 export async function login({ url, auth }) {
   const authPath = resolve(auth);
-  const browser = await chromium.launch({ headless: false });
+  const browser = await launchChromium({ headless: false });
 
   try {
     const context = await browser.newContext(); // fresh window, own cookies

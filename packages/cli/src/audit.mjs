@@ -1,7 +1,7 @@
 import { existsSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { chromium } from "playwright";
+import { launchChromium } from "./browser.mjs";
 import { CliError } from "./errors.mjs";
 import { renderReport } from "./report.mjs";
 
@@ -12,7 +12,7 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
   const authPath = resolve(auth);
   if (!existsSync(authPath)) {
     throw new CliError(
-      `No saved session at ${authPath}.\nRun: context-lens login <url> --auth ${auth}`
+      `No saved session at ${authPath}.\nRun: caliper login <url> --auth ${auth}`
     );
   }
 
@@ -25,7 +25,7 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
     }
   }
 
-  const browser = await chromium.launch({ headless: !headed });
+  const browser = await launchChromium({ headless: !headed });
 
   try {
     const context = await browser.newContext({ storageState: authPath });

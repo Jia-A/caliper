@@ -25,13 +25,13 @@ export function renderReport({ url, measure, output, steps, startedAt, summary, 
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Caliper report</title>
+<title>Caliper — time to first painted output</title>
 <style>${CSS}</style>
 </head>
 <body>
 <main>
   <header>
-    <h1>Time to first paint</h1>
+    <h1>Caliper — time to first painted output</h1>
     <dl class="meta">
       <dt>URL</dt><dd class="wrap">${esc(url)}</dd>
       <dt>Measured button</dt><dd><code>${esc(String(new RegExp(measure, "i")))}</code></dd>

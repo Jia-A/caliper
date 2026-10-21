@@ -5,10 +5,10 @@ import { CliError } from "./errors.mjs";
 const DEFAULT_REPORT = "caliper-report.html";
 
 const USAGE = `Usage:
-  context-lens login <url> [--auth auth.json]
+  caliper login <url> [--auth auth.json]
       Open a browser, log in by hand, save the session.
 
-  context-lens audit <url> --measure <text> --output <selector>
+  caliper audit <url> --measure <text> --output <selector>
       [--step <text>]... [--runs 3] [--headed] [--auth auth.json] [--timeout 60000]
       [--request <regex>] [--report [path]]
       Measure time from clicking the --measure button to first painted output,
