@@ -1,5 +1,5 @@
 {
-  "name": "context-lens",
+  "name": "context-lens-monorepo",
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
@@ -16,5 +16,6 @@
   "bugs": {
     "url": "https://github.com/Jia-A/Context-Lens/issues"
   },
-  "homepage": "https://github.com/Jia-A/Context-Lens#readme"
+  "homepage": "https://github.com/Jia-A/Context-Lens#readme",
+  "private": true
 }
