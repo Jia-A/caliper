@@ -8,14 +8,14 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Jia-A/Context-Lens.git"
+    "url": "git+https://github.com/Jia-A/caliper.git"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "bugs": {
-    "url": "https://github.com/Jia-A/Context-Lens/issues"
+    "url": "https://github.com/Jia-A/caliper/issues"
   },
-  "homepage": "https://github.com/Jia-A/Context-Lens#readme",
+  "homepage": "https://github.com/Jia-A/caliper#readme",
   "private": true
 }
