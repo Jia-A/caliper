@@ -8,7 +8,10 @@ const USAGE = `Usage:
 
   context-lens audit <url> --measure <text> --output <selector>
       [--step <text>]... [--runs 3] [--headed] [--auth auth.json] [--timeout 60000]
-      Measure time from clicking the --measure button to first painted output.
+      [--request <regex>]
+      Measure time from clicking the --measure button to first painted output,
+      and break it down using the AI request (auto-detected, or the first whose
+      URL matches --request).
 
   --step and --measure are button names, matched as case-insensitive regexes.`;
 
@@ -32,6 +35,7 @@ const COMMANDS = {
       headed: { type: "boolean", default: false },
       auth: { type: "string", default: "auth.json" },
       timeout: { type: "string", default: "60000" },
+      request: { type: "string" },
     },
     async run({ url, values }) {
       if (!values.measure) throw new CliError("audit: --measure <text> is required.");
@@ -47,6 +51,7 @@ const COMMANDS = {
         headed: values.headed,
         auth: values.auth,
         timeout: positiveInt(values.timeout, "--timeout"),
+        request: values.request,
       });
     },
   },
