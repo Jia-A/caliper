@@ -1,8 +1,26 @@
 // Self-contained HTML timeline for an audit: inline CSS/JS, no external requests.
 
+import type { Breakdown, Segment, SegmentKey, Summary } from "./types.js";
+
+export type ReportRun = Breakdown & { total: number };
+
+export interface ReportInput {
+  url: string;
+  measure: string;
+  output: string;
+  steps: string[];
+  startedAt: Date;
+  summary: Summary;
+  runs: ReportRun[];
+}
+
+/** A segment as drawn: known, non-negative width. */
+type BarSegment = Segment & { ms: number };
+type ChartRun = ReportRun & { bars: BarSegment[] };
+
 // Stack order, legend order and table column order. Colors are validated so every pair that
 // can sit next to each other in a bar stays distinguishable (incl. color-vision deficiency).
-const SEGMENTS = [
+const SEGMENTS: { key: SegmentKey; legend: string }[] = [
   { key: "click", legend: "click → fetch() called / request sent" },
   { key: "preflight", legend: "CORS preflight" },
   { key: "connection", legend: "connection setup" },
@@ -13,8 +31,8 @@ const SEGMENTS = [
   { key: "other", legend: "unattributed" },
 ];
 
-export function renderReport({ url, measure, output, steps, startedAt, summary, runs }) {
-  const bars = runs.map((run) => ({ ...run, bars: barSegments(run) }));
+export function renderReport({ url, measure, output, steps, startedAt, summary, runs }: ReportInput): string {
+  const bars: ChartRun[] = runs.map((run) => ({ ...run, bars: barSegments(run) }));
   const scale = Math.max(...runs.map((r) => r.total), 1);
   const ticks = niceTicks(scale);
   const used = SEGMENTS.filter((s) => bars.some((run) => run.bars.some((b) => b.key === s.key)));
@@ -95,15 +113,18 @@ export function renderReport({ url, measure, output, steps, startedAt, summary, 
 
 // Segments as drawn: known, non-negative widths, plus a neutral remainder when part of the
 // run couldn't be attributed (no request chosen, or a step whose timing is unknown).
-function barSegments({ total, segments }) {
-  const known = segments.filter((s) => s.ms !== null).map((s) => ({ ...s, ms: Math.max(0, s.ms) }));
+function barSegments({ total, segments }: ReportRun): BarSegment[] {
+  const all: Segment[] = segments; // widen the `[]` arm of Breakdown so filter can narrow
+  const known: BarSegment[] = all
+    .filter((s): s is BarSegment => s.ms !== null)
+    .map((s) => ({ ...s, ms: Math.max(0, s.ms) }));
   const unknown = segments.length === 0 || known.length < segments.length;
   const rest = total - known.reduce((sum, s) => sum + s.ms, 0);
   if (unknown && rest > 0.5) known.push({ key: "other", label: "unattributed", ms: rest });
   return known.filter((s) => s.ms > 0);
 }
 
-function runRow(run, i, scale, ticks) {
+function runRow(run: ChartRun, i: number, scale: number, ticks: number[]): string {
   const tag = i === 0 ? ` <span class="tag">cold</span>` : "";
   const req = run.request
     ? `<p class="req wrap"><span class="method">${esc(run.request.method)}</span> ${esc(run.request.url)}
@@ -127,16 +148,17 @@ function runRow(run, i, scale, ticks) {
       </div>`;
 }
 
-function segment(s, total) {
+function segment(s: BarSegment, total: number): string {
   const share = total > 0 ? ` (${((s.ms / total) * 100).toFixed(1)}% of total)` : "";
   const tip = `${s.label}: ${s.ms.toFixed(1)} ms${share}${s.note ? ` — ${s.note}` : ""}`;
   return `<div class="seg" tabindex="0" style="flex-grow:${s.ms};background:var(--seg-${s.key})"
        data-tip="${esc(tip)}" aria-label="${esc(tip)}"><span class="in">${fmtMs(s.ms)} ms</span></div>`;
 }
 
-function tableRow(run, i, keys) {
+function tableRow(run: ReportRun, i: number, keys: { key: SegmentKey }[]): string {
+  const segments: Segment[] = run.segments;
   const cells = keys.map(({ key }) => {
-    const s = run.segments.find((seg) => seg.key === key);
+    const s = segments.find((seg) => seg.key === key);
     if (!s) return `<td class="num muted">—</td>`;
     const value = s.ms === null ? "?" : s.ms.toFixed(1);
     const note = s.note ? `<span class="note muted">${esc(s.note)}</span>` : "";
@@ -149,7 +171,7 @@ function tableRow(run, i, keys) {
         </tr>`;
 }
 
-function requestRow(run, i) {
+function requestRow(run: ReportRun, i: number): string {
   const req = run.request
     ? `${esc(run.request.method)} ${esc(run.request.url)} → ${esc(String(run.request.status))}${run.request.contentType ? ` ${esc(run.request.contentType)}` : ""}`
     : "—";
@@ -161,28 +183,29 @@ function requestRow(run, i) {
         </tr>`;
 }
 
-const runName = (i) => `run&nbsp;${i + 1}${i === 0 ? " (cold)" : ""}`;
+const runName = (i: number) => `run&nbsp;${i + 1}${i === 0 ? " (cold)" : ""}`;
 
-function tile(label, value) {
+function tile(label: string, value: number | null): string {
   return `<div class="tile"><div class="tile-label">${esc(label)}</div><div class="tile-value">${
     value === null ? "—" : `${fmtMs(value)}<small> ms</small>`
   }</div></div>`;
 }
 
-function niceTicks(max) {
+function niceTicks(max: number): number[] {
   const raw = max / 5;
   const pow = 10 ** Math.floor(Math.log10(raw));
-  const step = [1, 2, 5, 10].map((m) => m * pow).find((s) => s >= raw);
-  const ticks = [];
+  // 10 × pow always reaches raw, so find() never comes back empty.
+  const step = [1, 2, 5, 10].map((m) => m * pow).find((s) => s >= raw)!;
+  const ticks: number[] = [];
   for (let t = 0; t <= max + 1e-9; t += step) ticks.push(t);
   return ticks;
 }
 
-const pct = (value, scale) => `${((value / scale) * 100).toFixed(3)}%`;
-const fmtMs = (value) => Math.round(value).toLocaleString("en-US");
-const fmtTick = (t) => (t === 0 ? "0" : t >= 1000 ? `${+(t / 1000).toFixed(2)} s` : `${+t.toFixed(1)} ms`);
+const pct = (value: number, scale: number) => `${((value / scale) * 100).toFixed(3)}%`;
+const fmtMs = (value: number) => Math.round(value).toLocaleString("en-US");
+const fmtTick = (t: number) => (t === 0 ? "0" : t >= 1000 ? `${+(t / 1000).toFixed(2)} s` : `${+t.toFixed(1)} ms`);
 
-function esc(value) {
+function esc(value: unknown): string {
   return String(value)
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")

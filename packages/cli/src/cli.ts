@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { parseArgs } from "node:util";
-import { CliError } from "./errors.mjs";
+import { parseArgs, type ParseArgsConfig } from "node:util";
+import { CliError, messageOf } from "./errors.js";
 
 const DEFAULT_REPORT = "caliper-report.html";
 
@@ -18,18 +18,36 @@ const USAGE = `Usage:
 
   --step and --measure are button names, matched as case-insensitive regexes.`;
 
+type OptionsConfig = NonNullable<ParseArgsConfig["options"]>;
+
+// What parseArgs returns for these options, typed per option (string, boolean, string[]…).
+type Values<O extends OptionsConfig> = ReturnType<
+  typeof parseArgs<{ args: string[]; options: O; allowPositionals: true; strict: true }>
+>["values"];
+
+interface Command<O extends OptionsConfig> {
+  options: O;
+  optionalValues?: Record<string, string>;
+  run(args: { url: string; values: Values<O> }): Promise<void>;
+}
+
+// Keeps each command's option types precise instead of widening them to one shared shape.
+function command<const O extends OptionsConfig>(c: Command<O>): Command<O> {
+  return c;
+}
+
 const COMMANDS = {
-  login: {
+  login: command({
     options: {
       auth: { type: "string", default: "auth.json" },
     },
     async run({ url, values }) {
-      const { login } = await import("./login.mjs");
+      const { login } = await import("./login.js");
       await login({ url, auth: values.auth });
     },
-  },
+  }),
 
-  audit: {
+  audit: command({
     options: {
       measure: { type: "string" },
       output: { type: "string" },
@@ -46,7 +64,7 @@ const COMMANDS = {
       if (!values.measure) throw new CliError("audit: --measure <text> is required.");
       if (!values.output) throw new CliError("audit: --output <selector> is required.");
 
-      const { audit } = await import("./audit.mjs");
+      const { audit } = await import("./audit.js");
       await audit({
         url,
         measure: values.measure,
@@ -60,22 +78,22 @@ const COMMANDS = {
         report: values.report,
       });
     },
-  },
+  }),
 };
 
 // parseArgs has no optional-value options, so a bare `--flag` (followed by nothing, another
 // flag, or the <url>) becomes `--flag=<default>`.
-function withOptionalValues(args, defaults) {
+function withOptionalValues(args: string[], defaults: Record<string, string>): string[] {
   return args.map((arg, i) => {
     const name = arg.startsWith("--") ? arg.slice(2) : null;
-    if (!(name in defaults)) return arg;
+    if (name === null || !(name in defaults)) return arg;
     const next = args[i + 1];
     const takesNext = next !== undefined && !next.startsWith("-") && !/^[a-z][a-z\d+.-]*:\/\//i.test(next);
     return takesNext ? arg : `${arg}=${defaults[name]}`;
   });
 }
 
-function positiveInt(value, flag) {
+function positiveInt(value: string, flag: string): number {
   const n = Number(value);
   if (!Number.isInteger(n) || n < 1) {
     throw new CliError(`${flag} must be a positive integer, got "${value}".`);
@@ -83,17 +101,7 @@ function positiveInt(value, flag) {
   return n;
 }
 
-async function main(argv) {
-  const [name, ...rest] = argv;
-
-  if (!name || name === "--help" || name === "-h" || name === "help") {
-    console.log(USAGE);
-    return;
-  }
-
-  const command = COMMANDS[name];
-  if (!command) throw new CliError(`Unknown command "${name}".\n\n${USAGE}`);
-
+async function runCommand<O extends OptionsConfig>(name: string, command: Command<O>, rest: string[]): Promise<void> {
   let parsed;
   try {
     parsed = parseArgs({
@@ -103,11 +111,13 @@ async function main(argv) {
       strict: true,
     });
   } catch (err) {
-    throw new CliError(`${name}: ${err.message}\n\n${USAGE}`);
+    throw new CliError(`${name}: ${messageOf(err)}\n\n${USAGE}`);
   }
 
-  const { values, positionals } = parsed;
-  if (values.help) {
+  // TypeScript can't evaluate parseArgs' result type for a generic O, so name the two views
+  // we need: the extra --help flag, and the command's own options.
+  const { positionals } = parsed;
+  if ((parsed.values as { help?: boolean }).help) {
     console.log(USAGE);
     return;
   }
@@ -115,7 +125,22 @@ async function main(argv) {
     throw new CliError(`${name}: expected exactly one <url>, got ${positionals.length}.\n\n${USAGE}`);
   }
 
-  await command.run({ url: positionals[0], values });
+  await command.run({ url: positionals[0]!, values: parsed.values as Values<O> });
+}
+
+async function main(argv: string[]): Promise<void> {
+  const [name, ...rest] = argv;
+
+  if (!name || name === "--help" || name === "-h" || name === "help") {
+    console.log(USAGE);
+    return;
+  }
+
+  if (!Object.hasOwn(COMMANDS, name)) throw new CliError(`Unknown command "${name}".\n\n${USAGE}`);
+  const key = name as keyof typeof COMMANDS;
+  // Each branch keeps its command's own option types.
+  if (key === "login") await runCommand(name, COMMANDS.login, rest);
+  else await runCommand(name, COMMANDS.audit, rest);
 }
 
 try {

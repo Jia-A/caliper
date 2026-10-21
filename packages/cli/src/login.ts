@@ -1,7 +1,12 @@
 import { resolve } from "node:path";
-import { launchChromium } from "./browser.mjs";
+import { launchChromium } from "./browser.js";
 
-export async function login({ url, auth }) {
+export interface LoginOptions {
+  url: string;
+  auth: string;
+}
+
+export async function login({ url, auth }: LoginOptions): Promise<void> {
   const authPath = resolve(auth);
   const browser = await launchChromium({ headless: false });
 

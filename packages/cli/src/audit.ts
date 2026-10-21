@@ -1,14 +1,55 @@
 import { existsSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { launchChromium } from "./browser.mjs";
-import { CliError } from "./errors.mjs";
-import { renderReport } from "./report.mjs";
+import type { Locator, Page, Request, Response } from "playwright";
+import { launchChromium } from "./browser.js";
+import { CliError, messageOf } from "./errors.js";
+import { renderReport } from "./report.js";
+import type {
+  Breakdown,
+  PageTiming,
+  RequestTiming,
+  ResourceTimingEntry,
+  RunResult,
+  ScoredRequest,
+  Segment,
+  Summary,
+  TimedRequest,
+} from "./types.js";
+
+// The watcher's result, parked on the audited page's window between two page.evaluate calls.
+declare global {
+  interface Window {
+    __lensTiming: Promise<PageTiming>;
+  }
+}
 
 // After first paint, wait this long for network events about pre-paint activity to reach us.
 const NETWORK_SETTLE_MS = 200;
 
-export async function audit({ url, measure, output, steps, runs, headed, auth, timeout, request, report }) {
+export interface AuditOptions {
+  url: string;
+  measure: string;
+  output: string;
+  steps: string[];
+  runs: number;
+  headed: boolean;
+  auth: string;
+  timeout: number;
+  request: string | undefined;
+  report: string | undefined;
+}
+
+interface MeasureOptions {
+  url: string;
+  measure: string;
+  output: string;
+  steps: string[];
+  timeout: number;
+  requestPattern: RegExp | null;
+}
+
+export async function audit({ url, measure, output, steps, runs, headed, auth, timeout, request, report }: AuditOptions): Promise<void> {
   const authPath = resolve(auth);
   if (!existsSync(authPath)) {
     throw new CliError(
@@ -16,12 +57,12 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
     );
   }
 
-  let requestPattern = null;
+  let requestPattern: RegExp | null = null;
   if (request) {
     try {
       requestPattern = new RegExp(request, "i");
     } catch (err) {
-      throw new CliError(`--request "${request}" is not a valid regular expression: ${err.message}`);
+      throw new CliError(`--request "${request}" is not a valid regular expression: ${messageOf(err)}`);
     }
   }
 
@@ -30,8 +71,8 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
   try {
     const context = await browser.newContext({ storageState: authPath });
     const startedAt = new Date();
-    const results = [];
-    const breakdowns = [];
+    const results: number[] = [];
+    const breakdowns: Breakdown[] = [];
 
     for (let i = 1; i <= runs; i++) {
       // Fresh page per run so every run starts from the same state.
@@ -61,7 +102,7 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
         steps,
         startedAt,
         summary,
-        runs: results.map((total, i) => ({ total, ...breakdowns[i] })),
+        runs: results.map((total, i) => ({ total, ...breakdowns[i]! })),
       });
       writeFileSync(reportPath, html);
       console.log(`report: ${reportPath}`);
@@ -71,7 +112,7 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
   }
 }
 
-async function measureOnce(page, { url, measure, output, steps, timeout, requestPattern }) {
+async function measureOnce(page: Page, { url, measure, output, steps, timeout, requestPattern }: MeasureOptions): Promise<RunResult> {
   await page.goto(url);
 
   for (const step of steps) {
@@ -93,11 +134,14 @@ async function measureOnce(page, { url, measure, output, steps, timeout, request
   if (!selectorOk) throw new CliError(`--output "${output}" is not a valid CSS selector.`);
 
   // 1. Install the watcher INSIDE the page, before clicking.
+  //    This function runs in the browser: it can only use DOM globals and its argument.
+  const watcherArgs: [string, number] = [output, timeout];
   await page.evaluate(([outputSelector, timeoutMs]) => {
     const read = () => {
       const el = document.querySelector(outputSelector);
       if (!el) return "";
-      return el.value ?? el.textContent; // textarea/input → .value, anything else → text
+      // `value` exists on inputs/textareas only; the type assertion is compile-time only.
+      return (el as Element & { value?: string }).value ?? el.textContent; // textarea/input → .value, anything else → text
     };
 
     window.__lensTiming = new Promise((resolve, reject) => {
@@ -125,7 +169,7 @@ async function measureOnce(page, { url, measure, output, steps, timeout, request
         { capture: true, once: true }
       );
     });
-  }, [output, timeout]);
+  }, watcherArgs);
 
   // A full Resource Timing buffer (default 250 entries) would drop the AI request's entry.
   await page.evaluate(() => performance.setResourceTimingBufferSize(100_000));
@@ -135,11 +179,11 @@ async function measureOnce(page, { url, measure, output, steps, timeout, request
   await target.click();
 
   // 3. Wait for the in-page watcher to report back.
-  let timing;
+  let timing: PageTiming;
   try {
     timing = await page.evaluate(() => window.__lensTiming);
   } catch (err) {
-    if (!/No output within/.test(err.message)) throw err;
+    if (!/No output within/.test(messageOf(err))) throw err;
     const exists = await page.evaluate((sel) => !!document.querySelector(sel), output);
     throw new CliError(
       exists
@@ -159,9 +203,9 @@ async function measureOnce(page, { url, measure, output, steps, timeout, request
   return { ms: Math.round(timing.firstPaintAt - timing.clickAt), timing, requests, pick };
 }
 
-const TIMED_OUT = Symbol("timed out");
+const TIMED_OUT: unique symbol = Symbol("timed out");
 
-async function waitUntilFinished(page, r, timeOrigin, timeout) {
+async function waitUntilFinished(page: Page, r: RequestTiming, timeOrigin: number, timeout: number): Promise<RequestTiming> {
   if (r.end !== null || !r.response) return r;
 
   const timer = new AbortController();
@@ -183,16 +227,16 @@ async function waitUntilFinished(page, r, timeOrigin, timeout) {
 // to it. Both come from the browser's own clock, so page time = epoch ms − timeOrigin.
 // (Exception: responseEnd is relative to when the request was issued, not startTime; see
 // describeRequest.)
-function startNetworkCapture(page) {
-  const seen = [];
-  const responses = new Map();
-  const onRequest = (request) => seen.push(request);
-  const onResponse = (response) => responses.set(response.request(), response);
+function startNetworkCapture(page: Page) {
+  const seen: Request[] = [];
+  const responses = new Map<Request, Response>();
+  const onRequest = (request: Request) => seen.push(request);
+  const onResponse = (response: Response) => responses.set(response.request(), response);
   page.on("request", onRequest);
   page.on("response", onResponse);
 
   return {
-    async stop({ firstPaintAt }) {
+    async stop({ firstPaintAt }: PageTiming): Promise<{ requests: RequestTiming[]; timeOrigin: number }> {
       await sleep(NETWORK_SETTLE_MS);
       page.off("request", onRequest);
       page.off("response", onResponse);
@@ -207,10 +251,15 @@ function startNetworkCapture(page) {
   };
 }
 
-function describeRequest(request, response, timeOrigin, entries) {
+function describeRequest(
+  request: Request,
+  response: Response | undefined,
+  timeOrigin: number,
+  entries: ResourceTimingEntry[]
+): RequestTiming {
   const t = request.timing();
   const hasTiming = t.startTime > 0; // stays 0 until response headers arrive
-  const toPage = (relative) => (hasTiming && relative >= 0 ? t.startTime + relative - timeOrigin : null);
+  const toPage = (relative: number) => (hasTiming && relative >= 0 ? t.startTime + relative - timeOrigin : null);
   const start = hasTiming ? t.startTime - timeOrigin : null;
   const rt = start === null ? null : matchResourceTiming(entries, request.url(), start);
 
@@ -218,7 +267,8 @@ function describeRequest(request, response, timeOrigin, entries) {
   // from startTime (request sent). They differ by any CORS preflight, so use the Resource
   // Timing start — which is the fetch() call — as its base when we have it.
   const issuedAt = rt ? rt.startTime : start;
-  const end = hasTiming && t.responseEnd >= 0 ? issuedAt + t.responseEnd : null;
+  // issuedAt is non-null whenever hasTiming is true (start is then a number).
+  const end = hasTiming && t.responseEnd >= 0 ? issuedAt! + t.responseEnd : null;
 
   // DNS/TCP/TLS for a new connection. Playwright's startTime is before all of it; the
   // fields are -1 when an existing connection was reused.
@@ -244,7 +294,7 @@ function describeRequest(request, response, timeOrigin, entries) {
   };
 }
 
-function isJson(body) {
+function isJson(body: string | null): boolean {
   if (!body) return false;
   try {
     JSON.parse(body);
@@ -254,7 +304,7 @@ function isJson(body) {
   }
 }
 
-function chooseRequest(requests, { clickAt, firstPaintAt }, pattern) {
+function chooseRequest(requests: RequestTiming[], { clickAt, firstPaintAt }: PageTiming, pattern: RegExp | null): ScoredRequest | null {
   if (pattern) {
     const match = requests.find((r) => pattern.test(r.url));
     if (!match) {
@@ -264,17 +314,19 @@ function chooseRequest(requests, { clickAt, firstPaintAt }, pattern) {
     return { request: match, reasons: [`matches --request ${pattern}`], from: requests.length };
   }
 
-  const candidates = requests.filter((r) => r.start !== null);
+  const candidates = requests.filter((r): r is TimedRequest => r.start !== null);
   if (candidates.length === 0) return null;
 
   // A request still streaming at first paint has lasted at least until first paint.
-  const duration = (r) => (r.end ?? firstPaintAt) - r.issuedAt;
+  const duration = (r: TimedRequest) => (r.end ?? firstPaintAt) - r.issuedAt;
   const longest = maxBy(candidates, duration);
-  const finishedBeforePaint = candidates.filter((r) => r.end !== null && r.end <= firstPaintAt);
+  const finishedBeforePaint = candidates.filter(
+    (r): r is TimedRequest & { end: number } => r.end !== null && r.end <= firstPaintAt
+  );
   const latestBeforePaint = finishedBeforePaint.length ? maxBy(finishedBeforePaint, (r) => r.end) : null;
 
   const scored = candidates.map((r) => {
-    const reasons = [];
+    const reasons: string[] = [];
     let score = 0;
     const sinceClick = r.issuedAt - clickAt;
     if (sinceClick >= 0 && sinceClick <= 200) {
@@ -302,10 +354,11 @@ function chooseRequest(requests, { clickAt, firstPaintAt }, pattern) {
 
   // Highest score wins; ties go to the longer request.
   scored.sort((a, b) => b.score - a.score || duration(b.request) - duration(a.request));
-  return { ...scored[0], from: requests.length };
+  return { ...scored[0]!, from: requests.length };
 }
 
-function maxBy(items, key) {
+// Callers only pass non-empty arrays.
+function maxBy<T>(items: T[], key: (item: T) => number): T {
   return items.reduce((best, item) => (key(item) > key(best) ? item : best));
 }
 
@@ -313,9 +366,9 @@ function maxBy(items, key) {
 // startTime is when fetch() was called — before any CORS preflight, which Playwright doesn't
 // report — and its responseStart should match our first byte, which makes it a check on the
 // clock alignment. Entries only appear once a response completes.
-function readResourceTiming(page) {
+function readResourceTiming(page: Page): Promise<ResourceTimingEntry[]> {
   return page.evaluate(() =>
-    performance.getEntriesByType("resource").map((e) => ({
+    (performance.getEntriesByType("resource") as PerformanceResourceTiming[]).map((e) => ({
       name: e.name,
       startTime: e.startTime,
       responseStart: e.responseStart, // 0 cross-origin without Timing-Allow-Origin
@@ -324,27 +377,27 @@ function readResourceTiming(page) {
 }
 
 // The latest fetch of this URL that was called before the request was sent.
-function matchResourceTiming(entries, url, start) {
+function matchResourceTiming(entries: ResourceTimingEntry[], url: string, start: number): ResourceTimingEntry | null {
   const candidates = entries.filter((e) => e.name === url && e.startTime <= start + 1);
   return candidates.length ? maxBy(candidates, (e) => e.startTime) : null;
 }
 
-async function findButton(page, text, flag, timeout) {
-  let name;
+async function findButton(page: Page, text: string, flag: string, timeout: number): Promise<Locator> {
+  let name: RegExp;
   try {
     name = new RegExp(text, "i");
   } catch (err) {
-    throw new CliError(`${flag} "${text}" is not a valid regular expression: ${err.message}`);
+    throw new CliError(`${flag} "${text}" is not a valid regular expression: ${messageOf(err)}`);
   }
 
   const button = page.getByRole("button", { name });
   try {
     await button.waitFor({ timeout });
   } catch (err) {
-    if (err.name === "TimeoutError") {
+    if (err instanceof Error && err.name === "TimeoutError") {
       throw new CliError(`No button matching ${name} (${flag}) appeared within ${timeout} ms.`);
     }
-    if (/strict mode violation/.test(err.message)) {
+    if (/strict mode violation/.test(messageOf(err))) {
       const count = await button.count();
       throw new CliError(
         `${flag} "${text}" matches ${count} buttons; make it more specific (e.g. "^${text}$").`
@@ -355,7 +408,7 @@ async function findButton(page, text, flag, timeout) {
   return button;
 }
 
-function formatRun(i, ms) {
+function formatRun(i: number, ms: number): string {
   const label = i === 1 ? `run ${i} (cold)` : `run ${i}`;
   return `${label.padEnd(12)}  ${String(ms).padStart(5)} ms`;
 }
@@ -367,17 +420,17 @@ const PREFLIGHT_MIN_MS = 5;
 // One run's timeline from click to first paint as consecutive segments (ms may be null when
 // unknown), plus the chosen request and the clock check. Shared by the terminal output and
 // the HTML report.
-function breakdown({ timing, pick }) {
+function breakdown({ timing, pick }: RunResult): Breakdown {
   const { clickAt, firstPaintAt } = timing;
   if (!pick) return { request: null, segments: [], clock: null };
 
   const r = pick.request;
   const rt = r.rt;
-  const span = (from, to) => (from === null || to === null ? null : to - from);
-  const segments = [];
+  const span = (from: number | null, to: number | null) => (from === null || to === null ? null : to - from);
+  const segments: Segment[] = [];
 
   const preflight = rt ? span(rt.startTime, r.start) : null;
-  if (preflight !== null && preflight >= PREFLIGHT_MIN_MS) {
+  if (rt && preflight !== null && preflight >= PREFLIGHT_MIN_MS) {
     segments.push({ key: "click", label: "click → fetch() called", ms: span(clickAt, rt.startTime) });
     segments.push({ key: "preflight", label: "CORS preflight", ms: preflight });
   } else {
@@ -408,7 +461,7 @@ function breakdown({ timing, pick }) {
     segments.push({ key: "streaming", label: "first byte → first paint", ms: span(r.firstByte, firstPaintAt), note });
   }
 
-  let clock;
+  let clock: string;
   if (!rt) {
     clock = "n/a (no Resource Timing entry)";
   } else if (rt.responseStart > 0 && r.firstByte !== null) {
@@ -431,10 +484,11 @@ function breakdown({ timing, pick }) {
   };
 }
 
-function formatNetwork({ request, reasons, from, segments, clock }, seen) {
-  if (!request) return `    no timed network request between click and first paint (${seen} seen)`;
+function formatNetwork(parts: Breakdown, seen: number): string {
+  if (!parts.request) return `    no timed network request between click and first paint (${seen} seen)`;
+  const { request, reasons, from, segments, clock } = parts;
 
-  const row = ({ key, label, ms: value, note }) => {
+  const row = ({ key, label, ms: value, note }: Segment) => {
     const suffix = !note ? "" : key === "render" ? `   ← ${note}` : `   (${note})`;
     return `    ${label.padEnd(26)}${value === null ? "     ?" : String(ms(value)).padStart(6)} ms${suffix}`;
   };
@@ -446,23 +500,24 @@ function formatNetwork({ request, reasons, from, segments, clock }, seen) {
   ].join("\n");
 }
 
-function ms(value) {
+function ms(value: number): number {
   return Math.round(value);
 }
 
 // Median covers warm runs (2..N) only; cold is reported on its own; worst covers all runs.
-function summarize([cold, ...warm]) {
-  const worst = Math.max(cold, ...warm);
-  if (warm.length === 0) return { cold, median: null, worst };
+// Called with at least one result (runs >= 1).
+function summarize([cold, ...warm]: number[]): Summary {
+  const worst = Math.max(cold!, ...warm);
+  if (warm.length === 0) return { cold: cold!, median: null, worst };
 
   const sorted = [...warm].sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
   const median =
-    sorted.length % 2 ? sorted[mid] : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
-  return { cold, median, worst };
+    sorted.length % 2 ? sorted[mid]! : Math.round((sorted[mid - 1]! + sorted[mid]!) / 2);
+  return { cold: cold!, median, worst };
 }
 
-function formatSummary({ cold, median, worst }) {
+function formatSummary({ cold, median, worst }: Summary): string {
   if (median === null) return `cold ${cold} ms · worst ${worst} ms (no warm runs for a median)`;
   return `cold ${cold} ms · median ${median} ms · worst ${worst} ms`;
 }
