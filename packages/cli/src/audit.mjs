@@ -1,13 +1,14 @@
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { chromium } from "playwright";
 import { CliError } from "./errors.mjs";
+import { renderReport } from "./report.mjs";
 
 // After first paint, wait this long for network events about pre-paint activity to reach us.
 const NETWORK_SETTLE_MS = 200;
 
-export async function audit({ url, measure, output, steps, runs, headed, auth, timeout, request }) {
+export async function audit({ url, measure, output, steps, runs, headed, auth, timeout, request, report }) {
   const authPath = resolve(auth);
   if (!existsSync(authPath)) {
     throw new CliError(
@@ -28,7 +29,9 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
 
   try {
     const context = await browser.newContext({ storageState: authPath });
+    const startedAt = new Date();
     const results = [];
+    const breakdowns = [];
 
     for (let i = 1; i <= runs; i++) {
       // Fresh page per run so every run starts from the same state.
@@ -36,15 +39,33 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
       page.setDefaultTimeout(timeout);
       try {
         const run = await measureOnce(page, { url, measure, output, steps, timeout, requestPattern });
+        const parts = breakdown(run);
         results.push(run.ms);
+        breakdowns.push(parts);
         console.log(formatRun(i, run.ms));
-        console.log(formatNetwork(run));
+        console.log(formatNetwork(parts, run.requests.length));
       } finally {
         await page.close();
       }
     }
 
-    console.log(formatSummary(results));
+    const summary = summarize(results);
+    console.log(formatSummary(summary));
+
+    if (report) {
+      const reportPath = resolve(report);
+      const html = renderReport({
+        url,
+        measure,
+        output,
+        steps,
+        startedAt,
+        summary,
+        runs: results.map((total, i) => ({ total, ...breakdowns[i] })),
+      });
+      writeFileSync(reportPath, html);
+      console.log(`report: ${reportPath}`);
+    }
   } finally {
     await browser.close();
   }
@@ -343,49 +364,86 @@ function formatRun(i, ms) {
 // (~1 ms), not a preflight.
 const PREFLIGHT_MIN_MS = 5;
 
-function formatNetwork({ timing, requests, pick }) {
+// One run's timeline from click to first paint as consecutive segments (ms may be null when
+// unknown), plus the chosen request and the clock check. Shared by the terminal output and
+// the HTML report.
+function breakdown({ timing, pick }) {
   const { clickAt, firstPaintAt } = timing;
-  if (!pick) return `    no timed network request between click and first paint (${requests.length} seen)`;
+  if (!pick) return { request: null, segments: [], clock: null };
 
   const r = pick.request;
   const rt = r.rt;
-  const lines = [
-    `    ${r.method} ${r.url} → ${r.status ?? r.failure ?? "no response"} ${r.contentType ?? ""}`.trimEnd(),
-    `    chosen from ${pick.from} request(s): ${pick.reasons.join(", ") || "only candidate"}`,
-  ];
-  const row = (label, value, note = "") =>
-    `    ${label.padEnd(26)}${value === null ? "     ?" : String(ms(value)).padStart(6)} ms${note}`;
   const span = (from, to) => (from === null || to === null ? null : to - from);
+  const segments = [];
 
   const preflight = rt ? span(rt.startTime, r.start) : null;
   if (preflight !== null && preflight >= PREFLIGHT_MIN_MS) {
-    lines.push(row("click → fetch() called", span(clickAt, rt.startTime)));
-    lines.push(row("CORS preflight", preflight));
+    segments.push({ key: "click", label: "click → fetch() called", ms: span(clickAt, rt.startTime) });
+    segments.push({ key: "preflight", label: "CORS preflight", ms: preflight });
   } else {
-    lines.push(row("click → request sent", span(clickAt, r.start)));
+    segments.push({ key: "click", label: "click → request sent", ms: span(clickAt, r.start) });
   }
-  if (ms(r.connectionSetup) > 0) lines.push(row("connection setup", r.connectionSetup, "   (new connection)"));
+  if (ms(r.connectionSetup) > 0) {
+    segments.push({ key: "connection", label: "connection setup", ms: r.connectionSetup, note: "new connection" });
+  }
   const toFirstByte = span(r.start, r.firstByte);
-  lines.push(row("request → first byte", toFirstByte === null ? null : toFirstByte - r.connectionSetup));
+  segments.push({
+    key: "ttfb",
+    label: "request → first byte",
+    ms: toFirstByte === null ? null : toFirstByte - r.connectionSetup,
+  });
   if (r.end !== null && r.end <= firstPaintAt) {
-    lines.push(row("first byte → done", span(r.firstByte, r.end)));
-    lines.push(row("done → first paint", span(r.end, firstPaintAt), "   ← what Lighthouse can't see"));
+    segments.push({ key: "download", label: "first byte → done", ms: span(r.firstByte, r.end) });
+    segments.push({
+      key: "render",
+      label: "done → first paint",
+      ms: span(r.end, firstPaintAt),
+      note: "what Lighthouse can't see",
+    });
   } else {
     const note =
-      r.firstByte === null ? "   (no response by first paint)"
-      : r.end === null ? "   (still streaming at first paint)"
-      : `   (done ${ms(r.end - firstPaintAt)} ms after paint)`;
-    lines.push(row("first byte → first paint", span(r.firstByte, firstPaintAt), note));
+      r.firstByte === null ? "no response by first paint"
+      : r.end === null ? "still streaming at first paint"
+      : `done ${ms(r.end - firstPaintAt)} ms after paint`;
+    segments.push({ key: "streaming", label: "first byte → first paint", ms: span(r.firstByte, firstPaintAt), note });
   }
+
+  let clock;
   if (!rt) {
-    lines.push("    clock check: n/a (no Resource Timing entry)");
+    clock = "n/a (no Resource Timing entry)";
   } else if (rt.responseStart > 0 && r.firstByte !== null) {
-    const skew = Math.abs(r.firstByte - rt.responseStart);
-    lines.push(`    clock check: first byte within ${skew.toFixed(1)} ms of Resource Timing`);
+    clock = `first byte within ${Math.abs(r.firstByte - rt.responseStart).toFixed(1)} ms of Resource Timing`;
   } else {
-    lines.push("    clock check: n/a (Resource Timing hides first byte without Timing-Allow-Origin)");
+    clock = "n/a (Resource Timing hides first byte without Timing-Allow-Origin)";
   }
-  return lines.join("\n");
+
+  return {
+    request: {
+      method: r.method,
+      url: r.url,
+      status: r.status ?? r.failure ?? "no response",
+      contentType: r.contentType,
+    },
+    reasons: pick.reasons,
+    from: pick.from,
+    segments,
+    clock,
+  };
+}
+
+function formatNetwork({ request, reasons, from, segments, clock }, seen) {
+  if (!request) return `    no timed network request between click and first paint (${seen} seen)`;
+
+  const row = ({ key, label, ms: value, note }) => {
+    const suffix = !note ? "" : key === "render" ? `   ← ${note}` : `   (${note})`;
+    return `    ${label.padEnd(26)}${value === null ? "     ?" : String(ms(value)).padStart(6)} ms${suffix}`;
+  };
+  return [
+    `    ${request.method} ${request.url} → ${request.status} ${request.contentType ?? ""}`.trimEnd(),
+    `    chosen from ${from} request(s): ${reasons.join(", ") || "only candidate"}`,
+    ...segments.map(row),
+    `    clock check: ${clock}`,
+  ].join("\n");
 }
 
 function ms(value) {
@@ -393,13 +451,18 @@ function ms(value) {
 }
 
 // Median covers warm runs (2..N) only; cold is reported on its own; worst covers all runs.
-function formatSummary([cold, ...warm]) {
+function summarize([cold, ...warm]) {
   const worst = Math.max(cold, ...warm);
-  if (warm.length === 0) return `cold ${cold} ms · worst ${worst} ms (no warm runs for a median)`;
+  if (warm.length === 0) return { cold, median: null, worst };
 
   const sorted = [...warm].sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
   const median =
     sorted.length % 2 ? sorted[mid] : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
+  return { cold, median, worst };
+}
+
+function formatSummary({ cold, median, worst }) {
+  if (median === null) return `cold ${cold} ms · worst ${worst} ms (no warm runs for a median)`;
   return `cold ${cold} ms · median ${median} ms · worst ${worst} ms`;
 }

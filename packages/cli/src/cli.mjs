@@ -2,16 +2,19 @@
 import { parseArgs } from "node:util";
 import { CliError } from "./errors.mjs";
 
+const DEFAULT_REPORT = "caliper-report.html";
+
 const USAGE = `Usage:
   context-lens login <url> [--auth auth.json]
       Open a browser, log in by hand, save the session.
 
   context-lens audit <url> --measure <text> --output <selector>
       [--step <text>]... [--runs 3] [--headed] [--auth auth.json] [--timeout 60000]
-      [--request <regex>]
+      [--request <regex>] [--report [path]]
       Measure time from clicking the --measure button to first painted output,
       and break it down using the AI request (auto-detected, or the first whose
-      URL matches --request).
+      URL matches --request). --report writes an HTML timeline
+      (default: ${DEFAULT_REPORT}).
 
   --step and --measure are button names, matched as case-insensitive regexes.`;
 
@@ -36,7 +39,9 @@ const COMMANDS = {
       auth: { type: "string", default: "auth.json" },
       timeout: { type: "string", default: "60000" },
       request: { type: "string" },
+      report: { type: "string" },
     },
+    optionalValues: { report: DEFAULT_REPORT },
     async run({ url, values }) {
       if (!values.measure) throw new CliError("audit: --measure <text> is required.");
       if (!values.output) throw new CliError("audit: --output <selector> is required.");
@@ -52,10 +57,23 @@ const COMMANDS = {
         auth: values.auth,
         timeout: positiveInt(values.timeout, "--timeout"),
         request: values.request,
+        report: values.report,
       });
     },
   },
 };
+
+// parseArgs has no optional-value options, so a bare `--flag` (followed by nothing, another
+// flag, or the <url>) becomes `--flag=<default>`.
+function withOptionalValues(args, defaults) {
+  return args.map((arg, i) => {
+    const name = arg.startsWith("--") ? arg.slice(2) : null;
+    if (!(name in defaults)) return arg;
+    const next = args[i + 1];
+    const takesNext = next !== undefined && !next.startsWith("-") && !/^[a-z][a-z\d+.-]*:\/\//i.test(next);
+    return takesNext ? arg : `${arg}=${defaults[name]}`;
+  });
+}
 
 function positiveInt(value, flag) {
   const n = Number(value);
@@ -79,7 +97,7 @@ async function main(argv) {
   let parsed;
   try {
     parsed = parseArgs({
-      args: rest,
+      args: withOptionalValues(rest, command.optionalValues ?? {}),
       options: { ...command.options, help: { type: "boolean", short: "h" } },
       allowPositionals: true,
       strict: true,
