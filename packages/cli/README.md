@@ -1,6 +1,6 @@
 # caliper-ai
 
-TODO: Jiya writes this
+Caliper is Lighthouse for AI interfaces. Everyone is shipping AI features, but almost nobody measures what users go through after they press Generate. Caliper clicks through your AI feature like a real user, times how long it takes for the first word to appear on screen, and breaks that wait down step by step, so you can see exactly where the time goes.
 
 ## Install
 
