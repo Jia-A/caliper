@@ -7,6 +7,8 @@ import { CliError, messageOf } from "./errors.js";
 import { renderReport } from "./report.js";
 import type {
   Breakdown,
+  DoneSummary,
+  DoneTiming,
   PageTiming,
   RequestTiming,
   ResourceTimingEntry,
@@ -21,11 +23,15 @@ import type {
 declare global {
   interface Window {
     __lensTiming: Promise<PageTiming>;
+    __lensDone: Promise<DoneTiming>;
   }
 }
 
 // After first paint, wait this long for network events about pre-paint activity to reach us.
 const NETWORK_SETTLE_MS = 200;
+
+// Give up waiting for the output to settle this long after the first word.
+const DONE_CAP_MS = 60_000;
 
 export interface AuditOptions {
   url: string;
@@ -36,6 +42,7 @@ export interface AuditOptions {
   headed: boolean;
   auth: string;
   timeout: number;
+  settleMs: number;
   request: string | undefined;
   report: string | undefined;
 }
@@ -46,10 +53,11 @@ interface MeasureOptions {
   output: string;
   steps: string[];
   timeout: number;
+  settleMs: number;
   requestPattern: RegExp | null;
 }
 
-export async function audit({ url, measure, output, steps, runs, headed, auth, timeout, request, report }: AuditOptions): Promise<void> {
+export async function audit({ url, measure, output, steps, runs, headed, auth, timeout, settleMs, request, report }: AuditOptions): Promise<void> {
   const authPath = resolve(auth);
   if (!existsSync(authPath)) {
     throw new CliError(
@@ -72,6 +80,7 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
     const context = await browser.newContext({ storageState: authPath });
     const startedAt = new Date();
     const results: number[] = [];
+    const runResults: RunResult[] = [];
     const breakdowns: Breakdown[] = [];
 
     for (let i = 1; i <= runs; i++) {
@@ -79,12 +88,14 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
       const page = await context.newPage();
       page.setDefaultTimeout(timeout);
       try {
-        const run = await measureOnce(page, { url, measure, output, steps, timeout, requestPattern });
+        const run = await measureOnce(page, { url, measure, output, steps, timeout, settleMs, requestPattern });
         const parts = breakdown(run);
         results.push(run.ms);
+        runResults.push(run);
         breakdowns.push(parts);
         console.log(formatRun(i, run.ms));
         console.log(formatNetwork(parts, run.requests.length));
+        console.log(formatDone(run));
       } finally {
         await page.close();
       }
@@ -92,6 +103,7 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
 
     const summary = summarize(results);
     console.log(formatSummary(summary));
+    console.log(formatDoneSummary(summarizeDone(runResults)));
 
     if (report) {
       const reportPath = resolve(report);
@@ -112,7 +124,7 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
   }
 }
 
-async function measureOnce(page: Page, { url, measure, output, steps, timeout, requestPattern }: MeasureOptions): Promise<RunResult> {
+async function measureOnce(page: Page, { url, measure, output, steps, timeout, settleMs, requestPattern }: MeasureOptions): Promise<RunResult> {
   await page.goto(url);
 
   for (const step of steps) {
@@ -135,8 +147,8 @@ async function measureOnce(page: Page, { url, measure, output, steps, timeout, r
 
   // 1. Install the watcher INSIDE the page, before clicking.
   //    This function runs in the browser: it can only use DOM globals and its argument.
-  const watcherArgs: [string, number] = [output, timeout];
-  await page.evaluate(([outputSelector, timeoutMs]) => {
+  const watcherArgs: [string, number, number, number] = [output, timeout, settleMs, DONE_CAP_MS];
+  await page.evaluate(([outputSelector, timeoutMs, settleMs, capMs]) => {
     const read = () => {
       const el = document.querySelector(outputSelector);
       if (!el) return "";
@@ -144,21 +156,41 @@ async function measureOnce(page: Page, { url, measure, output, steps, timeout, r
       return (el as Element & { value?: string }).value ?? el.textContent; // textarea/input → .value, anything else → text
     };
 
+    let resolveDone!: (done: DoneTiming) => void;
+    window.__lensDone = new Promise((resolve) => (resolveDone = resolve));
+
     window.__lensTiming = new Promise((resolve, reject) => {
       document.addEventListener(
         "click",
         (event) => {
           const clickAt = event.timeStamp; // same clock as performance.now()
           const before = read();
+          let firstChangeAt: number | null = null;
+          let lastChangeAt = 0;
+          let last = before;
 
           function check() {
+            const t = performance.now();
             const now = read();
-            if (now && now !== before) {
-              resolve({ clickAt, firstPaintAt: performance.now() });
+            if (firstChangeAt === null) {
+              // First word: the first frame with non-empty output that differs from before the click.
+              if (now && now !== before) {
+                firstChangeAt = lastChangeAt = t;
+                last = now;
+                resolve({ clickAt, firstPaintAt: t });
+              } else if (t - clickAt > timeoutMs) {
+                reject(new Error(`No output within ${timeoutMs / 1000}s`));
+                return;
+              }
+            } else if (now !== last) {
+              lastChangeAt = t;
+              last = now;
+            } else if (t - lastChangeAt >= settleMs) {
+              resolveDone({ settled: true, doneAt: lastChangeAt });
               return;
             }
-            if (performance.now() - clickAt > timeoutMs) {
-              reject(new Error(`No output within ${timeoutMs / 1000}s`));
+            if (firstChangeAt !== null && t - firstChangeAt > capMs) {
+              resolveDone({ settled: false, lastChangeAt });
               return;
             }
             requestAnimationFrame(check);
@@ -200,7 +232,10 @@ async function measureOnce(page: Page, { url, measure, output, steps, timeout, r
     pick.request = await waitUntilFinished(page, pick.request, timeOrigin, timeout);
   }
 
-  return { ms: Math.round(timing.firstPaintAt - timing.clickAt), timing, requests, pick };
+  // 4. Wait for the output to stop changing (the watcher caps this itself).
+  const done = await page.evaluate(() => window.__lensDone);
+
+  return { ms: Math.round(timing.firstPaintAt - timing.clickAt), timing, done, requests, pick };
 }
 
 const TIMED_OUT: unique symbol = Symbol("timed out");
@@ -413,6 +448,27 @@ function formatRun(i: number, ms: number): string {
   return `${label.padEnd(12)}  ${String(ms).padStart(5)} ms`;
 }
 
+// A streaming span shorter than this means the answer arrived in one go.
+const STREAMS_MIN_MS = 250;
+
+function formatDone({ timing, done }: RunResult): string {
+  const row = (label: string, value: number) => `    ${label.padEnd(26)}${String(ms(value)).padStart(6)} ms`;
+  const lines = [row("click → first word", timing.firstPaintAt - timing.clickAt)];
+  if (!done.settled) {
+    lines.push(`    click → done              did not settle within ${DONE_CAP_MS / 1000}s of first word`);
+    return lines.join("\n");
+  }
+  const span = done.doneAt - timing.firstPaintAt;
+  lines.push(row("click → done", done.doneAt - timing.clickAt));
+  lines.push(row("streaming span", span));
+  lines.push(`    ${verdict(span)}`);
+  return lines.join("\n");
+}
+
+function verdict(span: number): string {
+  return span < STREAMS_MIN_MS ? "Doesn't stream: users see nothing until the whole answer is ready." : "Streams.";
+}
+
 // Gaps smaller than this between fetch() and the request going out are normal overhead
 // (~1 ms), not a preflight.
 const PREFLIGHT_MIN_MS = 5;
@@ -508,16 +564,38 @@ function ms(value: number): number {
 // Called with at least one result (runs >= 1).
 function summarize([cold, ...warm]: number[]): Summary {
   const worst = Math.max(cold!, ...warm);
-  if (warm.length === 0) return { cold: cold!, median: null, worst };
+  return { cold: cold!, median: median(warm), worst };
+}
 
-  const sorted = [...warm].sort((a, b) => a - b);
+// Same warm-runs rule for done and span. Runs that never settled have no done time, so they
+// are left out and counted.
+function summarizeDone([, ...warm]: RunResult[]): DoneSummary {
+  const settled = warm.flatMap(({ timing, done }) =>
+    done.settled ? [{ done: done.doneAt - timing.clickAt, span: done.doneAt - timing.firstPaintAt }] : []
+  );
+  return {
+    done: median(settled.map((r) => r.done)),
+    span: median(settled.map((r) => r.span)),
+    warm: warm.length,
+    unsettled: warm.length - settled.length,
+  };
+}
+
+function median(values: number[]): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
-  const median =
-    sorted.length % 2 ? sorted[mid]! : Math.round((sorted[mid - 1]! + sorted[mid]!) / 2);
-  return { cold: cold!, median, worst };
+  return Math.round(sorted.length % 2 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2);
 }
 
 function formatSummary({ cold, median, worst }: Summary): string {
   if (median === null) return `cold ${cold} ms · worst ${worst} ms (no warm runs for a median)`;
   return `cold ${cold} ms · median ${median} ms · worst ${worst} ms`;
+}
+
+function formatDoneSummary({ done, span, warm, unsettled }: DoneSummary): string {
+  if (warm === 0) return "done: no warm runs for a median, so no verdict";
+  const skipped = unsettled ? ` (${unsettled} of ${warm} warm runs did not settle; left out)` : "";
+  if (done === null || span === null) return `done: no warm run settled within ${DONE_CAP_MS / 1000}s, so no verdict`;
+  return `done: median ${done} ms · span median ${span} ms${skipped}\n${verdict(span)}`;
 }

@@ -8,6 +8,14 @@ export interface PageTiming {
   firstPaintAt: number;
 }
 
+/**
+ * When the output stopped changing. doneAt is the last change, not the end of the settle
+ * window; settled is false when it was still changing at the cap.
+ */
+export type DoneTiming =
+  | { settled: true; doneAt: number }
+  | { settled: false; lastChangeAt: number };
+
 /** The fields Caliper reads from one PerformanceResourceTiming entry. */
 export interface ResourceTimingEntry {
   name: string;
@@ -49,6 +57,7 @@ export interface ScoredRequest {
 export interface RunResult {
   ms: number; // click → first paint, rounded
   timing: PageTiming;
+  done: DoneTiming;
   requests: RequestTiming[];
   pick: ScoredRequest | null;
 }
@@ -88,4 +97,12 @@ export interface Summary {
   cold: number;
   median: number | null;
   worst: number;
+}
+
+/** Warm-run medians for done; null when no warm run settled. */
+export interface DoneSummary {
+  done: number | null;
+  span: number | null;
+  warm: number; // warm runs
+  unsettled: number; // warm runs left out because they never settled
 }
