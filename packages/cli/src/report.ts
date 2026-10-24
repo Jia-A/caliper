@@ -1,6 +1,6 @@
 // Self-contained HTML timeline for an audit: inline CSS/JS, no external requests.
 
-import type { Breakdown, Segment, SegmentKey, Summary } from "./types.js";
+import type { Breakdown, Segment, SegmentKey, StopReport, Summary } from "./types.js";
 
 export type ReportRun = Breakdown & { total: number };
 
@@ -12,6 +12,7 @@ export interface ReportInput {
   startedAt: Date;
   summary: Summary;
   runs: ReportRun[];
+  stop: (StopReport & { pattern: string }) | null; // null without --stop
 }
 
 /** A segment as drawn: known, non-negative width. */
@@ -31,7 +32,7 @@ const SEGMENTS: { key: SegmentKey; legend: string }[] = [
   { key: "other", legend: "unattributed" },
 ];
 
-export function renderReport({ url, measure, output, steps, startedAt, summary, runs }: ReportInput): string {
+export function renderReport({ url, measure, output, steps, startedAt, summary, runs, stop }: ReportInput): string {
   const bars: ChartRun[] = runs.map((run) => ({ ...run, bars: barSegments(run) }));
   const scale = Math.max(...runs.map((r) => r.total), 1);
   const ticks = niceTicks(scale);
@@ -103,6 +104,7 @@ export function renderReport({ url, measure, output, steps, startedAt, summary, 
     </table>
     </div>
   </section>
+  ${stop ? stopSection(stop) : ""}
 </main>
 <div id="tip" role="tooltip" hidden></div>
 <script>${JS}</script>
@@ -181,6 +183,24 @@ function requestRow(run: ReportRun, i: number): string {
           <td>${run.request ? esc(run.reasons.join(", ") || "only candidate") : "—"}</td>
           <td>${esc(run.clock ?? "—")}</td>
         </tr>`;
+}
+
+function stopSection({ pattern, verdict, checks, notes }: StopReport & { pattern: string }): string {
+  const mark = (pass: boolean | null) =>
+    pass === null ? `<span class="mark muted">? not checked</span>`
+    : pass ? `<span class="mark">✓ pass</span>`
+    : `<span class="mark">✗ fail</span>`;
+  return `<section aria-labelledby="stop-h">
+    <h2 id="stop-h">Stop check</h2>
+    <div class="stop">
+      <p class="muted">Stop button <code>${esc(String(new RegExp(pattern, "i")))}</code>, one extra run on a fresh page</p>
+      <p class="verdict">${esc(verdict)}</p>
+      ${checks.length ? `<table><tbody>
+        ${checks.map((c) => `<tr><th scope="row">${esc(c.label)}</th><td>${mark(c.pass)}</td><td class="wrap">${esc(c.detail)}</td></tr>`).join("")}
+      </tbody></table>` : ""}
+      <ul class="notes">${notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>
+    </div>
+  </section>`;
 }
 
 const runName = (i: number) => `run&nbsp;${i + 1}${i === 0 ? " (cold)" : ""}`;
@@ -284,6 +304,11 @@ thead th { color: var(--ink-2); font-weight: 600; }
 tbody tr:last-child > * { border-bottom: 0; }
 .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .note { display: block; white-space: normal; font-size: 12px; }
+.stop { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+.stop p { margin: 0 0 8px; }
+.verdict { font-size: 18px; font-weight: 600; }
+.mark { white-space: nowrap; }
+.notes { margin: 12px 0 0; padding-left: 18px; color: var(--ink-2); }
 #tip { position: fixed; z-index: 10; pointer-events: none; max-width: 320px; background: var(--ink); color: var(--surface);
   font-size: 12px; padding: 6px 8px; border-radius: 6px; }
 @media (max-width: 640px) {

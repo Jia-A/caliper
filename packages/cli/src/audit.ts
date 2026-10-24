@@ -10,11 +10,16 @@ import type {
   DoneSummary,
   DoneTiming,
   PageTiming,
+  RequestSummary,
   RequestTiming,
   ResourceTimingEntry,
   RunResult,
   ScoredRequest,
   Segment,
+  StopCheck,
+  StopEnd,
+  StopReport,
+  StopResult,
   Summary,
   TimedRequest,
 } from "./types.js";
@@ -24,6 +29,8 @@ declare global {
   interface Window {
     __lensTiming: Promise<PageTiming>;
     __lensDone: Promise<DoneTiming>;
+    __lensLastChangeAt: number; // the watcher's latest output change; -1 before the first word
+    __lensStopClickAt: Promise<number>;
   }
 }
 
@@ -45,6 +52,7 @@ export interface AuditOptions {
   settleMs: number;
   request: string | undefined;
   report: string | undefined;
+  stop: string | undefined;
 }
 
 interface MeasureOptions {
@@ -57,7 +65,7 @@ interface MeasureOptions {
   requestPattern: RegExp | null;
 }
 
-export async function audit({ url, measure, output, steps, runs, headed, auth, timeout, settleMs, request, report }: AuditOptions): Promise<void> {
+export async function audit({ url, measure, output, steps, runs, headed, auth, timeout, settleMs, request, report, stop }: AuditOptions): Promise<void> {
   const authPath = resolve(auth);
   if (!existsSync(authPath)) {
     throw new CliError(
@@ -71,6 +79,15 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
       requestPattern = new RegExp(request, "i");
     } catch (err) {
       throw new CliError(`--request "${request}" is not a valid regular expression: ${messageOf(err)}`);
+    }
+  }
+
+  let stopPattern: RegExp | null = null;
+  if (stop) {
+    try {
+      stopPattern = new RegExp(stop, "i");
+    } catch (err) {
+      throw new CliError(`--stop "${stop}" is not a valid regular expression: ${messageOf(err)}`);
     }
   }
 
@@ -105,6 +122,21 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
     console.log(formatSummary(summary));
     console.log(formatDoneSummary(summarizeDone(runResults)));
 
+    let stopReport: StopReport | null = null;
+    if (stopPattern) {
+      // Its own fresh page, after the timed runs, so clicking Stop doesn't skew their numbers.
+      const page = await context.newPage();
+      page.setDefaultTimeout(timeout);
+      try {
+        stopReport = describeStop(
+          await stopOnce(page, { url, measure, output, steps, timeout, settleMs, requestPattern }, stopPattern)
+        );
+        console.log(formatStop(stopReport));
+      } finally {
+        await page.close();
+      }
+    }
+
     if (report) {
       const reportPath = resolve(report);
       const html = renderReport({
@@ -115,6 +147,7 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
         startedAt,
         summary,
         runs: results.map((total, i) => ({ total, ...breakdowns[i]! })),
+        stop: stopReport && { pattern: stop!, ...stopReport },
       });
       writeFileSync(reportPath, html);
       console.log(`report: ${reportPath}`);
@@ -124,7 +157,34 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
   }
 }
 
-async function measureOnce(page: Page, { url, measure, output, steps, timeout, settleMs, requestPattern }: MeasureOptions): Promise<RunResult> {
+async function measureOnce(page: Page, options: MeasureOptions): Promise<RunResult> {
+  const { timeout, requestPattern } = options;
+  const target = await prepareRun(page, options);
+
+  // 2. Click — this is where the timer starts. Network capture starts just before it.
+  const network = startNetworkCapture(page);
+  await target.click();
+
+  // 3. Wait for the in-page watcher to report back.
+  const timing = await waitForFirstWord(page, options);
+
+  const { requests, timeOrigin } = await network.stop(timing);
+  const pick = chooseRequest(requests, timing, requestPattern);
+  if (pick) {
+    // A streaming response is usually still open at first paint, and its Resource Timing
+    // entry only appears once it completes, so wait for it.
+    pick.request = await waitUntilFinished(page, pick.request, timeOrigin, timeout);
+  }
+
+  // 4. Wait for the output to stop changing (the watcher caps this itself).
+  const done = await page.evaluate(() => window.__lensDone);
+
+  return { ms: Math.round(timing.firstPaintAt - timing.clickAt), timing, done, requests, pick };
+}
+
+// Loads the page, clicks the --step buttons and installs the watcher. Returns the --measure
+// button, ready to click.
+async function prepareRun(page: Page, { url, measure, output, steps, timeout, settleMs }: MeasureOptions): Promise<Locator> {
   await page.goto(url);
 
   for (const step of steps) {
@@ -156,6 +216,7 @@ async function measureOnce(page: Page, { url, measure, output, steps, timeout, s
       return (el as Element & { value?: string }).value ?? el.textContent; // textarea/input → .value, anything else → text
     };
 
+    window.__lensLastChangeAt = -1;
     let resolveDone!: (done: DoneTiming) => void;
     window.__lensDone = new Promise((resolve) => (resolveDone = resolve));
 
@@ -175,7 +236,7 @@ async function measureOnce(page: Page, { url, measure, output, steps, timeout, s
             if (firstChangeAt === null) {
               // First word: the first frame with non-empty output that differs from before the click.
               if (now && now !== before) {
-                firstChangeAt = lastChangeAt = t;
+                firstChangeAt = lastChangeAt = window.__lensLastChangeAt = t;
                 last = now;
                 resolve({ clickAt, firstPaintAt: t });
               } else if (t - clickAt > timeoutMs) {
@@ -183,7 +244,7 @@ async function measureOnce(page: Page, { url, measure, output, steps, timeout, s
                 return;
               }
             } else if (now !== last) {
-              lastChangeAt = t;
+              lastChangeAt = window.__lensLastChangeAt = t;
               last = now;
             } else if (t - lastChangeAt >= settleMs) {
               resolveDone({ settled: true, doneAt: lastChangeAt });
@@ -205,15 +266,12 @@ async function measureOnce(page: Page, { url, measure, output, steps, timeout, s
 
   // A full Resource Timing buffer (default 250 entries) would drop the AI request's entry.
   await page.evaluate(() => performance.setResourceTimingBufferSize(100_000));
+  return target;
+}
 
-  // 2. Click — this is where the timer starts. Network capture starts just before it.
-  const network = startNetworkCapture(page);
-  await target.click();
-
-  // 3. Wait for the in-page watcher to report back.
-  let timing: PageTiming;
+async function waitForFirstWord(page: Page, { measure, output, timeout }: MeasureOptions): Promise<PageTiming> {
   try {
-    timing = await page.evaluate(() => window.__lensTiming);
+    return await page.evaluate(() => window.__lensTiming);
   } catch (err) {
     if (!/No output within/.test(messageOf(err))) throw err;
     const exists = await page.evaluate((sel) => !!document.querySelector(sel), output);
@@ -223,19 +281,121 @@ async function measureOnce(page: Page, { url, measure, output, steps, timeout, s
         : `Timed out after ${timeout} ms: no element matches --output "${output}".`
     );
   }
+}
 
-  const { requests, timeOrigin } = await network.stop(timing);
-  const pick = chooseRequest(requests, timing, requestPattern);
-  if (pick) {
-    // A streaming response is usually still open at first paint, and its Resource Timing
-    // entry only appears once it completes, so wait for it.
-    pick.request = await waitUntilFinished(page, pick.request, timeOrigin, timeout);
+// Stop check: click Stop this long after the first word...
+const STOP_AFTER_MS = 500;
+// ...once the output has changed again within this long (else the stream already ended).
+const STILL_CHANGING_MS = 1000;
+// Wait this long for the Stop button to be visible.
+const STOP_FIND_MS = 2000;
+// The output may still change this long after Stop (a last render) and count as stopped.
+const STOP_PIXELS_MS = 1000;
+
+// One extra run: start an answer, click Stop mid-stream, and see what the browser did.
+// Every outcome is returned as a result, never thrown, except the setup errors any run has.
+async function stopOnce(page: Page, options: MeasureOptions, stopPattern: RegExp): Promise<StopResult> {
+  // The watcher stops tracking once the output settles, so it mustn't settle before Stop.
+  let target: Locator;
+  try {
+    target = await prepareRun(page, { ...options, settleMs: Math.max(options.settleMs, STOP_AFTER_MS + STILL_CHANGING_MS) });
+  } catch (err) {
+    // Playwright errors carry a multi-line call log; the first line is the message.
+    return { kind: "load-failed", error: messageOf(err).split("\n")[0]!.trim() };
   }
+  const timeOrigin = await page.evaluate(() => performance.timeOrigin);
+  const wire = await startWireCapture(page, timeOrigin);
+  const outcomes = trackOutcomes(page);
 
-  // 4. Wait for the output to stop changing (the watcher caps this itself).
-  const done = await page.evaluate(() => window.__lensDone);
+  try {
+    const network = startNetworkCapture(page);
+    await target.click();
+    let timing: PageTiming;
+    try {
+      timing = await waitForFirstWord(page, options);
+    } catch (err) {
+      // waitForFirstWord throws a CliError only for the timeout; anything else is a real failure.
+      if (!(err instanceof CliError)) throw err;
+      return { kind: "no-first-word", error: err.message };
+    }
+    const [{ requests }] = await Promise.all([network.stop(timing), sleep(STOP_AFTER_MS)]);
+    const r = chooseRequest(requests, timing, options.requestPattern)?.request ?? null;
 
-  return { ms: Math.round(timing.firstPaintAt - timing.clickAt), timing, done, requests, pick };
+    // Still streaming? Wait for one more change in the output.
+    const mark = await page.evaluate(() => performance.now());
+    const changing = await page
+      .waitForFunction((m) => window.__lensLastChangeAt > m, mark, { polling: "raf", timeout: STILL_CHANGING_MS })
+      .then(() => true, (err: unknown) => {
+        if (err instanceof Error && err.name === "TimeoutError") return false;
+        throw err;
+      });
+    if (!changing) {
+      const span = (await page.evaluate(() => window.__lensLastChangeAt)) - timing.firstPaintAt;
+      const endedBeforePaint = r?.end != null && r.end <= timing.firstPaintAt;
+      if (span < STREAMS_MIN_MS || endedBeforePaint) return { kind: "doesnt-stream", span };
+      return { kind: "finished-before-click", span, requestEnded: !!r && outcomes.get(r.raw)?.kind === "finished" };
+    }
+
+    const stop = page.getByRole("button", { name: stopPattern });
+    try {
+      await stop.waitFor({ timeout: STOP_FIND_MS });
+    } catch (err) {
+      if (err instanceof Error && err.name === "TimeoutError") {
+        return { kind: "no-control", reason: `no visible button matching ${stopPattern} while the answer was streaming` };
+      }
+      if (/strict mode violation/.test(messageOf(err))) {
+        return { kind: "ambiguous-control", count: await stop.count() };
+      }
+      throw err;
+    }
+
+    // Time the Stop click on the page clock, like the --measure click.
+    await page.evaluate(() => {
+      window.__lensStopClickAt = new Promise((resolve) =>
+        document.addEventListener("click", (e) => resolve(e.timeStamp), { capture: true, once: true })
+      );
+    });
+    await stop.click();
+    const stopAt = await page.evaluate(() => window.__lensStopClickAt);
+
+    // (1) Pixels: the watcher resolves once the output has been unchanged for settle-ms.
+    const done = await page.evaluate(() => window.__lensDone);
+    const outputStoppedAfter = done.settled ? Math.max(0, done.doneAt - stopAt) : null;
+    await sleep(NETWORK_SETTLE_MS); // let the last network events reach us
+
+    if (!r) return { kind: "clicked", afterFirstWord: stopAt - timing.firstPaintAt, outputStoppedAfter, network: null };
+
+    // (2) + (3) Network: how the AI request ended, and when its bytes arrived.
+    const w = wire.match(r);
+    const after = (t: number | null) => (w && t !== null ? t - stopAt : null);
+    const bytesSince = (t: number) => w!.chunks.filter((c) => c.at > t).reduce((sum, c) => sum + c.bytes, 0);
+    const outcome = outcomes.get(r.raw);
+    const end: StopEnd =
+      !outcome ? { kind: "open" }
+      : outcome.kind === "finished" ? { kind: "finished", at: after(w?.finishedAt ?? null) }
+      : /ERR_ABORTED/.test(outcome.errorText) ? { kind: "aborted", errorText: outcome.errorText, at: after(w?.failedAt ?? null) }
+      : { kind: "failed", errorText: outcome.errorText, at: after(w?.failedAt ?? null) };
+
+    // A request that ended normally before the click was over before Stop could matter.
+    if (end.kind === "finished" && end.at !== null && end.at <= 0) {
+      return { kind: "finished-before-click", span: stopAt - timing.firstPaintAt, requestEnded: true };
+    }
+
+    return {
+      kind: "clicked",
+      afterFirstWord: stopAt - timing.firstPaintAt,
+      outputStoppedAfter,
+      network: {
+        request: summarizeRequest(r),
+        end,
+        bytesAfterStop: w ? bytesSince(stopAt) : null,
+        bytesAfterAbort: w && w.failedAt !== null ? bytesSince(w.failedAt) : null,
+      },
+    };
+  } finally {
+    outcomes.stop();
+    await wire.stop();
+  }
 }
 
 const TIMED_OUT: unique symbol = Symbol("timed out");
@@ -282,6 +442,87 @@ function startNetworkCapture(page: Page) {
         .map((request) => describeRequest(request, responses.get(request), timeOrigin, entries))
         .filter((r) => r.start === null || r.start < firstPaintAt);
       return { requests, timeOrigin };
+    },
+  };
+}
+
+type Outcome = { kind: "finished" } | { kind: "failed"; errorText: string };
+
+// How each request ended, as Playwright reports it: requestfinished is a normal end;
+// requestfailed carries the browser's error, net::ERR_ABORTED when the page aborted it.
+function trackOutcomes(page: Page) {
+  const outcomes = new Map<Request, Outcome>();
+  const onFinished = (request: Request) => outcomes.set(request, { kind: "finished" });
+  const onFailed = (request: Request) =>
+    outcomes.set(request, { kind: "failed", errorText: request.failure()?.errorText ?? "unknown error" });
+  page.on("requestfinished", onFinished);
+  page.on("requestfailed", onFailed);
+
+  return {
+    get: (request: Request) => outcomes.get(request),
+    stop() {
+      page.off("requestfinished", onFinished);
+      page.off("requestfailed", onFailed);
+    },
+  };
+}
+
+/** One request as the browser's network stack saw it, on the page clock. */
+interface WireRequest {
+  url: string;
+  method: string;
+  sentAt: number;
+  chunks: { at: number; bytes: number }[];
+  finishedAt: number | null;
+  failedAt: number | null;
+}
+
+// When each response chunk arrived, from Chrome's own network events (CDP). Playwright
+// doesn't expose per-chunk timing, and it's what shows bytes still arriving after Stop.
+//
+// Clock alignment: CDP timestamps are monotonic seconds; requestWillBeSent also carries the
+// wall clock, which gives the monotonic → epoch offset, and epoch − timeOrigin is page time.
+async function startWireCapture(page: Page, timeOrigin: number) {
+  const cdp = await page.context().newCDPSession(page);
+  const wire = new Map<string, WireRequest>();
+  let offset = 0; // epoch ms − monotonic ms; set by the first request, which precedes its other events
+  const toPage = (timestamp: number) => timestamp * 1000 + offset - timeOrigin;
+
+  cdp.on("Network.requestWillBeSent", (e) => {
+    if (wire.size === 0) offset = e.wallTime * 1000 - e.timestamp * 1000;
+    if (wire.has(e.requestId)) return; // a redirect reuses the id; keep the first hop
+    wire.set(e.requestId, {
+      url: e.request.url,
+      method: e.request.method,
+      sentAt: toPage(e.timestamp),
+      chunks: [],
+      finishedAt: null,
+      failedAt: null,
+    });
+  });
+  cdp.on("Network.dataReceived", (e) => {
+    wire.get(e.requestId)?.chunks.push({ at: toPage(e.timestamp), bytes: e.encodedDataLength || e.dataLength });
+  });
+  cdp.on("Network.loadingFinished", (e) => {
+    const w = wire.get(e.requestId);
+    if (w) w.finishedAt = toPage(e.timestamp);
+  });
+  cdp.on("Network.loadingFailed", (e) => {
+    const w = wire.get(e.requestId);
+    if (w) w.failedAt = toPage(e.timestamp);
+  });
+  await cdp.send("Network.enable");
+
+  return {
+    // The same URL and method, sent closest to when Playwright says the request was issued.
+    match(r: RequestTiming): WireRequest | null {
+      const same = [...wire.values()].filter((w) => w.url === r.url && w.method === r.method);
+      if (same.length === 0) return null;
+      const near = r.issuedAt ?? r.start;
+      return near === null ? same[same.length - 1]! : maxBy(same, (w) => -Math.abs(w.sentAt - near));
+    },
+    async stop() {
+      await cdp.detach().catch(() => {}); // already gone if the page closed
     },
   };
 }
@@ -527,17 +768,113 @@ function breakdown({ timing, pick }: RunResult): Breakdown {
   }
 
   return {
-    request: {
-      method: r.method,
-      url: r.url,
-      status: r.status ?? r.failure ?? "no response",
-      contentType: r.contentType,
-    },
+    request: summarizeRequest(r),
     reasons: pick.reasons,
     from: pick.from,
     segments,
     clock,
   };
+}
+
+const HOP2_NOTE =
+  "Model-side cancellation (hop 2: your server → the model provider) is not visible from the browser. " +
+  "An abort here only shows the browser dropped its connection; check server logs or provider usage to confirm generation stopped.";
+
+// The Stop check as verdict + checks, shared by the terminal output and the HTML report.
+function describeStop(result: StopResult): StopReport {
+  const notes = [HOP2_NOTE];
+  switch (result.kind) {
+    case "load-failed":
+      return { verdict: "Inconclusive — Stop run couldn't reach the button set by --measure", checks: [], notes: [result.error, ...notes] };
+    case "no-first-word":
+      return { verdict: "Inconclusive — no first word before timeout in the Stop run", checks: [], notes: [result.error, ...notes] };
+    case "no-control":
+      return { verdict: "No Stop control found", checks: [], notes: [result.reason, ...notes] };
+    case "ambiguous-control":
+      return { verdict: `Stop pattern matched ${result.count} buttons — make it more specific`, checks: [], notes };
+    case "doesnt-stream":
+      return {
+        verdict: "Doesn't stream — Stop can't be tested mid-stream",
+        checks: [],
+        notes: [`the whole answer appeared at once (streaming span ${ms(result.span)} ms)`, ...notes],
+      };
+    case "finished-before-click":
+      return {
+        verdict: "Inconclusive — stream finished before the click",
+        checks: [],
+        notes: [
+          `output stopped changing ${ms(result.span)} ms after the first word` +
+            (result.requestEnded ? ", and the AI request ended normally" : ""),
+          ...notes,
+        ],
+      };
+  }
+
+  const { afterFirstWord, outputStoppedAfter, network } = result;
+  const pixelsOk = outputStoppedAfter !== null && outputStoppedAfter <= STOP_PIXELS_MS;
+  const checks: StopCheck[] = [
+    {
+      label: "pixels",
+      pass: pixelsOk,
+      detail:
+        outputStoppedAfter === null ? `output still changing ${DONE_CAP_MS / 1000}s after the first word`
+        : pixelsOk ? `output stopped changing ${ms(outputStoppedAfter)} ms after Stop`
+        : `output kept changing for ${ms(outputStoppedAfter)} ms after Stop`,
+    },
+  ];
+  notes.unshift(`clicked Stop ${ms(afterFirstWord)} ms after the first word, while the output was still changing`);
+
+  if (!network) {
+    checks.push({ label: "network", pass: null, detail: "no AI request identified (try --request)" });
+    return { verdict: "Inconclusive — couldn't identify the AI request", checks, notes };
+  }
+
+  const { request, end, bytesAfterStop, bytesAfterAbort } = network;
+  const at = (t: number | null) => (t === null ? "" : ` ${ms(t)} ms after Stop`);
+  const bytes = (n: number | null) => (n === null ? "? bytes (no byte timeline)" : `${n.toLocaleString("en-US")} bytes`);
+  // An abort only counts if no bytes arrived after it; with no byte timeline it counts on its own.
+  const bytesAfterAbortSeen = end.kind === "aborted" && bytesAfterAbort !== null && bytesAfterAbort > 0;
+  const aborted = end.kind === "aborted" && !bytesAfterAbortSeen;
+  checks.push({
+    label: "network",
+    pass: aborted,
+    detail:
+      `${request.method} ${request.url}: ` +
+      (end.kind === "aborted"
+        ? `aborted by the browser (${end.errorText})${at(end.at)}; ${bytes(bytesAfterAbort)} after the abort`
+        : end.kind === "failed" ? `failed with ${end.errorText}${at(end.at)} — not a browser abort`
+        : end.kind === "finished" ? `never aborted; ${bytes(bytesAfterStop)} arrived after Stop`
+        : `never aborted; still open, ${bytes(bytesAfterStop)} arrived after Stop`),
+  });
+  checks.push({
+    label: "end",
+    pass: end.kind !== "finished",
+    detail: end.kind === "finished" ? `ended normally (requestfinished)${at(end.at)}` : "no normal end (no requestfinished)",
+  });
+
+  // A pass on the abort event alone, with no byte timeline to confirm it, says so.
+  const abortOnly = aborted && bytesAfterAbort === null ? " — abort seen; byte timing unavailable" : "";
+  const verdict =
+    aborted && pixelsOk ? `Stop works (browser side)${abortOnly}`
+    : bytesAfterAbortSeen ? "Stop aborted the request, but bytes kept arriving"
+    : aborted ?`Stop aborted the request, but the output kept changing${abortOnly}`
+    : pixelsOk ? "Stop only hides text — stream kept running"
+    : "Stop did nothing — output and stream kept going";
+  return { verdict, checks, notes };
+}
+
+function formatStop({ verdict, checks, notes }: StopReport): string {
+  const mark = (pass: boolean | null) => (pass === null ? "?" : pass ? "✓" : "✗");
+  return [
+    "stop check",
+    ...checks.map((c) => `    ${mark(c.pass)} ${c.label.padEnd(8)} ${c.detail}`),
+    `    ${verdict}`,
+    ...notes.map((n) => `    note: ${n}`),
+  ].join("\n");
+}
+
+function summarizeRequest(r: RequestTiming): RequestSummary {
+  return { method: r.method, url: r.url, status: r.status ?? r.failure ?? "no response", contentType: r.contentType };
 }
 
 function formatNetwork(parts: Breakdown, seen: number): string {

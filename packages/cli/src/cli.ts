@@ -10,14 +10,16 @@ const USAGE = `Usage:
 
   caliper audit <url> --measure <text> --output <selector>
       [--step <text>]... [--runs 3] [--headed] [--auth auth.json] [--timeout 60000]
-      [--request <regex>] [--report [path]] [--settle-ms 2000]
+      [--request <regex>] [--report [path]] [--settle-ms 2000] [--stop <text>]
       Measure time from clicking the --measure button to first painted output,
       and break it down using the AI request (auto-detected, or the first whose
       URL matches --request). --report writes an HTML timeline
       (default: ${DEFAULT_REPORT}). The answer counts as done at its last change
       once the output has been unchanged for --settle-ms.
+      --stop adds one extra run that clicks the Stop button mid-stream and checks
+      that the output stops and the browser aborts the AI request.
 
-  --step and --measure are button names, matched as case-insensitive regexes.`;
+  --step, --measure and --stop are button names, matched as case-insensitive regexes.`;
 
 type OptionsConfig = NonNullable<ParseArgsConfig["options"]>;
 
@@ -60,6 +62,7 @@ const COMMANDS = {
       "settle-ms": { type: "string", default: "2000" },
       request: { type: "string" },
       report: { type: "string" },
+      stop: { type: "string" },
     },
     optionalValues: { report: DEFAULT_REPORT },
     async run({ url, values }) {
@@ -79,6 +82,7 @@ const COMMANDS = {
         settleMs: positiveInt(values["settle-ms"], "--settle-ms"),
         request: values.request,
         report: values.report,
+        stop: values.stop,
       });
     },
   }),
