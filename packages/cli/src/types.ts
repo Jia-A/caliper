@@ -92,16 +92,22 @@ export type Breakdown =
   | { request: null; segments: []; clock: null }
   | { request: RequestSummary; reasons: string[]; from: number; segments: Segment[]; clock: string };
 
-/** Cold is run 1; median covers runs 2..N (null with one run); worst covers all runs. */
+/**
+ * Cold is run 1 (null if it failed to load); median covers the warm runs 2..N that loaded (null
+ * with none); worst covers every run that loaded.
+ */
 export interface Summary {
-  cold: number;
+  cold: number | null;
   median: number | null;
   worst: number;
+  warm: number; // warm runs in the median
+  warmFailed: number; // warm runs left out because the page failed to load
 }
 
 /**
- * How the AI request ended after Stop, from the browser's own network events. `at` is ms
- * after the Stop click; null when the byte timeline couldn't be matched to the request.
+ * How an AI request ended after a checked click (Stop, or the second --measure click), from
+ * the browser's own network events. `at` is ms after that click; null when the byte timeline
+ * couldn't be matched to the request.
  */
 export type StopEnd =
   | { kind: "aborted"; errorText: string; at: number | null } // requestfailed, net::ERR_ABORTED
@@ -145,6 +151,49 @@ export interface StopReport {
   checks: StopCheck[];
   notes: string[];
 }
+
+/** One output change after the second --measure click, as the in-page recorder saw it. */
+export interface OutputChange {
+  at: number;
+  hasOld: boolean; // the text from just before the second click is still in the output
+}
+
+/**
+ * The two AI requests in the double-send run. `*After*` times are ms after the second click;
+ * bytes are null when the byte timeline couldn't be matched to the request.
+ */
+export interface DoubleNetwork {
+  first: {
+    request: RequestSummary;
+    end: StopEnd;
+    bytesAfterClick: number | null;
+    bytesAfterAbort: number | null;
+  };
+  second: {
+    request: RequestSummary;
+    end: StopEnd;
+    firstWordAfter: number | null; // null when no output change followed its first byte
+  };
+  outputChangedWhileFirst: boolean | null; // output changed while request 1 still delivered bytes; null without a byte timeline
+  oldTextAtSecond: boolean | null; // old text still there at request 2's first word; null without one
+}
+
+/** What the double-send run saw. Times are ms. */
+export type DoubleResult =
+  | { kind: "load-failed"; error: string } // prepareRun failed: navigation, --step, --measure, --output
+  | { kind: "no-first-word"; error: string } // the output never changed within --timeout
+  | { kind: "finished-before-click"; span: number }
+  | { kind: "prevented"; how: "disabled" | "missing" } // the --measure button couldn't be clicked again
+  | { kind: "ambiguous-control"; count: number }
+  | { kind: "ignored"; afterFirstWord: number } // clicked again, but no request to request 1's endpoint followed
+  | {
+      kind: "clicked";
+      afterFirstWord: number; // first word → second click
+      network: DoubleNetwork | null; // null when either AI request couldn't be identified
+    };
+
+/** The double-send check as shown; same shape as the Stop check. */
+export type DoubleReport = StopReport;
 
 /** Warm-run medians for done; null when no warm run settled. */
 export interface DoneSummary {

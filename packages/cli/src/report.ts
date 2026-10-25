@@ -1,8 +1,8 @@
 // Self-contained HTML timeline for an audit: inline CSS/JS, no external requests.
 
-import type { Breakdown, Segment, SegmentKey, StopReport, Summary } from "./types.js";
+import type { Breakdown, DoubleReport, Segment, SegmentKey, StopCheck, StopReport, Summary } from "./types.js";
 
-export type ReportRun = Breakdown & { total: number };
+export type ReportRun = Breakdown & { run: number; total: number }; // run: 1-based number, 1 = cold
 
 export interface ReportInput {
   url: string;
@@ -11,8 +11,10 @@ export interface ReportInput {
   steps: string[];
   startedAt: Date;
   summary: Summary;
-  runs: ReportRun[];
+  runs: ReportRun[]; // the runs whose page loaded
+  failed: number[]; // run numbers whose page failed to load
   stop: (StopReport & { pattern: string }) | null; // null without --stop
+  double: DoubleReport | null; // null without --double
 }
 
 /** A segment as drawn: known, non-negative width. */
@@ -32,7 +34,7 @@ const SEGMENTS: { key: SegmentKey; legend: string }[] = [
   { key: "other", legend: "unattributed" },
 ];
 
-export function renderReport({ url, measure, output, steps, startedAt, summary, runs, stop }: ReportInput): string {
+export function renderReport({ url, measure, output, steps, startedAt, summary, runs, failed, stop, double }: ReportInput): string {
   const bars: ChartRun[] = runs.map((run) => ({ ...run, bars: barSegments(run) }));
   const scale = Math.max(...runs.map((r) => r.total), 1);
   const ticks = niceTicks(scale);
@@ -57,11 +59,13 @@ export function renderReport({ url, measure, output, steps, startedAt, summary, 
       ${steps.length ? `<dt>Steps</dt><dd>${steps.map((s) => `<code>${esc(s)}</code>`).join(" → ")}</dd>` : ""}
       <dt>Output selector</dt><dd><code>${esc(output)}</code></dd>
       <dt>Date</dt><dd>${esc(startedAt.toLocaleString("en-US", { dateStyle: "medium", timeStyle: "long" }))}</dd>
-      <dt>Runs</dt><dd>${runs.length}</dd>
+      <dt>Runs</dt><dd>${runs.length + failed.length}${
+        failed.length ? ` (${failed.map((n) => `run ${n}`).join(", ")} failed to load)` : ""
+      }</dd>
     </dl>
     <div class="tiles">
-      ${tile("Cold (run 1)", summary.cold)}
-      ${tile(runs.length > 2 ? `Median (runs 2–${runs.length})` : runs.length === 2 ? "Median (run 2)" : "Median (needs 2+ runs)", summary.median)}
+      ${tile(summary.cold === null ? "Cold (run 1 failed to load)" : "Cold (run 1)", summary.cold)}
+      ${tile(medianLabel(summary, runs.length + failed.length), summary.median)}
       ${tile("Worst (all runs)", summary.worst)}
     </div>
   </header>
@@ -72,7 +76,7 @@ export function renderReport({ url, measure, output, steps, startedAt, summary, 
       ${used.map((s) => `<li><span class="swatch" style="background:var(--seg-${s.key})"></span>${esc(s.legend)}</li>`).join("")}
     </ul>
     <div class="chart">
-      ${bars.map((run, i) => runRow(run, i, scale, ticks)).join("")}
+      ${bars.map((run) => runRow(run, scale, ticks)).join("")}
       <div class="row axis" aria-hidden="true">
         <div></div>
         <div class="plot">${ticks.map((t) => `<span style="left:${pct(t, scale)}">${fmtTick(t)}</span>`).join("")}</div>
@@ -89,7 +93,7 @@ export function renderReport({ url, measure, output, steps, startedAt, summary, 
         ${tableKeys.map((s) => `<th scope="col" class="num">${esc(s.legend)} (ms)</th>`).join("")}
       </tr></thead>
       <tbody>
-        ${runs.map((run, i) => tableRow(run, i, tableKeys)).join("")}
+        ${runs.map((run) => tableRow(run, tableKeys)).join("")}
       </tbody>
     </table>
     </div>
@@ -99,12 +103,13 @@ export function renderReport({ url, measure, output, steps, startedAt, summary, 
         <th scope="col">Run</th><th scope="col">Request</th><th scope="col">Chosen because</th><th scope="col">Clock check</th>
       </tr></thead>
       <tbody>
-        ${runs.map((run, i) => requestRow(run, i)).join("")}
+        ${runs.map((run) => requestRow(run)).join("")}
       </tbody>
     </table>
     </div>
   </section>
   ${stop ? stopSection(stop) : ""}
+  ${double ? doubleSection(double) : ""}
 </main>
 <div id="tip" role="tooltip" hidden></div>
 <script>${JS}</script>
@@ -126,8 +131,8 @@ function barSegments({ total, segments }: ReportRun): BarSegment[] {
   return known.filter((s) => s.ms > 0);
 }
 
-function runRow(run: ChartRun, i: number, scale: number, ticks: number[]): string {
-  const tag = i === 0 ? ` <span class="tag">cold</span>` : "";
+function runRow(run: ChartRun, scale: number, ticks: number[]): string {
+  const tag = run.run === 1 ? ` <span class="tag">cold</span>` : "";
   const req = run.request
     ? `<p class="req wrap"><span class="method">${esc(run.request.method)}</span> ${esc(run.request.url)}
          → ${esc(String(run.request.status))}${run.request.contentType ? ` · ${esc(run.request.contentType)}` : ""}</p>
@@ -136,7 +141,7 @@ function runRow(run: ChartRun, i: number, scale: number, ticks: number[]): strin
 
   return `
       <div class="row">
-        <div class="rlabel">run ${i + 1}${tag}<b>${fmtMs(run.total)} ms</b></div>
+        <div class="rlabel">run ${run.run}${tag}<b>${fmtMs(run.total)} ms</b></div>
         <div class="plot">
           <div class="bar-area">
             ${ticks.map((t) => `<i class="grid" style="left:${pct(t, scale)}"></i>`).join("")}
@@ -157,7 +162,7 @@ function segment(s: BarSegment, total: number): string {
        data-tip="${esc(tip)}" aria-label="${esc(tip)}"><span class="in">${fmtMs(s.ms)} ms</span></div>`;
 }
 
-function tableRow(run: ReportRun, i: number, keys: { key: SegmentKey }[]): string {
+function tableRow(run: ReportRun, keys: { key: SegmentKey }[]): string {
   const segments: Segment[] = run.segments;
   const cells = keys.map(({ key }) => {
     const s = segments.find((seg) => seg.key === key);
@@ -167,18 +172,18 @@ function tableRow(run: ReportRun, i: number, keys: { key: SegmentKey }[]): strin
     return `<td class="num">${value}${note}</td>`;
   });
   return `<tr>
-          <th scope="row">${runName(i)}</th>
+          <th scope="row">${runName(run.run)}</th>
           <td class="num">${fmtMs(run.total)}</td>
           ${cells.join("")}
         </tr>`;
 }
 
-function requestRow(run: ReportRun, i: number): string {
+function requestRow(run: ReportRun): string {
   const req = run.request
     ? `${esc(run.request.method)} ${esc(run.request.url)} → ${esc(String(run.request.status))}${run.request.contentType ? ` ${esc(run.request.contentType)}` : ""}`
     : "—";
   return `<tr>
-          <th scope="row">${runName(i)}</th>
+          <th scope="row">${runName(run.run)}</th>
           <td class="wrap">${req}</td>
           <td>${run.request ? esc(run.reasons.join(", ") || "only candidate") : "—"}</td>
           <td>${esc(run.clock ?? "—")}</td>
@@ -186,24 +191,44 @@ function requestRow(run: ReportRun, i: number): string {
 }
 
 function stopSection({ pattern, verdict, checks, notes }: StopReport & { pattern: string }): string {
-  const mark = (pass: boolean | null) =>
-    pass === null ? `<span class="mark muted">? not checked</span>`
-    : pass ? `<span class="mark">✓ pass</span>`
-    : `<span class="mark">✗ fail</span>`;
   return `<section aria-labelledby="stop-h">
     <h2 id="stop-h">Stop check</h2>
     <div class="stop">
       <p class="muted">Stop button <code>${esc(String(new RegExp(pattern, "i")))}</code>, one extra run on a fresh page</p>
-      <p class="verdict">${esc(verdict)}</p>
-      ${checks.length ? `<table><tbody>
-        ${checks.map((c) => `<tr><th scope="row">${esc(c.label)}</th><td>${mark(c.pass)}</td><td class="wrap">${esc(c.detail)}</td></tr>`).join("")}
-      </tbody></table>` : ""}
-      <ul class="notes">${notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>
+      ${checksBody(verdict, checks, notes)}
     </div>
   </section>`;
 }
 
-const runName = (i: number) => `run&nbsp;${i + 1}${i === 0 ? " (cold)" : ""}`;
+function doubleSection({ verdict, checks, notes }: DoubleReport): string {
+  return `<section aria-labelledby="double-h">
+    <h2 id="double-h">Double-send check</h2>
+    <div class="stop">
+      <p class="muted">The measured button clicked again mid-stream, one extra run on a fresh page</p>
+      ${checksBody(verdict, checks, notes)}
+    </div>
+  </section>`;
+}
+
+// Verdict, checks table and notes, shared by the Stop and double-send sections.
+function checksBody(verdict: string, checks: StopCheck[], notes: string[]): string {
+  const mark = (pass: boolean | null) =>
+    pass === null ? `<span class="mark muted">? not checked</span>`
+    : pass ? `<span class="mark">✓ pass</span>`
+    : `<span class="mark">✗ fail</span>`;
+  return `<p class="verdict">${esc(verdict)}</p>
+      ${checks.length ? `<table><tbody>
+        ${checks.map((c) => `<tr><th scope="row">${esc(c.label)}</th><td>${mark(c.pass)}</td><td class="wrap">${esc(c.detail)}</td></tr>`).join("")}
+      </tbody></table>` : ""}
+      <ul class="notes">${notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>`;
+}
+
+const runName = (n: number) => `run&nbsp;${n}${n === 1 ? " (cold)" : ""}`;
+
+function medianLabel({ warm, warmFailed }: Summary, total: number): string {
+  if (warmFailed) return `Median (${warm} warm run${warm === 1 ? "" : "s"}, ${warmFailed} failed to load)`;
+  return total > 2 ? `Median (runs 2–${total})` : total === 2 ? "Median (run 2)" : "Median (needs 2+ runs)";
+}
 
 function tile(label: string, value: number | null): string {
   return `<div class="tile"><div class="tile-label">${esc(label)}</div><div class="tile-value">${

@@ -3,12 +3,15 @@ import { resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { Locator, Page, Request, Response } from "playwright";
 import { launchChromium } from "./browser.js";
-import { CliError, messageOf } from "./errors.js";
+import { CliError, messageOf, PageLoadError } from "./errors.js";
 import { renderReport } from "./report.js";
 import type {
   Breakdown,
   DoneSummary,
   DoneTiming,
+  DoubleReport,
+  DoubleResult,
+  OutputChange,
   PageTiming,
   RequestSummary,
   RequestTiming,
@@ -31,6 +34,9 @@ declare global {
     __lensDone: Promise<DoneTiming>;
     __lensLastChangeAt: number; // the watcher's latest output change; -1 before the first word
     __lensStopClickAt: Promise<number>;
+    __caliperRead: () => string; // the watcher's reader for --output
+    __lensDoubleClickAt: Promise<number>;
+    __lensDoubleChanges: OutputChange[];
   }
 }
 
@@ -53,6 +59,14 @@ export interface AuditOptions {
   request: string | undefined;
   report: string | undefined;
   stop: string | undefined;
+  double: boolean;
+}
+
+/** A timed run whose page loaded. `run` is its 1-based number; run 1 is the cold run. */
+interface LoadedRun {
+  run: number;
+  result: RunResult;
+  parts: Breakdown;
 }
 
 interface MeasureOptions {
@@ -65,7 +79,7 @@ interface MeasureOptions {
   requestPattern: RegExp | null;
 }
 
-export async function audit({ url, measure, output, steps, runs, headed, auth, timeout, settleMs, request, report, stop }: AuditOptions): Promise<void> {
+export async function audit({ url, measure, output, steps, runs, headed, auth, timeout, settleMs, request, report, stop, double }: AuditOptions): Promise<void> {
   const authPath = resolve(auth);
   if (!existsSync(authPath)) {
     throw new CliError(
@@ -96,31 +110,42 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
   try {
     const context = await browser.newContext({ storageState: authPath });
     const startedAt = new Date();
-    const results: number[] = [];
-    const runResults: RunResult[] = [];
-    const breakdowns: Breakdown[] = [];
+    const loaded: LoadedRun[] = [];
+    const failed: number[] = []; // run numbers whose page failed to load
 
     for (let i = 1; i <= runs; i++) {
       // Fresh page per run so every run starts from the same state.
       const page = await context.newPage();
       page.setDefaultTimeout(timeout);
       try {
-        const run = await measureOnce(page, { url, measure, output, steps, timeout, settleMs, requestPattern });
-        const parts = breakdown(run);
-        results.push(run.ms);
-        runResults.push(run);
-        breakdowns.push(parts);
-        console.log(formatRun(i, run.ms));
-        console.log(formatNetwork(parts, run.requests.length));
-        console.log(formatDone(run));
+        let result: RunResult;
+        try {
+          result = await measureOnce(page, { url, measure, output, steps, timeout, settleMs, requestPattern });
+        } catch (err) {
+          if (!(err instanceof PageLoadError)) throw err;
+          failed.push(i);
+          console.log(`${runLabel(i)} — page failed to load`);
+          console.log(`    ${err.message}`);
+          continue;
+        }
+        const parts = breakdown(result);
+        loaded.push({ run: i, result, parts });
+        console.log(formatRun(i, result.ms));
+        console.log(formatNetwork(parts, result.requests.length));
+        console.log(formatDone(result));
       } finally {
         await page.close();
       }
     }
 
-    const summary = summarize(results);
+    if (loaded.length === 0) {
+      console.log("Inconclusive — page failed to load");
+      return;
+    }
+
+    const summary = summarize(loaded, failed);
     console.log(formatSummary(summary));
-    console.log(formatDoneSummary(summarizeDone(runResults)));
+    console.log(formatDoneSummary(summarizeDone(loaded.filter((r) => r.run > 1).map((r) => r.result))));
 
     let stopReport: StopReport | null = null;
     if (stopPattern) {
@@ -131,7 +156,22 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
         stopReport = describeStop(
           await stopOnce(page, { url, measure, output, steps, timeout, settleMs, requestPattern }, stopPattern)
         );
-        console.log(formatStop(stopReport));
+        console.log(formatChecks("stop check", stopReport));
+      } finally {
+        await page.close();
+      }
+    }
+
+    let doubleReport: DoubleReport | null = null;
+    if (double) {
+      // Like the Stop check: its own fresh page, after the timed runs.
+      const page = await context.newPage();
+      page.setDefaultTimeout(timeout);
+      try {
+        doubleReport = describeDouble(
+          await doubleOnce(page, { url, measure, output, steps, timeout, settleMs, requestPattern })
+        );
+        console.log(formatChecks("double-send check", doubleReport));
       } finally {
         await page.close();
       }
@@ -146,8 +186,10 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
         steps,
         startedAt,
         summary,
-        runs: results.map((total, i) => ({ total, ...breakdowns[i]! })),
+        runs: loaded.map(({ run, result, parts }) => ({ run, total: result.ms, ...parts })),
+        failed,
         stop: stopReport && { pattern: stop!, ...stopReport },
+        double: doubleReport,
       });
       writeFileSync(reportPath, html);
       console.log(`report: ${reportPath}`);
@@ -185,7 +227,12 @@ async function measureOnce(page: Page, options: MeasureOptions): Promise<RunResu
 // Loads the page, clicks the --step buttons and installs the watcher. Returns the --measure
 // button, ready to click.
 async function prepareRun(page: Page, { url, measure, output, steps, timeout, settleMs }: MeasureOptions): Promise<Locator> {
-  await page.goto(url);
+  try {
+    await page.goto(url);
+  } catch (err) {
+    // Playwright errors carry a multi-line call log; the first line is the message.
+    throw new PageLoadError(messageOf(err).split("\n")[0]!.trim());
+  }
 
   for (const step of steps) {
     const button = await findButton(page, step, "--step", timeout);
@@ -215,6 +262,7 @@ async function prepareRun(page: Page, { url, measure, output, steps, timeout, se
       // `value` exists on inputs/textareas only; the type assertion is compile-time only.
       return (el as Element & { value?: string }).value ?? el.textContent; // textarea/input → .value, anything else → text
     };
+    window.__caliperRead = read; // the double-send recorder reads the output the same way
 
     window.__lensLastChangeAt = -1;
     let resolveDone!: (done: DoneTiming) => void;
@@ -321,15 +369,7 @@ async function stopOnce(page: Page, options: MeasureOptions, stopPattern: RegExp
     const [{ requests }] = await Promise.all([network.stop(timing), sleep(STOP_AFTER_MS)]);
     const r = chooseRequest(requests, timing, options.requestPattern)?.request ?? null;
 
-    // Still streaming? Wait for one more change in the output.
-    const mark = await page.evaluate(() => performance.now());
-    const changing = await page
-      .waitForFunction((m) => window.__lensLastChangeAt > m, mark, { polling: "raf", timeout: STILL_CHANGING_MS })
-      .then(() => true, (err: unknown) => {
-        if (err instanceof Error && err.name === "TimeoutError") return false;
-        throw err;
-      });
-    if (!changing) {
+    if (!(await stillChanging(page))) {
       const span = (await page.evaluate(() => window.__lensLastChangeAt)) - timing.firstPaintAt;
       const endedBeforePaint = r?.end != null && r.end <= timing.firstPaintAt;
       if (span < STREAMS_MIN_MS || endedBeforePaint) return { kind: "doesnt-stream", span };
@@ -367,14 +407,7 @@ async function stopOnce(page: Page, options: MeasureOptions, stopPattern: RegExp
 
     // (2) + (3) Network: how the AI request ended, and when its bytes arrived.
     const w = wire.match(r);
-    const after = (t: number | null) => (w && t !== null ? t - stopAt : null);
-    const bytesSince = (t: number) => w!.chunks.filter((c) => c.at > t).reduce((sum, c) => sum + c.bytes, 0);
-    const outcome = outcomes.get(r.raw);
-    const end: StopEnd =
-      !outcome ? { kind: "open" }
-      : outcome.kind === "finished" ? { kind: "finished", at: after(w?.finishedAt ?? null) }
-      : /ERR_ABORTED/.test(outcome.errorText) ? { kind: "aborted", errorText: outcome.errorText, at: after(w?.failedAt ?? null) }
-      : { kind: "failed", errorText: outcome.errorText, at: after(w?.failedAt ?? null) };
+    const end = requestEnd(outcomes.get(r.raw), w, stopAt);
 
     // A request that ended normally before the click was over before Stop could matter.
     if (end.kind === "finished" && end.at !== null && end.at <= 0) {
@@ -388,8 +421,190 @@ async function stopOnce(page: Page, options: MeasureOptions, stopPattern: RegExp
       network: {
         request: summarizeRequest(r),
         end,
-        bytesAfterStop: w ? bytesSince(stopAt) : null,
-        bytesAfterAbort: w && w.failedAt !== null ? bytesSince(w.failedAt) : null,
+        bytesAfterStop: w ? bytesSince(w, stopAt) : null,
+        bytesAfterAbort: w && w.failedAt !== null ? bytesSince(w, w.failedAt) : null,
+      },
+    };
+  } finally {
+    outcomes.stop();
+    await wire.stop();
+  }
+}
+
+// Still streaming? Wait for one more change in the output.
+async function stillChanging(page: Page): Promise<boolean> {
+  const mark = await page.evaluate(() => performance.now());
+  return page
+    .waitForFunction((m) => window.__lensLastChangeAt > m, mark, { polling: "raf", timeout: STILL_CHANGING_MS })
+    .then(() => true, (err: unknown) => {
+      if (err instanceof Error && err.name === "TimeoutError") return false;
+      throw err;
+    });
+}
+
+// How a request ended, with `at` relative to the checked click (page clock).
+function requestEnd(outcome: Outcome | undefined, w: WireRequest | null, clickAt: number): StopEnd {
+  const after = (t: number | null) => (w && t !== null ? t - clickAt : null);
+  return (
+    !outcome ? { kind: "open" }
+    : outcome.kind === "finished" ? { kind: "finished", at: after(w?.finishedAt ?? null) }
+    : /ERR_ABORTED/.test(outcome.errorText) ? { kind: "aborted", errorText: outcome.errorText, at: after(w?.failedAt ?? null) }
+    : { kind: "failed", errorText: outcome.errorText, at: after(w?.failedAt ?? null) }
+  );
+}
+
+function bytesSince(w: WireRequest, t: number): number {
+  return w.chunks.filter((c) => c.at > t).reduce((sum, c) => sum + c.bytes, 0);
+}
+
+// Double-send check: click --measure again this long after the first word...
+const DOUBLE_AFTER_MS = 500;
+// ...giving up on the second click if the button doesn't take it within this long.
+const DOUBLE_CLICK_MS = 1000;
+// An output change this long after request 1's last byte still counts as painted from it.
+const PAINT_SLACK_MS = 250;
+
+// One extra run: start an answer, click --measure again mid-stream, and see what the browser
+// did with both requests and the output. Every outcome is returned as a result, never thrown,
+// except the setup errors any run has.
+async function doubleOnce(page: Page, options: MeasureOptions): Promise<DoubleResult> {
+  // The watcher stops tracking once the output settles, so it mustn't settle before click 2.
+  let target: Locator;
+  try {
+    target = await prepareRun(page, { ...options, settleMs: Math.max(options.settleMs, DOUBLE_AFTER_MS + STILL_CHANGING_MS) });
+  } catch (err) {
+    return { kind: "load-failed", error: messageOf(err).split("\n")[0]!.trim() };
+  }
+  const timeOrigin = await page.evaluate(() => performance.timeOrigin);
+  const wire = await startWireCapture(page, timeOrigin);
+  const outcomes = trackOutcomes(page);
+  // Same detection as the timed runs; a --request that matches nothing means "not identified".
+  const pick = (requests: RequestTiming[], timing: PageTiming) => {
+    try {
+      return chooseRequest(requests, timing, options.requestPattern)?.request ?? null;
+    } catch (err) {
+      if (err instanceof CliError) return null;
+      throw err;
+    }
+  };
+
+  try {
+    // Click 1, exactly like a timed run.
+    const network = startNetworkCapture(page);
+    await target.click();
+    let timing: PageTiming;
+    try {
+      timing = await waitForFirstWord(page, options);
+    } catch (err) {
+      if (!(err instanceof CliError)) throw err;
+      return { kind: "no-first-word", error: err.message };
+    }
+    const [{ requests }] = await Promise.all([network.stop(timing), sleep(DOUBLE_AFTER_MS)]);
+    const r1 = pick(requests, timing);
+
+    if (!(await stillChanging(page))) {
+      return { kind: "finished-before-click", span: (await page.evaluate(() => window.__lensLastChangeAt)) - timing.firstPaintAt };
+    }
+
+    // Click 2 only if the --measure button is there and enabled right now.
+    const count = await target.count();
+    if (count > 1) return { kind: "ambiguous-control", count };
+    if (count === 0 || !(await target.isVisible())) return { kind: "prevented", how: "missing" };
+    if (await target.isDisabled()) return { kind: "prevented", how: "disabled" };
+
+    // Record every output change after click 2, and whether the text from just before it is
+    // still there, on the page clock like the watcher.
+    await page.evaluate((capMs) => {
+      window.__lensDoubleChanges = [];
+      window.__lensDoubleClickAt = new Promise((resolve) =>
+        document.addEventListener(
+          "click",
+          (event) => {
+            const clickAt = event.timeStamp;
+            const old = window.__caliperRead();
+            let last = old;
+            function check() {
+              const t = performance.now();
+              const now = window.__caliperRead();
+              if (now !== last) {
+                last = now;
+                window.__lensDoubleChanges.push({ at: t, hasOld: old !== "" && now.includes(old) });
+              }
+              if (t - clickAt < capMs) requestAnimationFrame(check);
+            }
+            requestAnimationFrame(check);
+            resolve(clickAt);
+          },
+          { capture: true, once: true }
+        )
+      );
+    }, DONE_CAP_MS);
+
+    const network2 = startNetworkCapture(page);
+    try {
+      await target.click({ timeout: DOUBLE_CLICK_MS });
+    } catch (err) {
+      // It turned disabled (or went away) between the check and the click.
+      if (err instanceof Error && err.name === "TimeoutError") return { kind: "prevented", how: "disabled" };
+      throw err;
+    }
+    const clickAt = await page.evaluate(() => window.__lensDoubleClickAt);
+    const afterFirstWord = clickAt - timing.firstPaintAt;
+
+    // Let the output settle, then pick request 2 from what was sent after click 2 to the same
+    // endpoint as request 1 (method + URL path; the query string may differ).
+    await page.evaluate(() => window.__lensDone);
+    const until = await page.evaluate(() => performance.now());
+    const { requests: sent } = await network2.stop({ clickAt, firstPaintAt: until });
+    if (!r1) return { kind: "clicked", afterFirstWord, network: null };
+    const endpoint = (r: RequestTiming) => {
+      const u = new URL(r.url);
+      return `${r.method} ${u.origin}${u.pathname}`;
+    };
+    const same = sent.filter((r) => endpoint(r) === endpoint(r1));
+    if (same.length === 0) return { kind: "ignored", afterFirstWord };
+    const r2 = pick(same, { clickAt, firstPaintAt: until });
+    if (!r2) return { kind: "clicked", afterFirstWord, network: null };
+
+    // Give both requests until --timeout to end, then let the last paints land.
+    const deadline = Date.now() + options.timeout;
+    while ((!outcomes.get(r1.raw) || !outcomes.get(r2.raw)) && Date.now() < deadline) await sleep(50);
+    await sleep(PAINT_SLACK_MS + NETWORK_SETTLE_MS);
+
+    const w1 = wire.match(r1);
+    const w2 = wire.match(r2);
+    const end1 = requestEnd(outcomes.get(r1.raw), w1, clickAt);
+    // A request 1 that ended normally before click 2 was over before the second click could matter.
+    if (end1.kind === "finished" && end1.at !== null && end1.at <= 0) {
+      return { kind: "finished-before-click", span: afterFirstWord };
+    }
+
+    const changes = await page.evaluate(() => window.__lensDoubleChanges);
+    const bytesAfterClick = w1 ? bytesSince(w1, clickAt) : null;
+    const lastByteAt = w1 ? w1.chunks.reduce((latest, c) => Math.max(latest, c.at), clickAt) : null;
+    // Request 2's first word: the first output change once its first byte arrived.
+    const firstByte2 = w2?.chunks[0]?.at ?? r2.firstByte;
+    const firstWord2 = firstByte2 === null ? undefined : changes.find((c) => c.at >= firstByte2);
+
+    return {
+      kind: "clicked",
+      afterFirstWord,
+      network: {
+        first: {
+          request: summarizeRequest(r1),
+          end: end1,
+          bytesAfterClick,
+          bytesAfterAbort: w1 && w1.failedAt !== null ? bytesSince(w1, w1.failedAt) : null,
+        },
+        second: {
+          request: summarizeRequest(r2),
+          end: requestEnd(outcomes.get(r2.raw), w2, clickAt),
+          firstWordAfter: firstWord2 ? firstWord2.at - clickAt : null,
+        },
+        outputChangedWhileFirst:
+          bytesAfterClick === null || lastByteAt === null ? null
+          : bytesAfterClick > 0 && changes.some((c) => c.at <= lastByteAt + PAINT_SLACK_MS),
+        oldTextAtSecond: firstWord2 ? firstWord2.hasOld : null,
       },
     };
   } finally {
@@ -684,9 +899,10 @@ async function findButton(page: Page, text: string, flag: string, timeout: numbe
   return button;
 }
 
+const runLabel = (i: number) => (i === 1 ? `run ${i} (cold)` : `run ${i}`);
+
 function formatRun(i: number, ms: number): string {
-  const label = i === 1 ? `run ${i} (cold)` : `run ${i}`;
-  return `${label.padEnd(12)}  ${String(ms).padStart(5)} ms`;
+  return `${runLabel(i).padEnd(12)}  ${String(ms).padStart(5)} ms`;
 }
 
 // A streaming span shorter than this means the answer arrived in one go.
@@ -863,11 +1079,118 @@ function describeStop(result: StopResult): StopReport {
   return { verdict, checks, notes };
 }
 
-function formatStop({ verdict, checks, notes }: StopReport): string {
+const DOUBLE_HOP2_NOTE =
+  "Caliper proves the browser cancelled request 1 (hop 1). Whether your server also stopped the model " +
+  "(hop 2: your server → the model provider) needs the server wrapper (M3).";
+
+// The double-send check as verdict + checks, shared by the terminal output and the HTML report.
+// Verdicts are tried in a fixed priority order; anything that matches none is inconclusive.
+function describeDouble(result: DoubleResult): DoubleReport {
+  const notes = [DOUBLE_HOP2_NOTE];
+  switch (result.kind) {
+    case "load-failed":
+      return { verdict: "Inconclusive — page failed to load", checks: [], notes: [result.error, ...notes] };
+    case "no-first-word":
+      return { verdict: "Inconclusive — no first word before timeout in the double-send run", checks: [], notes: [result.error, ...notes] };
+    case "finished-before-click":
+      return {
+        verdict: "Inconclusive — stream finished before the second click",
+        checks: [],
+        notes: [`output stopped changing ${ms(result.span)} ms after the first word`, ...notes],
+      };
+    case "prevented":
+      return {
+        verdict: "Double send prevented (button disabled while generating)",
+        checks: [],
+        notes: [
+          result.how === "disabled"
+            ? "the --measure button was disabled while the answer was streaming"
+            : "the --measure button was not on the page while the answer was streaming",
+          ...notes,
+        ],
+      };
+    case "ambiguous-control":
+      return { verdict: `Inconclusive — --measure matched ${result.count} buttons at the second click`, checks: [], notes };
+    case "ignored":
+      return {
+        verdict: "Double send ignored (second click sent no request)",
+        checks: [],
+        notes: [
+          `clicked --measure again ${ms(result.afterFirstWord)} ms after the first word; no request to the same endpoint followed`,
+          ...notes,
+        ],
+      };
+  }
+
+  const { afterFirstWord, network } = result;
+  notes.unshift(`clicked --measure again ${ms(afterFirstWord)} ms after the first word, while the output was still changing`);
+  if (!network) return { verdict: "Inconclusive — couldn't identify the AI requests", checks: [], notes };
+
+  const { first, second, outputChangedWhileFirst, oldTextAtSecond } = network;
+  const at = (t: number | null) => (t === null ? "" : ` ${ms(t)} ms after the second click`);
+  const bytes = (n: number | null) => (n === null ? "byte timing unavailable" : `${n.toLocaleString("en-US")} bytes`);
+  const ended = (end: StopEnd) =>
+    end.kind === "aborted" ? `aborted by the browser (${end.errorText})${at(end.at)}`
+    : end.kind === "failed" ? `failed with ${end.errorText}${at(end.at)} — not a browser abort`
+    : end.kind === "finished" ? `ended normally (requestfinished)${at(end.at)}`
+    : "still open";
+  const aborted = first.end.kind === "aborted";
+  // Cancelled: aborted with no bytes after the abort. Unknown (null) without a byte timeline.
+  const cancelled = aborted ? (first.bytesAfterAbort === null ? null : first.bytesAfterAbort === 0) : false;
+  // Bytes after click 2 that no abort came before: request 1 kept generating.
+  const kept = aborted ? first.bytesAfterAbort : first.bytesAfterClick;
+  const keptSending = kept !== null && kept > 0;
+  const secondStreamed = second.firstWordAfter !== null;
+
+  const checks: StopCheck[] = [
+    {
+      label: "request 1",
+      pass: cancelled,
+      detail:
+        `${first.request.method} ${first.request.url}: ${ended(first.end)}; ` +
+        `${bytes(first.bytesAfterClick)} after the second click` +
+        (first.end.kind === "aborted" ? `, ${bytes(first.bytesAfterAbort)} after the abort` : ""),
+    },
+    {
+      label: "request 2",
+      pass: secondStreamed,
+      detail:
+        `${second.request.method} ${second.request.url}: ${ended(second.end)}; ` +
+        (secondStreamed ? `first word ${ms(second.firstWordAfter!)} ms after the second click` : "no first word painted"),
+    },
+    {
+      // Informational only: pixels can't prove which request wrote the text.
+      label: "output",
+      pass: outputChangedWhileFirst === false ? true : null,
+      detail:
+        outputChangedWhileFirst === null ? "byte timing unavailable"
+        : outputChangedWhileFirst ? "Output changed while request 1 was still sending — may be mixed; Caliper can't tell which request wrote the text."
+        : "no output change while request 1 was still sending",
+    },
+    {
+      label: "cleared",
+      pass: oldTextAtSecond === null ? null : !oldTextAtSecond,
+      detail:
+        oldTextAtSecond === null ? "request 2 painted no first word, so nothing to compare"
+        : oldTextAtSecond ? "text from before the second click was still there at request 2's first word"
+        : "text from before the second click was gone by request 2's first word",
+    },
+  ];
+
+  const verdict =
+    first.end.kind === "finished" ? "Two generations ran — previous request not cancelled (paid twice)"
+    : keptSending ? "Two generations ran — previous request not cancelled"
+    : oldTextAtSecond === true ? "Previous answer not cleared"
+    : cancelled === true && oldTextAtSecond === false && secondStreamed ? "Double send handled (previous request cancelled)"
+    : "Inconclusive — no verdict matched; see checks";
+  return { verdict, checks, notes };
+}
+
+function formatChecks(title: string, { verdict, checks, notes }: StopReport): string {
   const mark = (pass: boolean | null) => (pass === null ? "?" : pass ? "✓" : "✗");
   return [
-    "stop check",
-    ...checks.map((c) => `    ${mark(c.pass)} ${c.label.padEnd(8)} ${c.detail}`),
+    title,
+    ...checks.map((c) => `    ${mark(c.pass)} ${c.label.padEnd(9)} ${c.detail}`),
     `    ${verdict}`,
     ...notes.map((n) => `    note: ${n}`),
   ].join("\n");
@@ -897,16 +1220,18 @@ function ms(value: number): number {
   return Math.round(value);
 }
 
-// Median covers warm runs (2..N) only; cold is reported on its own; worst covers all runs.
-// Called with at least one result (runs >= 1).
-function summarize([cold, ...warm]: number[]): Summary {
-  const worst = Math.max(cold!, ...warm);
-  return { cold: cold!, median: median(warm), worst };
+// Median covers the warm runs (2..N) that loaded; cold is run 1 on its own, null if it failed
+// to load; worst covers every run that loaded. Called with at least one loaded run.
+function summarize(loaded: LoadedRun[], failed: number[]): Summary {
+  const cold = loaded[0]!.run === 1 ? loaded[0]!.result.ms : null;
+  const warm = loaded.filter((r) => r.run > 1).map((r) => r.result.ms);
+  const worst = Math.max(...loaded.map((r) => r.result.ms));
+  return { cold, median: median(warm), worst, warm: warm.length, warmFailed: failed.filter((n) => n > 1).length };
 }
 
-// Same warm-runs rule for done and span. Runs that never settled have no done time, so they
-// are left out and counted.
-function summarizeDone([, ...warm]: RunResult[]): DoneSummary {
+// Same warm-runs rule for done and span, given the warm runs that loaded. Runs that never
+// settled have no done time, so they are left out and counted.
+function summarizeDone(warm: RunResult[]): DoneSummary {
   const settled = warm.flatMap(({ timing, done }) =>
     done.settled ? [{ done: done.doneAt - timing.clickAt, span: done.doneAt - timing.firstPaintAt }] : []
   );
@@ -925,9 +1250,12 @@ function median(values: number[]): number | null {
   return Math.round(sorted.length % 2 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2);
 }
 
-function formatSummary({ cold, median, worst }: Summary): string {
-  if (median === null) return `cold ${cold} ms · worst ${worst} ms (no warm runs for a median)`;
-  return `cold ${cold} ms · median ${median} ms · worst ${worst} ms`;
+function formatSummary({ cold, median, worst, warm, warmFailed }: Summary): string {
+  const coldPart = cold === null ? "cold: run 1 failed to load" : `cold ${cold} ms`;
+  const lost = warmFailed ? ` (${warmFailed} failed to load)` : "";
+  if (median === null) return `${coldPart} · worst ${worst} ms (no warm runs for a median${lost})`;
+  const used = warmFailed ? ` · median of ${warm} warm run${warm === 1 ? "" : "s"}${lost}` : "";
+  return `${coldPart} · median ${median} ms · worst ${worst} ms${used}`;
 }
 
 function formatDoneSummary({ done, span, warm, unsettled }: DoneSummary): string {
