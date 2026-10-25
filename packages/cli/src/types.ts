@@ -195,6 +195,24 @@ export type DoubleResult =
 /** The double-send check as shown; same shape as the Stop check. */
 export type DoubleReport = StopReport;
 
+/** What the canary run saw. Canary signals only count from the --measure click on. */
+export type CanaryResult =
+  | { kind: "load-failed"; error: string } // prepareRun failed: navigation, --step, --measure, --output
+  | { kind: "input-failed"; error: string } // couldn't type into --canary-input
+  | { kind: "no-first-word"; error: string } // the output never changed within --timeout
+  | { kind: "already-present"; where: "request" | "output" } // the canary was on the page before the click
+  | {
+      kind: "checked";
+      planted: boolean; // Caliper typed the canary into --canary-input
+      imageRequested: boolean; // a canary image request got past the page's CSP to the network layer
+      cspBlocked: boolean; // Chrome blocked a canary image request for CSP
+      outputHasCanary: boolean; // the output text contains the canary host
+      settled: boolean; // false when the output was still changing at the cap
+    };
+
+/** The canary check as shown; same shape as the Stop check. */
+export type CanaryReport = StopReport;
+
 /** Warm-run medians for done; null when no warm run settled. */
 export interface DoneSummary {
   done: number | null;

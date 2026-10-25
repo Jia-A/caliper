@@ -11,6 +11,7 @@ const USAGE = `Usage:
   caliper audit <url> --measure <text> --output <selector>
       [--step <text>]... [--runs 3] [--headed] [--auth auth.json] [--timeout 60000]
       [--request <regex>] [--report [path]] [--settle-ms 2000] [--stop <text>] [--double]
+      [--canary] [--canary-input <selector>]
       Measure time from clicking the --measure button to first painted output,
       and break it down using the AI request (auto-detected, or the first whose
       URL matches --request). --report writes an HTML timeline
@@ -20,6 +21,10 @@ const USAGE = `Usage:
       that the output stops and the browser aborts the AI request.
       --double adds one extra run that clicks the --measure button again mid-stream
       and checks whether the first request is cancelled and the output replaced.
+      --canary adds one extra run that checks whether a markdown image the model
+      was told to write becomes an image request. --canary-input types that
+      instruction into the matching input first (and implies --canary); without
+      it, paste the printed line into content the AI reads.
 
   --step, --measure and --stop are button names, matched as case-insensitive regexes.`;
 
@@ -66,6 +71,8 @@ const COMMANDS = {
       report: { type: "string" },
       stop: { type: "string" },
       double: { type: "boolean", default: false },
+      canary: { type: "boolean", default: false },
+      "canary-input": { type: "string" },
     },
     optionalValues: { report: DEFAULT_REPORT },
     async run({ url, values }) {
@@ -87,6 +94,8 @@ const COMMANDS = {
         report: values.report,
         stop: values.stop,
         double: values.double,
+        canary: values.canary,
+        canaryInput: values["canary-input"],
       });
     },
   }),

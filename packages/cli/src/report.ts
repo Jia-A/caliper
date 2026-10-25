@@ -1,6 +1,6 @@
 // Self-contained HTML timeline for an audit: inline CSS/JS, no external requests.
 
-import type { Breakdown, DoubleReport, Segment, SegmentKey, StopCheck, StopReport, Summary } from "./types.js";
+import type { Breakdown, CanaryReport, DoubleReport, Segment, SegmentKey, StopCheck, StopReport, Summary } from "./types.js";
 
 export type ReportRun = Breakdown & { run: number; total: number }; // run: 1-based number, 1 = cold
 
@@ -15,6 +15,7 @@ export interface ReportInput {
   failed: number[]; // run numbers whose page failed to load
   stop: (StopReport & { pattern: string }) | null; // null without --stop
   double: DoubleReport | null; // null without --double
+  canary: (CanaryReport & { input: string | undefined }) | null; // null without --canary
 }
 
 /** A segment as drawn: known, non-negative width. */
@@ -34,7 +35,7 @@ const SEGMENTS: { key: SegmentKey; legend: string }[] = [
   { key: "other", legend: "unattributed" },
 ];
 
-export function renderReport({ url, measure, output, steps, startedAt, summary, runs, failed, stop, double }: ReportInput): string {
+export function renderReport({ url, measure, output, steps, startedAt, summary, runs, failed, stop, double, canary }: ReportInput): string {
   const bars: ChartRun[] = runs.map((run) => ({ ...run, bars: barSegments(run) }));
   const scale = Math.max(...runs.map((r) => r.total), 1);
   const ticks = niceTicks(scale);
@@ -110,6 +111,7 @@ export function renderReport({ url, measure, output, steps, startedAt, summary, 
   </section>
   ${stop ? stopSection(stop) : ""}
   ${double ? doubleSection(double) : ""}
+  ${canary ? canarySection(canary) : ""}
 </main>
 <div id="tip" role="tooltip" hidden></div>
 <script>${JS}</script>
@@ -210,7 +212,19 @@ function doubleSection({ verdict, checks, notes }: DoubleReport): string {
   </section>`;
 }
 
-// Verdict, checks table and notes, shared by the Stop and double-send sections.
+function canarySection({ input, verdict, checks, notes }: CanaryReport & { input: string | undefined }): string {
+  return `<section aria-labelledby="canary-h">
+    <h2 id="canary-h">Canary image check</h2>
+    <div class="stop">
+      <p class="muted">${
+        input ? `Canary typed into <code>${esc(input)}</code>` : "Canary planted by hand in content the AI reads"
+      }, one extra run on a fresh page</p>
+      ${checksBody(verdict, checks, notes)}
+    </div>
+  </section>`;
+}
+
+// Verdict, checks table and notes, shared by the Stop, double-send and canary sections.
 function checksBody(verdict: string, checks: StopCheck[], notes: string[]): string {
   const mark = (pass: boolean | null) =>
     pass === null ? `<span class="mark muted">? not checked</span>`

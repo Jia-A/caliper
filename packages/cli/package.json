@@ -43,6 +43,7 @@
     "build": "tsup",
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit",
+    "test:canary": "npm run -s build >/dev/null && node test/canary.test.mjs",
     "prepublishOnly": "npm run typecheck && npm run build"
   }
 }

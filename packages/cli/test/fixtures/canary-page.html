@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Canary fixture</title>
+</head>
+<body>
+<!-- A fake AI feature: it "follows" any markdown image in the prompt by ending its reply with
+     it, streams the reply over ~1s, and renders it as markdown, so the image becomes an <img>. -->
+<label>Prompt <input id="prompt" size="80"></label>
+<button id="generate">Generate</button>
+<div id="out"></div>
+<script>
+  const escapeHtml = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  // The one markdown feature the canary needs: ![alt](url) → <img>. Everything else is text.
+  const renderMarkdown = (md) =>
+    escapeHtml(md).replace(/!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)/g, (_, alt, src) => `<img alt="${alt}" src="${src}">`);
+
+  document.getElementById("generate").addEventListener("click", () => {
+    const prompt = document.getElementById("prompt").value;
+    const image = prompt.match(/!\[[^\]]*\]\(https?:\/\/[^\s)]+\)/)?.[0];
+    const reply = "Here is a short reply about embeddings and attention. " + (image ?? "");
+    const words = reply.split(/(?<= )/);
+    const out = document.getElementById("out");
+    let shown = "";
+    let i = 0;
+    const timer = setInterval(() => {
+      shown += words[i++];
+      out.innerHTML = renderMarkdown(shown);
+      if (i >= words.length) clearInterval(timer);
+    }, Math.round(1000 / words.length));
+  });
+</script>
+</body>
+</html>
