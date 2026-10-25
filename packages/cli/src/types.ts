@@ -145,11 +145,26 @@ export interface StopCheck {
   detail: string;
 }
 
-/** The Stop check as shown, shared by the terminal output and the report. */
-export interface StopReport {
+/** pass ✓, warn ⚠, fail ✗ (warn and fail get a fix), unknown ? (inconclusive). */
+export type CheckStatus = "pass" | "warn" | "fail" | "unknown";
+
+/** One check as shown, shared by the terminal output and the report. */
+export interface CheckReport {
+  status: CheckStatus;
   verdict: string;
+  fix?: string; // "Fix: …", only on failing or warning verdicts, tied to what was measured
   checks: StopCheck[];
   notes: string[];
+}
+
+/** The Stop check as shown. */
+export type StopReport = CheckReport;
+
+/** One line of the summary block: a check that ran, by name. */
+export interface SummaryEntry {
+  name: string;
+  report: CheckReport;
+  suffix?: string; // appended to the summary line, e.g. " (no CSP backup)"
 }
 
 /** One output change after the second --measure click, as the in-page recorder saw it. */

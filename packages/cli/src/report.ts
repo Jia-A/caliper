@@ -1,6 +1,18 @@
 // Self-contained HTML timeline for an audit: inline CSS/JS, no external requests.
 
-import type { Breakdown, CanaryReport, CspReport, DoubleReport, Segment, SegmentKey, StopCheck, StopReport, Summary } from "./types.js";
+import type {
+  Breakdown,
+  CanaryReport,
+  CheckReport,
+  CheckStatus,
+  CspReport,
+  DoubleReport,
+  Segment,
+  SegmentKey,
+  StopReport,
+  Summary,
+  SummaryEntry,
+} from "./types.js";
 
 export type ReportRun = Breakdown & { run: number; total: number }; // run: 1-based number, 1 = cold
 
@@ -17,6 +29,8 @@ export interface ReportInput {
   double: DoubleReport | null; // null without --double
   canary: (CanaryReport & { input: string | undefined }) | null; // null without --canary
   csp: CspReport | null; // null without --csp or --canary
+  streaming: CheckReport;
+  checks: SummaryEntry[]; // every check that ran, in summary order
 }
 
 /** A segment as drawn: known, non-negative width. */
@@ -36,7 +50,7 @@ const SEGMENTS: { key: SegmentKey; legend: string }[] = [
   { key: "other", legend: "unattributed" },
 ];
 
-export function renderReport({ url, measure, output, steps, startedAt, summary, runs, failed, stop, double, canary, csp }: ReportInput): string {
+export function renderReport({ url, measure, output, steps, startedAt, summary, runs, failed, stop, double, canary, csp, streaming, checks }: ReportInput): string {
   const bars: ChartRun[] = runs.map((run) => ({ ...run, bars: barSegments(run) }));
   const scale = Math.max(...runs.map((r) => r.total), 1);
   const ticks = niceTicks(scale);
@@ -71,6 +85,7 @@ export function renderReport({ url, measure, output, steps, startedAt, summary, 
       ${tile("Worst (all runs)", summary.worst)}
     </div>
   </header>
+  ${summaryBlock(checks)}
 
   <section aria-labelledby="timeline-h">
     <h2 id="timeline-h">Timeline per run</h2>
@@ -110,6 +125,7 @@ export function renderReport({ url, measure, output, steps, startedAt, summary, 
     </table>
     </div>
   </section>
+  ${streamingSection(streaming)}
   ${stop ? stopSection(stop) : ""}
   ${double ? doubleSection(double) : ""}
   ${canary ? canarySection(canary) : ""}
@@ -194,55 +210,78 @@ function requestRow(run: ReportRun): string {
         </tr>`;
 }
 
-function stopSection({ pattern, verdict, checks, notes }: StopReport & { pattern: string }): string {
+function stopSection({ pattern, verdict, fix, checks, notes }: StopReport & { pattern: string }): string {
   return `<section aria-labelledby="stop-h">
     <h2 id="stop-h">Stop check</h2>
     <div class="stop">
       <p class="muted">Stop button <code>${esc(String(new RegExp(pattern, "i")))}</code>, one extra run on a fresh page</p>
-      ${checksBody(verdict, checks, notes)}
+      ${checksBody({ verdict, fix, checks, notes })}
     </div>
   </section>`;
 }
 
-function doubleSection({ verdict, checks, notes }: DoubleReport): string {
+function doubleSection({ verdict, fix, checks, notes }: DoubleReport): string {
   return `<section aria-labelledby="double-h">
     <h2 id="double-h">Double-send check</h2>
     <div class="stop">
       <p class="muted">The measured button clicked again mid-stream, one extra run on a fresh page</p>
-      ${checksBody(verdict, checks, notes)}
+      ${checksBody({ verdict, fix, checks, notes })}
     </div>
   </section>`;
 }
 
-function canarySection({ input, verdict, checks, notes }: CanaryReport & { input: string | undefined }): string {
+function canarySection({ input, verdict, fix, checks, notes }: CanaryReport & { input: string | undefined }): string {
   return `<section aria-labelledby="canary-h">
     <h2 id="canary-h">Canary image check</h2>
     <div class="stop">
       <p class="muted">${
         input ? `Canary typed into <code>${esc(input)}</code>` : "Canary planted by hand in content the AI reads"
       }, one extra run on a fresh page</p>
-      ${checksBody(verdict, checks, notes)}
+      ${checksBody({ verdict, fix, checks, notes })}
     </div>
   </section>`;
 }
 
-function cspSection({ verdict, checks, notes }: CspReport): string {
+function cspSection({ verdict, fix, checks, notes }: CspReport): string {
   return `<section aria-labelledby="csp-h">
     <h2 id="csp-h">CSP image check</h2>
     <div class="stop">
       <p class="muted">Content-Security-Policy of the first timed run's page: response headers and &lt;meta&gt; tags</p>
-      ${checksBody(verdict, checks, notes)}
+      ${checksBody({ verdict, fix, checks, notes })}
     </div>
   </section>`;
 }
 
-// Verdict, checks table and notes, shared by the Stop, double-send, canary and CSP sections.
-function checksBody(verdict: string, checks: StopCheck[], notes: string[]): string {
+function streamingSection({ verdict, fix, checks, notes }: CheckReport): string {
+  return `<section aria-labelledby="streaming-h">
+    <h2 id="streaming-h">Streaming</h2>
+    <div class="stop">
+      <p class="muted">Median streaming span (first word → done) over the warm runs</p>
+      ${checksBody({ verdict, fix, checks, notes })}
+    </div>
+  </section>`;
+}
+
+const STATUS_MARK: Record<CheckStatus, string> = { pass: "✓", warn: "⚠", fail: "✗", unknown: "?" };
+
+// One line per check that ran, at the top of the report. Same lines as the terminal summary.
+function summaryBlock(entries: SummaryEntry[]): string {
+  return `<section aria-labelledby="summary-h" class="summary">
+    <h2 id="summary-h">Summary</h2>
+    <ul>
+      ${entries.map(({ name, report, suffix }) => `<li class="${report.status}"><span class="smark">${STATUS_MARK[report.status]}</span><b>${esc(name)}</b> ${esc(report.verdict + (suffix ?? ""))}</li>`).join("")}
+    </ul>
+  </section>`;
+}
+
+// Verdict, fix, checks table and notes, shared by every check section.
+function checksBody({ verdict, fix, checks, notes }: Pick<CheckReport, "verdict" | "fix" | "checks" | "notes">): string {
   const mark = (pass: boolean | null) =>
     pass === null ? `<span class="mark muted">? not checked</span>`
     : pass ? `<span class="mark">✓ pass</span>`
     : `<span class="mark">✗ fail</span>`;
   return `<p class="verdict">${esc(verdict)}</p>
+      ${fix ? `<p class="fix">${esc(fix)}</p>` : ""}
       ${checks.length ? `<table><tbody>
         ${checks.map((c) => `<tr><th scope="row">${esc(c.label)}</th><td>${mark(c.pass)}</td><td class="wrap">${esc(c.detail)}</td></tr>`).join("")}
       </tbody></table>` : ""}
@@ -358,6 +397,13 @@ tbody tr:last-child > * { border-bottom: 0; }
 .stop { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
 .stop p { margin: 0 0 8px; }
 .verdict { font-size: 18px; font-weight: 600; }
+.fix { font-weight: 600; }
+.summary ul { list-style: none; margin: 0; padding: 12px 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+.summary li { display: flex; gap: 8px; align-items: baseline; padding: 3px 0; }
+.summary li b { min-width: 96px; }
+.summary .unknown { color: var(--ink-2); }
+.summary .warn .smark { color: var(--seg-click); }
+.smark { width: 1em; flex: none; text-align: center; font-weight: 700; }
 .mark { white-space: nowrap; }
 .notes { margin: 12px 0 0; padding-left: 18px; color: var(--ink-2); }
 #tip { position: fixed; z-index: 10; pointer-events: none; max-width: 320px; background: var(--ink); color: var(--surface);

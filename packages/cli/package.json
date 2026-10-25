@@ -1,6 +1,6 @@
 {
   "name": "caliper-ai",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Measure time from click to first painted output for AI features in a real browser, and break it down by network phase.",
   "keywords": [
     "playwright",
@@ -25,6 +25,7 @@
   "files": [
     "dist/",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "engines": {

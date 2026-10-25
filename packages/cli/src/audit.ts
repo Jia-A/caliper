@@ -10,6 +10,8 @@ import type {
   Breakdown,
   CanaryReport,
   CanaryResult,
+  CheckReport,
+  CheckStatus,
   CspReport,
   CspResult,
   DoneSummary,
@@ -29,6 +31,7 @@ import type {
   StopReport,
   StopResult,
   Summary,
+  SummaryEntry,
   TimedRequest,
 } from "./types.js";
 
@@ -162,7 +165,9 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
 
     const summary = summarize(loaded, failed);
     console.log(formatSummary(summary));
-    console.log(formatDoneSummary(summarizeDone(loaded.filter((r) => r.run > 1).map((r) => r.result))));
+    const doneSummary = summarizeDone(loaded.filter((r) => r.run > 1).map((r) => r.result));
+    const streamingReport = describeStreaming(doneSummary);
+    console.log(formatDoneSummary(doneSummary, streamingReport));
 
     let stopReport: StopReport | null = null;
     if (stopPattern) {
@@ -217,6 +222,21 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
     const cspReport: CspReport | null = cspResult && describeCsp(cspResult, canaryResult);
     if (cspReport) console.log(formatChecks("csp check", cspReport));
 
+    const entries: SummaryEntry[] = [
+      { name: "streaming", report: streamingReport },
+      ...(stopReport ? [{ name: "stop", report: stopReport }] : []),
+      ...(doubleReport ? [{ name: "double-send", report: doubleReport }] : []),
+      ...(canaryReport ? [{
+        name: "canary",
+        report: canaryReport,
+        // Shown as text and no enforced CSP (none, or Report-Only only): nothing else would stop a rendered image.
+        suffix:
+          canaryReport.status === "warn" && cspResult?.headersRead && cspResult.enforced.length === 0 ? " (no CSP backup)" : undefined,
+      }] : []),
+      ...(cspReport ? [{ name: "csp", report: cspReport }] : []),
+    ];
+    console.log(formatSummaryBlock(entries));
+
     if (report) {
       const reportPath = resolve(report);
       const html = renderReport({
@@ -232,6 +252,8 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
         double: doubleReport,
         canary: canaryReport && { input: canaryInput, ...canaryReport },
         csp: cspReport,
+        streaming: streamingReport,
+        checks: entries,
       });
       writeFileSync(reportPath, html);
       console.log(`report: ${reportPath}`);
@@ -1157,22 +1179,30 @@ function describeStop(result: StopResult): StopReport {
   const notes = [HOP2_NOTE];
   switch (result.kind) {
     case "load-failed":
-      return { verdict: "Inconclusive — Stop run couldn't reach the button set by --measure", checks: [], notes: [result.error, ...notes] };
+      return { status: "unknown", verdict: "Inconclusive — Stop run couldn't reach the button set by --measure", checks: [], notes: [result.error, ...notes] };
     case "no-first-word":
-      return { verdict: "Inconclusive — no first word before timeout in the Stop run", checks: [], notes: [result.error, ...notes] };
+      return { status: "unknown", verdict: "Inconclusive — no first word before timeout in the Stop run", checks: [], notes: [result.error, ...notes] };
     case "no-control":
-      return { verdict: "No Stop control found", checks: [], notes: [result.reason, ...notes] };
-    case "ambiguous-control":
-      return { verdict: `Stop pattern matched ${result.count} buttons — make it more specific`, checks: [], notes };
-    case "doesnt-stream":
       return {
+        status: "fail",
+        verdict: "No Stop control found",
+        fix: "Fix: show a Stop button while the answer streams, and have it abort the request.",
+        checks: [],
+        notes: [result.reason, ...notes],
+      };
+    case "ambiguous-control":
+      return { status: "unknown", verdict: `Stop pattern matched ${result.count} buttons — make it more specific`, checks: [], notes };
+    case "doesnt-stream":
+      // Not a Stop failure; the streaming verdict carries the fix.
+      return {
+        status: "unknown",
         verdict: "Doesn't stream — Stop can't be tested mid-stream",
         checks: [],
         notes: [`the whole answer appeared at once (streaming span ${ms(result.span)} ms)`, ...notes],
       };
     case "finished-before-click":
       return {
-        verdict: "Inconclusive — stream finished before the click",
+        status: "unknown", verdict: "Inconclusive — stream finished before the click",
         checks: [],
         notes: [
           `output stopped changing ${ms(result.span)} ms after the first word` +
@@ -1198,7 +1228,7 @@ function describeStop(result: StopResult): StopReport {
 
   if (!network) {
     checks.push({ label: "network", pass: null, detail: "no AI request identified (try --request)" });
-    return { verdict: "Inconclusive — couldn't identify the AI request", checks, notes };
+    return { status: "unknown", verdict: "Inconclusive — couldn't identify the AI request", checks, notes };
   }
 
   const { request, end, bytesAfterStop, bytesAfterAbort } = network;
@@ -1226,13 +1256,29 @@ function describeStop(result: StopResult): StopReport {
 
   // A pass on the abort event alone, with no byte timeline to confirm it, says so.
   const abortOnly = aborted && bytesAfterAbort === null ? " — abort seen; byte timing unavailable" : "";
-  const verdict =
-    aborted && pixelsOk ? `Stop works (browser side)${abortOnly}`
-    : bytesAfterAbortSeen ? "Stop aborted the request, but bytes kept arriving"
-    : aborted ?`Stop aborted the request, but the output kept changing${abortOnly}`
-    : pixelsOk ? "Stop only hides text — stream kept running"
-    : "Stop did nothing — output and stream kept going";
-  return { verdict, checks, notes };
+  const outcome: Pick<StopReport, "status" | "verdict" | "fix"> =
+    aborted && pixelsOk ? { status: "pass", verdict: `Stop works (browser side)${abortOnly}` }
+    : bytesAfterAbortSeen ? {
+        status: "fail",
+        verdict: "Stop aborted the request, but bytes kept arriving",
+        fix: "Fix: make Stop abort the request that is actually streaming; bytes kept arriving after the abort.",
+      }
+    : aborted ? {
+        status: "fail",
+        verdict: `Stop aborted the request, but the output kept changing${abortOnly}`,
+        fix: "Fix: stop updating the output when Stop is clicked; the request was aborted but the text kept changing.",
+      }
+    : pixelsOk ? {
+        status: "fail",
+        verdict: "Stop only hides text — stream kept running",
+        fix: "Fix: abort the fetch with an AbortController; hiding the text doesn't stop you paying.",
+      }
+    : {
+        status: "fail",
+        verdict: "Stop did nothing — output and stream kept going",
+        fix: "Fix: on Stop, abort the fetch with an AbortController and stop updating the output.",
+      };
+  return { ...outcome, checks, notes };
 }
 
 const DOUBLE_HOP2_NOTE =
@@ -1245,17 +1291,18 @@ function describeDouble(result: DoubleResult): DoubleReport {
   const notes = [DOUBLE_HOP2_NOTE];
   switch (result.kind) {
     case "load-failed":
-      return { verdict: "Inconclusive — page failed to load", checks: [], notes: [result.error, ...notes] };
+      return { status: "unknown", verdict: "Inconclusive — page failed to load", checks: [], notes: [result.error, ...notes] };
     case "no-first-word":
-      return { verdict: "Inconclusive — no first word before timeout in the double-send run", checks: [], notes: [result.error, ...notes] };
+      return { status: "unknown", verdict: "Inconclusive — no first word before timeout in the double-send run", checks: [], notes: [result.error, ...notes] };
     case "finished-before-click":
       return {
-        verdict: "Inconclusive — stream finished before the second click",
+        status: "unknown", verdict: "Inconclusive — stream finished before the second click",
         checks: [],
         notes: [`output stopped changing ${ms(result.span)} ms after the first word`, ...notes],
       };
     case "prevented":
       return {
+        status: "pass",
         verdict: "Double send prevented (button disabled while generating)",
         checks: [],
         notes: [
@@ -1266,9 +1313,10 @@ function describeDouble(result: DoubleResult): DoubleReport {
         ],
       };
     case "ambiguous-control":
-      return { verdict: `Inconclusive — --measure matched ${result.count} buttons at the second click`, checks: [], notes };
+      return { status: "unknown", verdict: `Inconclusive — --measure matched ${result.count} buttons at the second click`, checks: [], notes };
     case "ignored":
       return {
+        status: "pass",
         verdict: "Double send ignored (second click sent no request)",
         checks: [],
         notes: [
@@ -1280,7 +1328,7 @@ function describeDouble(result: DoubleResult): DoubleReport {
 
   const { afterFirstWord, network } = result;
   notes.unshift(`clicked --measure again ${ms(afterFirstWord)} ms after the first word, while the output was still changing`);
-  if (!network) return { verdict: "Inconclusive — couldn't identify the AI requests", checks: [], notes };
+  if (!network) return { status: "unknown", verdict: "Inconclusive — couldn't identify the AI requests", checks: [], notes };
 
   const { first, second, outputChangedWhileFirst, oldTextAtSecond } = network;
   const at = (t: number | null) => (t === null ? "" : ` ${ms(t)} ms after the second click`);
@@ -1333,13 +1381,18 @@ function describeDouble(result: DoubleResult): DoubleReport {
     },
   ];
 
-  const verdict =
-    first.end.kind === "finished" ? "Two generations ran — previous request not cancelled (paid twice)"
-    : keptSending ? "Two generations ran — previous request not cancelled"
-    : oldTextAtSecond === true ? "Previous answer not cleared"
-    : cancelled === true && oldTextAtSecond === false && secondStreamed ? "Double send handled (previous request cancelled)"
-    : "Inconclusive — no verdict matched; see checks";
-  return { verdict, checks, notes };
+  const twoRan = "Fix: abort the previous request before starting a new one, or disable the button while generating.";
+  const outcome: Pick<DoubleReport, "status" | "verdict" | "fix"> =
+    first.end.kind === "finished" ? { status: "fail", verdict: "Two generations ran — previous request not cancelled (paid twice)", fix: twoRan }
+    : keptSending ? { status: "fail", verdict: "Two generations ran — previous request not cancelled", fix: twoRan }
+    : oldTextAtSecond === true ? {
+        status: "fail",
+        verdict: "Previous answer not cleared",
+        fix: "Fix: clear the previous answer when a new generation starts.",
+      }
+    : cancelled === true && oldTextAtSecond === false && secondStreamed ? { status: "pass", verdict: "Double send handled (previous request cancelled)" }
+    : { status: "unknown", verdict: "Inconclusive — no verdict matched; see checks" };
+  return { ...outcome, checks, notes };
 }
 
 const CANARY_SCOPE_NOTE =
@@ -1351,14 +1404,14 @@ function describeCanary(result: CanaryResult): CanaryReport {
   const notes = [CANARY_SCOPE_NOTE];
   switch (result.kind) {
     case "load-failed":
-      return { verdict: "Inconclusive — page failed to load", checks: [], notes: [result.error, ...notes] };
+      return { status: "unknown", verdict: "Inconclusive — page failed to load", checks: [], notes: [result.error, ...notes] };
     case "input-failed":
-      return { verdict: "Inconclusive — couldn't type the canary into --canary-input", checks: [], notes: [result.error, ...notes] };
+      return { status: "unknown", verdict: "Inconclusive — couldn't type the canary into --canary-input", checks: [], notes: [result.error, ...notes] };
     case "no-first-word":
-      return { verdict: "Inconclusive — no first word before timeout in the canary run", checks: [], notes: [result.error, ...notes] };
+      return { status: "unknown", verdict: "Inconclusive — no first word before timeout in the canary run", checks: [], notes: [result.error, ...notes] };
     case "already-present":
       return {
-        verdict: "Inconclusive — the canary was on the page before the click",
+        status: "unknown", verdict: "Inconclusive — the canary was on the page before the click",
         checks: [],
         notes: [
           result.where === "request"
@@ -1405,17 +1458,27 @@ function describeCanary(result: CanaryResult): CanaryReport {
   if (outcome === "not-followed") {
     notes.push("an app that strips images from the output before showing it looks the same as a model that ignored the canary");
   }
-  return { verdict: CANARY_VERDICTS[outcome], checks, notes };
+  return { ...CANARY_VERDICTS[outcome], checks, notes };
 }
 
 type CanaryOutcome = "exfiltration" | "csp-blocked" | "shown-as-text" | "not-followed" | "inconclusive";
 
-const CANARY_VERDICTS: Record<CanaryOutcome, string> = {
-  exfiltration: "Exfiltration possible — the page turned model output into an image request",
-  "csp-blocked": "Renders model images, but CSP blocked the trip",
-  "shown-as-text": "Model followed the injection; page showed it as text (safe)",
-  "not-followed": "Inconclusive — the model didn't follow the canary, so rendering is untested",
-  inconclusive: "Inconclusive — no verdict matched; see checks",
+const CANARY_VERDICTS: Record<CanaryOutcome, Pick<CanaryReport, "status" | "verdict" | "fix">> = {
+  exfiltration: {
+    status: "fail",
+    verdict: "Exfiltration possible — the page turned model output into an image request",
+    fix: "Fix: don't render images from model output, or add a CSP img-src allowlist.",
+  },
+  // The only pass: the page rendered the image, and CSP stopped the request.
+  "csp-blocked": { status: "pass", verdict: "Renders model images, but CSP blocked the trip" },
+  // No request was made, but the model obeyed injected content; only text display stood in the way.
+  "shown-as-text": {
+    status: "warn",
+    verdict: "Model followed the injection; shown as text, no request — safe only because the output isn't rendered",
+    fix: "Fix: keep showing model output as text, or add a CSP img-src allowlist before ever rendering it as markdown.",
+  },
+  "not-followed": { status: "unknown", verdict: "Inconclusive — the model didn't follow the canary, so rendering is untested" },
+  inconclusive: { status: "unknown", verdict: "Inconclusive — no verdict matched; see checks" },
 };
 
 // The canary verdict, in priority order; shared by the canary and CSP checks.
@@ -1466,7 +1529,7 @@ function describeCsp(result: CspResult, canary: CanaryResult | null): CspReport 
   }
 
   if (!result.headersRead && enforced.length === 0) {
-    return { verdict: "Inconclusive — couldn't read the page's response headers", checks, notes };
+    return { status: "unknown", verdict: "Inconclusive — couldn't read the page's response headers", checks, notes };
   }
   if (!result.headersRead) notes.unshift("the document's response headers weren't available; only <meta> policies were read");
   if (combined.kind !== "unrestricted" && (combined.data || combined.blob)) {
@@ -1478,14 +1541,22 @@ function describeCsp(result: CspResult, canary: CanaryResult | null): CspReport 
     enforced.length === 0 ? (reportOnly.length ? "report-only" : "none")
     : combined.kind === "list" ? "restricted"
     : "anywhere";
-  const verdict =
-    strength === "none" ? "No CSP — nothing stops image requests to any domain"
-    : strength === "report-only" ? "CSP is report-only — it logs violations but doesn't block"
-    : strength === "anywhere" ? "CSP present, but images can load from anywhere"
-    : `Images restricted to: ${(combined as Extract<ImageRule, { kind: "list" }>).sources.join(", ") || "nothing ('none')"}`;
+  const allowlist = "Fix: send a Content-Security-Policy header with img-src limited to domains you trust.";
+  const outcome: Pick<CspReport, "status" | "verdict" | "fix"> =
+    strength === "none" ? { status: "fail", verdict: "No CSP — nothing stops image requests to any domain", fix: allowlist }
+    : strength === "report-only" ? {
+        status: "fail",
+        verdict: "CSP is report-only — it logs violations but doesn't block",
+        fix: "Fix: send an enforcing Content-Security-Policy header (not Report-Only) with img-src limited to domains you trust.",
+      }
+    : strength === "anywhere" ? { status: "fail", verdict: "CSP present, but images can load from anywhere", fix: allowlist }
+    : {
+        status: "pass",
+        verdict: `Images restricted to: ${(combined as Extract<ImageRule, { kind: "list" }>).sources.join(", ") || "nothing ('none')"}`,
+      };
 
   if (canary) notes.unshift(cspVsCanary(strength, canaryOutcome(canary)));
-  return { verdict, checks, notes };
+  return { ...outcome, checks, notes };
 }
 
 // One line reading the CSP verdict against what the canary check saw.
@@ -1511,14 +1582,41 @@ function cspVsCanary(strength: CspStrength, outcome: CanaryOutcome): string {
   }
 }
 
-function formatChecks(title: string, { verdict, checks, notes }: StopReport): string {
+function formatChecks(title: string, { verdict, fix, checks, notes }: CheckReport): string {
   const mark = (pass: boolean | null) => (pass === null ? "?" : pass ? "✓" : "✗");
   return [
     title,
     ...checks.map((c) => `    ${mark(c.pass)} ${c.label.padEnd(9)} ${c.detail}`),
     `    ${verdict}`,
+    ...(fix ? [`    ${fix}`] : []),
     ...notes.map((n) => `    note: ${n}`),
   ].join("\n");
+}
+
+const STATUS_MARK: Record<CheckStatus, string> = { pass: "✓", warn: "⚠", fail: "✗", unknown: "?" };
+
+// One line per check that ran: mark and verdict. Same lines as the report's summary block.
+function formatSummaryBlock(entries: SummaryEntry[]): string {
+  return [
+    "summary",
+    ...entries.map(({ name, report, suffix }) =>
+      `    ${STATUS_MARK[report.status]} ${name.padEnd(11)} ${report.verdict}${suffix ?? ""}`
+    ),
+  ].join("\n");
+}
+
+const STREAM_FIX = "Fix: stream the response; users see the first word sooner, total time stays the same.";
+
+// The streaming verdict over the warm runs, shared by the terminal summary and the report.
+function describeStreaming({ done, span, warm }: DoneSummary): CheckReport {
+  const report = (r: Pick<CheckReport, "status" | "verdict" | "fix">): CheckReport => ({ ...r, checks: [], notes: [] });
+  if (warm === 0) return report({ status: "unknown", verdict: "Inconclusive — no warm runs for a median (use --runs 2 or more)" });
+  if (done === null || span === null) {
+    return report({ status: "unknown", verdict: `Inconclusive — no warm run settled within ${DONE_CAP_MS / 1000}s` });
+  }
+  return span < STREAMS_MIN_MS
+    ? report({ status: "fail", verdict: verdict(span), fix: STREAM_FIX })
+    : report({ status: "pass", verdict: verdict(span) });
 }
 
 function summarizeRequest(r: RequestTiming): RequestSummary {
@@ -1583,9 +1681,9 @@ function formatSummary({ cold, median, worst, warm, warmFailed }: Summary): stri
   return `${coldPart} · median ${median} ms · worst ${worst} ms${used}`;
 }
 
-function formatDoneSummary({ done, span, warm, unsettled }: DoneSummary): string {
+function formatDoneSummary({ done, span, warm, unsettled }: DoneSummary, streaming: CheckReport): string {
   if (warm === 0) return "done: no warm runs for a median, so no verdict";
   const skipped = unsettled ? ` (${unsettled} of ${warm} warm runs did not settle; left out)` : "";
   if (done === null || span === null) return `done: no warm run settled within ${DONE_CAP_MS / 1000}s, so no verdict`;
-  return `done: median ${done} ms · span median ${span} ms${skipped}\n${verdict(span)}`;
+  return `done: median ${done} ms · span median ${span} ms${skipped}\n${streaming.verdict}${streaming.fix ? `\n${streaming.fix}` : ""}`;
 }

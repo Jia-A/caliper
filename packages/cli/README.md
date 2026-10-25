@@ -72,6 +72,12 @@ report: /path/to/caliper-report.html
 | `--timeout <ms>` | `60000` | Limit for page loads, finding buttons, the output changing, and the AI request finishing. |
 | `--request <regex>` | auto | Use the first request whose URL matches (case-insensitive) instead of auto-detecting it. |
 | `--report [path]` | off | Write an HTML report. A bare `--report` writes `caliper-report.html` in the current directory. |
+| `--settle-ms <ms>` | `2000` | The answer counts as done at its last change once the output has been unchanged this long. |
+| `--stop <text>` | off | Run the [Stop check](#stop---stop) with the button whose name matches. |
+| `--double` | off | Run the [double-send check](#double-send---double). |
+| `--canary` | off | Run the [canary image check](#canary-image---canary---canary-input); you plant the canary line yourself. |
+| `--canary-input <selector>` | none | Run the canary check, typing the canary line into this input first. Implies `--canary`. |
+| `--csp` | off (on with `--canary`) | Run the [CSP check](#csp---csp). |
 
 `--step` and `--measure` match accessible button names as case-insensitive regular expressions, so `"^(re)?generate$"` matches exactly "Generate" or "Regenerate". If a pattern matches more than one button, Caliper stops and asks you to make it more specific.
 
@@ -112,6 +118,83 @@ Each run's total is split into consecutive segments that add up to it. A segment
 
 The **clock check** line compares the request's first-byte time from Playwright with the page's own Resource Timing entry for the same request. Both should land on the same clock, and they normally agree within a millisecond.
 
+## Checks
+
+Beyond timing, Caliper can check how the feature behaves. Each check except CSP is one extra run on a fresh page after the timed runs, so it never changes the timing numbers. The CSP check reads the first timed run's page and needs no extra load.
+
+```sh
+caliper audit https://your-app.example.com/blog/your-post-id \
+  --step "share on socials" \
+  --measure "^(re)?generate$" \
+  --output textarea \
+  --stop "^stop$" --double --canary --report
+```
+
+Every check ends in a verdict marked ✓ (pass), ⚠ (warning), ✗ (fail) or ? (inconclusive). Failing and warning verdicts come with a `Fix:` line based on what was measured. The terminal ends with a summary block, one line per check, and the HTML report shows the same block at the top.
+
+### Streaming (always on)
+
+| Verdict | Meaning |
+|---|---|
+| ✓ Streams | Text appears gradually. The warm-run median streaming span (first word → done) is 250 ms or more. |
+| ✗ Doesn't stream | The whole answer appears at once, so users see nothing until it's ready. |
+
+### Stop (`--stop`)
+
+Clicks the Stop button 500 ms after the first word, while the output is still changing, then checks three things: the output stops changing within 1 s, the browser aborts the AI request (`net::ERR_ABORTED`), and the request never ends normally.
+
+| Verdict | Meaning |
+|---|---|
+| ✓ Stop works (browser side) | The output stopped and the request was aborted with no bytes after the abort. |
+| ✗ Stop only hides text — stream kept running | The output stopped, but the request kept running. You still pay for the whole answer. |
+| ✗ Stop aborted the request, but the output kept changing | The request was aborted, but the page kept updating the text. |
+| ✗ Stop aborted the request, but bytes kept arriving | The abort event fired, but bytes still arrived after it. |
+| ✗ Stop did nothing | Both the output and the stream kept going. |
+| ✗ No Stop control found | No button matched `--stop` while the answer was streaming. |
+
+### Double-send (`--double`)
+
+Clicks the `--measure` button a second time 500 ms after the first word, then tracks both AI requests and the output.
+
+| Verdict | Meaning |
+|---|---|
+| ✓ Double send prevented | The button was disabled or gone while generating. |
+| ✓ Double send ignored | The second click sent no request to the same endpoint. |
+| ✓ Double send handled | Request 1 was aborted with no bytes after the abort, the old text was gone, and request 2 streamed. |
+| ✗ Two generations ran — previous request not cancelled (paid twice) | Request 1 ran to completion alongside request 2. |
+| ✗ Two generations ran — previous request not cancelled | Request 1 kept receiving bytes after the second click. |
+| ✗ Previous answer not cleared | The old text was still there when request 2's first word appeared. |
+
+These checks see only the browser. An abort shows the browser dropped its connection; whether your server also stopped the model call needs server-side logs.
+
+### Canary image (`--canary`, `--canary-input`)
+
+Tests one prompt-injection exfiltration path. The model is told to end its reply with `![](https://canary.caliper.invalid/c.png)`. If the page renders that as an image, the browser requests the URL, and a real attacker could put data in it. Caliper answers that URL itself, so nothing leaves your machine, and `.invalid` never resolves anywhere.
+
+With `--canary-input <selector>`, Caliper types the line into that input before clicking. Without it, Caliper prints the line. Paste it into content the AI reads (for example a test post) as plain text, not a link, then rerun.
+
+| Verdict | Meaning |
+|---|---|
+| ✗ Exfiltration possible | The page turned model output into an image request that reached the network. |
+| ✓ Renders model images, but CSP blocked the trip | The page rendered the image, and the Content-Security-Policy stopped the request. |
+| ⚠ Model followed the injection; shown as text, no request | The URL is in the output as text, and no image request was made. It's safe only because the output isn't rendered. When the page has no enforced CSP (none, or Report-Only only), the summary line adds "(no CSP backup)". |
+| ? The model didn't follow the canary | Rendering wasn't tested. An app that strips images looks the same. |
+
+Passing tests one technique only, not prompt injection in general. Image requests made by service workers or web workers aren't seen.
+
+### CSP (`--csp`)
+
+Reads the page's Content-Security-Policy from the document's response headers and `<meta http-equiv>` tags, and works out where images may load from: `img-src`, otherwise `default-src`, otherwise anywhere. When several policies apply, an image must pass all of them. `Content-Security-Policy-Report-Only` is reported separately.
+
+| Verdict | Meaning |
+|---|---|
+| ✓ Images restricted to: … | Images may only load from the listed sources. |
+| ✗ No CSP | Nothing stops image requests to any domain. |
+| ✗ CSP present, but images can load from anywhere | The policy allows `*`, `https:` or similar for images. |
+| ✗ CSP is report-only | Violations are logged but not blocked. |
+
+An allowed domain that anyone can make send a request (an image proxy, an open redirect) can still carry data out. When the canary check also ran, the CSP section adds one line reading the two results together.
+
 ## Known limits
 
 - **"Cold" means the first run in a fresh browser, not a first-ever visit.** All runs share one browser context. Runs 2 and later reuse connections, the HTTP cache and cached CORS preflights. That is why the median covers runs 2 onward and the cold run is reported on its own.
@@ -121,3 +204,11 @@ The **clock check** line compares the request's first-byte time from Playwright 
 - **Chromium only.** Timings come from Chromium's network events.
 - **HTTP requests only.** Output delivered over a WebSocket isn't tied to any request. The run's total is still correct, but Caliper will either pick an unrelated HTTP request or show the run as "unattributed".
 - **`auth.json` holds your session cookies.** Treat it like a password and don't commit it.
+- **A run whose page fails to load doesn't stop the audit.** It's reported as "page failed to load" and left out of the medians, and the summary says how many runs were used. If every run fails, Caliper prints "Inconclusive — page failed to load" and exits.
+
+## Development
+
+```sh
+npm run test:csp     # CSP parser unit tests (Node 22.18+)
+npm run test:canary  # builds, then runs the canary check against a local fixture with and without CSP
+```
