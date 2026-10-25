@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1 — 2026-10-26
+
+### Fixed
+
+- **No more hang on streams that end `net::ERR_ABORTED` after the full body.** Chromium ends a streamed response sent with `Cache-Control: no-store` that way once the page has read all of it, and Playwright's `response.finished()` then never settles, so the run waited out `--timeout` and the audit failed. Caliper now waits for the request to finish *or* fail, bounded by what's left of `--timeout` from the click. A request that ended `ERR_ABORTED` counts as finished when the body bytes Chrome received (CDP) match the body the page's Resource Timing entry recorded. It's labelled "ended ERR_ABORTED after full body — treated as finished" in the terminal and the report. A request aborted mid-body is noted as "ended net::ERR_ABORTED; full body not confirmed" instead (the same note when the body can't be confirmed, e.g. cross-origin without `Timing-Allow-Origin`).
+- Test: `npm run test:nostore` (a no-store stream read in full, and one the page really aborts).
+
 ## 0.2.0 — 2026-10-26
 
 ### Added

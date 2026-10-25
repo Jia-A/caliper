@@ -1,6 +1,6 @@
 {
   "name": "caliper-ai",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Measure time from click to first painted output for AI features in a real browser, and break it down by network phase.",
   "keywords": [
     "playwright",
@@ -46,6 +46,7 @@
     "typecheck": "tsc --noEmit",
     "test:csp": "node --test test/csp.test.ts",
     "test:canary": "npm run -s build >/dev/null && node test/canary.test.mjs",
-    "prepublishOnly": "npm run typecheck && npm run build"
+    "prepublishOnly": "npm run typecheck && npm run build",
+    "test:nostore": "npm run -s build >/dev/null && node test/nostore.test.mjs"
   }
 }

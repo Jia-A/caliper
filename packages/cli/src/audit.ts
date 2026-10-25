@@ -266,26 +266,33 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
 async function measureOnce(page: Page, options: MeasureOptions): Promise<RunResult> {
   const { timeout, requestPattern } = options;
   const target = await prepareRun(page, options);
+  // Byte counts per request, to tell a stream that ended ERR_ABORTED after its full body.
+  const wire = await startWireCapture(page, await page.evaluate(() => performance.timeOrigin));
 
-  // 2. Click — this is where the timer starts. Network capture starts just before it.
-  const network = startNetworkCapture(page);
-  await target.click();
+  try {
+    // 2. Click — this is where the timer starts. Network capture starts just before it.
+    const network = startNetworkCapture(page);
+    const deadline = Date.now() + timeout; // --timeout counts from the click
+    await target.click();
 
-  // 3. Wait for the in-page watcher to report back.
-  const timing = await waitForFirstWord(page, options);
+    // 3. Wait for the in-page watcher to report back.
+    const timing = await waitForFirstWord(page, options);
 
-  const { requests, timeOrigin } = await network.stop(timing);
-  const pick = chooseRequest(requests, timing, requestPattern);
-  if (pick) {
-    // A streaming response is usually still open at first paint, and its Resource Timing
-    // entry only appears once it completes, so wait for it.
-    pick.request = await waitUntilFinished(page, pick.request, timeOrigin, timeout);
+    const { requests, timeOrigin } = await network.stop(timing);
+    const pick = chooseRequest(requests, timing, requestPattern);
+    if (pick) {
+      // A streaming response is usually still open at first paint, and its Resource Timing
+      // entry only appears once it completes, so wait for it.
+      pick.request = await waitUntilFinished(page, pick.request, timeOrigin, deadline, wire);
+    }
+
+    // 4. Wait for the output to stop changing (the watcher caps this itself).
+    const done = await page.evaluate(() => window.__caliperDone);
+
+    return { ms: Math.round(timing.firstPaintAt - timing.clickAt), timing, done, requests, pick };
+  } finally {
+    await wire.stop();
   }
-
-  // 4. Wait for the output to stop changing (the watcher caps this itself).
-  const done = await page.evaluate(() => window.__caliperDone);
-
-  return { ms: Math.round(timing.firstPaintAt - timing.clickAt), timing, done, requests, pick };
 }
 
 // Loads the page, clicks the --step buttons and installs the watcher. Returns the --measure
@@ -793,18 +800,50 @@ async function readCsp(page: Page, response: Response | null): Promise<CspResult
 
 const TIMED_OUT: unique symbol = Symbol("timed out");
 
-async function waitUntilFinished(page: Page, r: RequestTiming, timeOrigin: number, timeout: number): Promise<RequestTiming> {
+// Waits for the request to end, until the deadline (the --timeout from the click). It may end
+// normally (requestfinished) or fail (requestfailed); Playwright's response.finished() never
+// settles for a request that fails after its response, so the failure is raced too.
+async function waitUntilFinished(
+  page: Page,
+  r: RequestTiming,
+  timeOrigin: number,
+  deadline: number,
+  wire: Awaited<ReturnType<typeof startWireCapture>>
+): Promise<RequestTiming> {
   if (r.end !== null || !r.response) return r;
 
   const timer = new AbortController();
+  let onFailed!: (request: Request) => void;
+  const failed = new Promise<void>((resolve) => {
+    onFailed = (request) => request === r.raw && resolve();
+    page.on("requestfailed", onFailed);
+    if (r.raw.failure()) resolve(); // already failed before we looked
+  });
   const outcome = await Promise.race([
     r.response.finished(),
-    sleep(timeout, TIMED_OUT, { signal: timer.signal }),
-  ]).finally(() => timer.abort());
+    failed,
+    sleep(Math.max(0, deadline - Date.now()), TIMED_OUT, { signal: timer.signal }),
+  ]).finally(() => {
+    timer.abort();
+    page.off("requestfailed", onFailed);
+  });
   if (outcome === TIMED_OUT) {
-    throw new CliError(`Timed out after ${timeout} ms waiting for ${r.method} ${r.url} to finish.`);
+    throw new CliError(`Timed out (--timeout) waiting for ${r.method} ${r.url} to finish.`);
   }
-  return describeRequest(r.raw, r.response, timeOrigin, await readResourceTiming(page));
+
+  if (r.raw.failure()) await sleep(NETWORK_SETTLE_MS); // let the page's Resource Timing entry land
+  const ended = describeRequest(r.raw, r.response, timeOrigin, await readResourceTiming(page));
+  return fullBodyBeforeAbort(ended, wire.match(ended)) ? { ...ended, end: ended.rt!.responseEnd, abortedAfterBody: true } : ended;
+}
+
+// Chromium can end a stream net::ERR_ABORTED after the page has read all of it (seen with
+// Cache-Control: no-store). It counts as finished when the body bytes Chrome received (CDP
+// dataReceived) match the body the page's Resource Timing entry recorded. A real mid-body
+// abort leaves that entry's body size at 0, as does a cross-origin response without
+// Timing-Allow-Origin, so neither is mistaken for a full body.
+function fullBodyBeforeAbort(r: RequestTiming, w: WireRequest | null): boolean {
+  if (!/ERR_ABORTED/.test(r.failure ?? "") || !w || !r.rt) return false;
+  return w.bodyBytes > 0 && r.rt.decodedBodySize === w.bodyBytes;
 }
 
 // Records every request the page makes from just before the click until first paint.
@@ -866,6 +905,7 @@ interface WireRequest {
   method: string;
   sentAt: number;
   chunks: { at: number; bytes: number }[];
+  bodyBytes: number; // decoded body bytes (dataLength), comparable to Resource Timing's decodedBodySize
   finishedAt: number | null;
   failedAt: number | null;
 }
@@ -889,12 +929,16 @@ async function startWireCapture(page: Page, timeOrigin: number) {
       method: e.request.method,
       sentAt: toPage(e.timestamp),
       chunks: [],
+      bodyBytes: 0,
       finishedAt: null,
       failedAt: null,
     });
   });
   cdp.on("Network.dataReceived", (e) => {
-    wire.get(e.requestId)?.chunks.push({ at: toPage(e.timestamp), bytes: e.encodedDataLength || e.dataLength });
+    const w = wire.get(e.requestId);
+    if (!w) return;
+    w.chunks.push({ at: toPage(e.timestamp), bytes: e.encodedDataLength || e.dataLength });
+    w.bodyBytes += e.dataLength;
   });
   cdp.on("Network.loadingFinished", (e) => {
     const w = wire.get(e.requestId);
@@ -1041,6 +1085,8 @@ function readResourceTiming(page: Page): Promise<ResourceTimingEntry[]> {
       name: e.name,
       startTime: e.startTime,
       responseStart: e.responseStart, // 0 cross-origin without Timing-Allow-Origin
+      responseEnd: e.responseEnd,
+      decodedBodySize: e.decodedBodySize, // 0 cross-origin without Timing-Allow-Origin
     }))
   );
 }
@@ -1104,6 +1150,12 @@ function verdict(span: number): string {
   return span < STREAMS_MIN_MS ? "Doesn't stream: users see nothing until the whole answer is ready." : "Streams.";
 }
 
+// How a request that failed after its response ended, for the segment notes; null if it didn't fail.
+function abortNote(r: RequestTiming): string | null {
+  if (r.abortedAfterBody) return "ended ERR_ABORTED after full body — treated as finished";
+  return r.failure ? `ended ${r.failure}; full body not confirmed` : null;
+}
+
 // Gaps smaller than this between fetch() and the request going out are normal overhead
 // (~1 ms), not a preflight.
 const PREFLIGHT_MIN_MS = 5;
@@ -1137,7 +1189,7 @@ function breakdown({ timing, pick }: RunResult): Breakdown {
     ms: toFirstByte === null ? null : toFirstByte - r.connectionSetup,
   });
   if (r.end !== null && r.end <= firstPaintAt) {
-    segments.push({ key: "download", label: "first byte → done", ms: span(r.firstByte, r.end) });
+    segments.push({ key: "download", label: "first byte → done", ms: span(r.firstByte, r.end), note: abortNote(r) ?? undefined });
     segments.push({
       key: "render",
       label: "done → first paint",
@@ -1147,8 +1199,8 @@ function breakdown({ timing, pick }: RunResult): Breakdown {
   } else {
     const note =
       r.firstByte === null ? "no response by first paint"
-      : r.end === null ? "still streaming at first paint"
-      : `done ${ms(r.end - firstPaintAt)} ms after paint`;
+      : r.end === null ? (r.failure ? `ended ${r.failure}` : "still streaming at first paint")
+      : [`done ${ms(r.end - firstPaintAt)} ms after paint`, abortNote(r)].filter(Boolean).join("; ");
     segments.push({ key: "streaming", label: "first byte → first paint", ms: span(r.firstByte, firstPaintAt), note });
   }
 

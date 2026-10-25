@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Stream fixture</title>
+</head>
+<body>
+<!-- A fake AI feature that streams its reply from /chat/stream-nostore, an SSE response sent
+     with Cache-Control: no-store, which Chromium ends net::ERR_ABORTED once it's fully read.
+     ?abort=N aborts the fetch for real after N tokens instead. -->
+<button id="generate">Generate</button>
+<div id="out"></div>
+<script>
+  const abortAfter = Number(new URLSearchParams(location.search).get("abort") ?? 0);
+
+  document.getElementById("generate").addEventListener("click", async () => {
+    const out = document.getElementById("out");
+    const controller = new AbortController();
+    const res = await fetch("/chat/stream-nostore", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+      signal: controller.signal,
+    });
+    const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+    let buffer = "";
+    let tokens = 0;
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += value;
+        const events = buffer.split("\n\n");
+        buffer = events.pop();
+        for (const event of events) {
+          const data = event.replace(/^data: /, "");
+          if (data === "[DONE]") continue;
+          out.textContent += JSON.parse(data).t;
+          if (++tokens === abortAfter) controller.abort();
+        }
+      }
+    } catch {} // the abort
+  });
+</script>
+</body>
+</html>

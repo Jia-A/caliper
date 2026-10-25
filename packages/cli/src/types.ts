@@ -21,6 +21,8 @@ export interface ResourceTimingEntry {
   name: string;
   startTime: number; // when fetch() was called
   responseStart: number; // 0 cross-origin without Timing-Allow-Origin
+  responseEnd: number; // when the page had the last byte
+  decodedBodySize: number; // body bytes the page received; 0 for a mid-body abort, or cross-origin without Timing-Allow-Origin
 }
 
 /** One request the page made between the measured click and first paint. */
@@ -40,6 +42,7 @@ export interface RequestTiming {
   status: number | null;
   contentType: string | null;
   failure: string | null;
+  abortedAfterBody?: boolean; // ended net::ERR_ABORTED after the full body arrived; end is when it did
 }
 
 /** A request with a known start, the only kind auto-detection considers. */
