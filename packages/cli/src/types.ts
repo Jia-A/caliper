@@ -213,6 +213,22 @@ export type CanaryResult =
 /** The canary check as shown; same shape as the Stop check. */
 export type CanaryReport = StopReport;
 
+/** One CSP policy as the page delivered it. */
+export interface CspPolicy {
+  source: "header" | "meta";
+  text: string;
+}
+
+/** The CSP policies of the first loaded timed run's document. */
+export interface CspResult {
+  headersRead: boolean; // false when the document's response wasn't seen, so header policies are unknown
+  enforced: CspPolicy[]; // Content-Security-Policy headers and <meta http-equiv> tags
+  reportOnly: string[]; // Content-Security-Policy-Report-Only headers (browsers ignore it in <meta>)
+}
+
+/** The CSP check as shown; same shape as the Stop check. */
+export type CspReport = StopReport;
+
 /** Warm-run medians for done; null when no warm run settled. */
 export interface DoneSummary {
   done: number | null;

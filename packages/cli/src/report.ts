@@ -1,6 +1,6 @@
 // Self-contained HTML timeline for an audit: inline CSS/JS, no external requests.
 
-import type { Breakdown, CanaryReport, DoubleReport, Segment, SegmentKey, StopCheck, StopReport, Summary } from "./types.js";
+import type { Breakdown, CanaryReport, CspReport, DoubleReport, Segment, SegmentKey, StopCheck, StopReport, Summary } from "./types.js";
 
 export type ReportRun = Breakdown & { run: number; total: number }; // run: 1-based number, 1 = cold
 
@@ -16,6 +16,7 @@ export interface ReportInput {
   stop: (StopReport & { pattern: string }) | null; // null without --stop
   double: DoubleReport | null; // null without --double
   canary: (CanaryReport & { input: string | undefined }) | null; // null without --canary
+  csp: CspReport | null; // null without --csp or --canary
 }
 
 /** A segment as drawn: known, non-negative width. */
@@ -35,7 +36,7 @@ const SEGMENTS: { key: SegmentKey; legend: string }[] = [
   { key: "other", legend: "unattributed" },
 ];
 
-export function renderReport({ url, measure, output, steps, startedAt, summary, runs, failed, stop, double, canary }: ReportInput): string {
+export function renderReport({ url, measure, output, steps, startedAt, summary, runs, failed, stop, double, canary, csp }: ReportInput): string {
   const bars: ChartRun[] = runs.map((run) => ({ ...run, bars: barSegments(run) }));
   const scale = Math.max(...runs.map((r) => r.total), 1);
   const ticks = niceTicks(scale);
@@ -112,6 +113,7 @@ export function renderReport({ url, measure, output, steps, startedAt, summary, 
   ${stop ? stopSection(stop) : ""}
   ${double ? doubleSection(double) : ""}
   ${canary ? canarySection(canary) : ""}
+  ${csp ? cspSection(csp) : ""}
 </main>
 <div id="tip" role="tooltip" hidden></div>
 <script>${JS}</script>
@@ -224,7 +226,17 @@ function canarySection({ input, verdict, checks, notes }: CanaryReport & { input
   </section>`;
 }
 
-// Verdict, checks table and notes, shared by the Stop, double-send and canary sections.
+function cspSection({ verdict, checks, notes }: CspReport): string {
+  return `<section aria-labelledby="csp-h">
+    <h2 id="csp-h">CSP image check</h2>
+    <div class="stop">
+      <p class="muted">Content-Security-Policy of the first timed run's page: response headers and &lt;meta&gt; tags</p>
+      ${checksBody(verdict, checks, notes)}
+    </div>
+  </section>`;
+}
+
+// Verdict, checks table and notes, shared by the Stop, double-send, canary and CSP sections.
 function checksBody(verdict: string, checks: StopCheck[], notes: string[]): string {
   const mark = (pass: boolean | null) =>
     pass === null ? `<span class="mark muted">? not checked</span>`
