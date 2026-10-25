@@ -56,6 +56,18 @@ export interface ScoredRequest {
   score?: number; // absent when chosen by --request
 }
 
+/** One output change inside a --output container, as the chat watcher saw it. */
+export interface ContainerChange {
+  at: number;
+  text: string; // what changed: the added or edited text, trimmed and shortened; "<tag>" for an empty element
+}
+
+/** What a chat-style run (--input/--prompt) saw before and at the reply. */
+export interface ChatTiming {
+  firstByteAt: number | null; // the chosen AI request's first byte; null with no request chosen
+  preReply: ContainerChange[]; // changes before the first word (placeholders), never timed
+}
+
 /** Everything one run measured. */
 export interface RunResult {
   ms: number; // click → first paint, rounded
@@ -63,6 +75,7 @@ export interface RunResult {
   done: DoneTiming;
   requests: RequestTiming[];
   pick: ScoredRequest | null;
+  chat?: ChatTiming; // only for --input runs
 }
 
 export type SegmentKey =

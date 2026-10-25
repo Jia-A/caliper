@@ -9,6 +9,7 @@ const USAGE = `Usage:
       Open a browser, log in by hand, save the session.
 
   caliper audit <url> --measure <text> --output <selector>
+  caliper audit <url> --input <selector> --prompt <text> --output <selector> [--measure <text>]
       [--step <text>]... [--runs 3] [--headed] [--auth auth.json] [--timeout 60000]
       [--request <regex>] [--report [path]] [--settle-ms 2000] [--stop <text>] [--double]
       [--canary] [--canary-input <selector>] [--csp]
@@ -27,6 +28,11 @@ const USAGE = `Usage:
       it, paste the printed line into content the AI reads.
       --csp reads the page's Content-Security-Policy and reports where images may
       load from (on by default with --canary).
+      --input and --prompt time a chat-style page instead: Caliper types --prompt
+      into --input and sends it with the --measure button, or Enter without one.
+      --output may then be the message list; the first word is its first change
+      after the AI request's first byte, so your own message and placeholders like
+      "Thinking…" don't count. Not yet combinable with --stop, --double or --canary.
 
   --step, --measure and --stop are button names, matched as case-insensitive regexes.`;
 
@@ -76,11 +82,19 @@ const COMMANDS = {
       canary: { type: "boolean", default: false },
       "canary-input": { type: "string" },
       csp: { type: "boolean", default: false },
+      input: { type: "string" },
+      prompt: { type: "string" },
     },
     optionalValues: { report: DEFAULT_REPORT },
     async run({ url, values }) {
-      if (!values.measure) throw new CliError("audit: --measure <text> is required.");
+      if (!values.measure && !values.input) throw new CliError("audit: --measure <text> (or --input <selector>) is required.");
       if (!values.output) throw new CliError("audit: --output <selector> is required.");
+      if (values.input && values.prompt === undefined) throw new CliError("audit: --input needs --prompt <text>.");
+      if (values.prompt !== undefined && !values.input) throw new CliError("audit: --prompt needs --input <selector>.");
+      if (values.input) {
+        const clash = (["stop", "double", "canary", "canary-input"] as const).find((f) => values[f]);
+        if (clash) throw new CliError(`audit: --${clash} can't be combined with --input yet.`);
+      }
 
       const { audit } = await import("./audit.js");
       await audit({
@@ -100,6 +114,7 @@ const COMMANDS = {
         canary: values.canary,
         canaryInput: values["canary-input"],
         csp: values.csp,
+        chat: values.input ? { input: values.input, prompt: values.prompt! } : undefined,
       });
     },
   }),

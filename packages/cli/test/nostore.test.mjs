@@ -21,6 +21,7 @@ const TIMEOUT_MS = 15_000; // the old hang waited this long, then failed the aud
 const CASES = [
   { name: "click, full body", path: "/stream-nostore", args: ["--measure", "^generate$", "--output", "#out"], label: true },
   { name: "click, real abort", path: "/stream-nostore?abort=3", args: ["--measure", "^generate$", "--output", "#out"], label: false },
+  { name: "chat, full body", path: "/chat?stream=nostore", args: ["--input", "#msg", "--prompt", "hello", "--output", "#messages"], label: true },
 ];
 
 const server = await startFixtureServer();

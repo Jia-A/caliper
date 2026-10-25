@@ -14,11 +14,18 @@ import type {
   SummaryEntry,
 } from "./types.js";
 
-export type ReportRun = Breakdown & { run: number; total: number }; // run: 1-based number, 1 = cold
+/** A chat run's first byte and pre-reply changes, in ms after the send. */
+export interface ReportChat {
+  firstByte: number | null;
+  preReply: { at: number; text: string }[];
+}
+
+export type ReportRun = Breakdown & { run: number; total: number; chat?: ReportChat }; // run: 1-based number, 1 = cold
 
 export interface ReportInput {
   url: string;
-  measure: string;
+  measure: string | undefined; // undefined for a chat run sent with Enter
+  chat: { input: string; prompt: string } | null; // null without --input
   output: string;
   steps: string[];
   startedAt: Date;
@@ -50,7 +57,7 @@ const SEGMENTS: { key: SegmentKey; legend: string }[] = [
   { key: "other", legend: "unattributed" },
 ];
 
-export function renderReport({ url, measure, output, steps, startedAt, summary, runs, failed, stop, double, canary, csp, streaming, checks }: ReportInput): string {
+export function renderReport({ url, measure, chat, output, steps, startedAt, summary, runs, failed, stop, double, canary, csp, streaming, checks }: ReportInput): string {
   const bars: ChartRun[] = runs.map((run) => ({ ...run, bars: barSegments(run) }));
   const scale = Math.max(...runs.map((r) => r.total), 1);
   const ticks = niceTicks(scale);
@@ -71,9 +78,12 @@ export function renderReport({ url, measure, output, steps, startedAt, summary, 
     <h1>Caliper — time to first painted output</h1>
     <dl class="meta">
       <dt>URL</dt><dd class="wrap">${esc(url)}</dd>
-      <dt>Measured button</dt><dd><code>${esc(String(new RegExp(measure, "i")))}</code></dd>
+      ${chat
+        ? `<dt>Prompt</dt><dd class="wrap">${esc(JSON.stringify(chat.prompt))} typed into <code>${esc(chat.input)}</code></dd>
+      <dt>Sent with</dt><dd>${measure ? `button <code>${esc(String(new RegExp(measure, "i")))}</code>` : `Enter in <code>${esc(chat.input)}</code>`}</dd>`
+        : `<dt>Measured button</dt><dd><code>${esc(String(new RegExp(measure!, "i")))}</code></dd>`}
       ${steps.length ? `<dt>Steps</dt><dd>${steps.map((s) => `<code>${esc(s)}</code>`).join(" → ")}</dd>` : ""}
-      <dt>Output selector</dt><dd><code>${esc(output)}</code></dd>
+      <dt>${chat ? "Output container" : "Output selector"}</dt><dd><code>${esc(output)}</code></dd>
       <dt>Date</dt><dd>${esc(startedAt.toLocaleString("en-US", { dateStyle: "medium", timeStyle: "long" }))}</dd>
       <dt>Runs</dt><dd>${runs.length + failed.length}${
         failed.length ? ` (${failed.map((n) => `run ${n}`).join(", ")} failed to load)` : ""
@@ -125,6 +135,7 @@ export function renderReport({ url, measure, output, steps, startedAt, summary, 
     </table>
     </div>
   </section>
+  ${chat ? replySection(runs) : ""}
   ${streamingSection(streaming)}
   ${stop ? stopSection(stop) : ""}
   ${double ? doubleSection(double) : ""}
@@ -208,6 +219,34 @@ function requestRow(run: ReportRun): string {
           <td>${run.request ? esc(run.reasons.join(", ") || "only candidate") : "—"}</td>
           <td>${esc(run.clock ?? "—")}</td>
         </tr>`;
+}
+
+// Chat runs: when the AI request's first byte came, and what changed in the container before
+// the reply. Those changes are placeholders (or a slow first byte) and never count as the first word.
+function replySection(runs: ReportRun[]): string {
+  const changes = (chat: ReportChat) =>
+    chat.preReply.length
+      ? `<ul class="notes">${chat.preReply.map((c) => `<li>+${fmtMs(c.at)} ms ${esc(JSON.stringify(c.text))}</li>`).join("")}</ul>`
+      : `<span class="muted">none</span>`;
+  return `<section aria-labelledby="reply-h">
+    <h2 id="reply-h">Before the reply</h2>
+    <p class="muted">The first word is the container&rsquo;s first change at or after the AI request&rsquo;s first body byte. Earlier changes are pre-reply changes, listed here and never timed. Your own message isn't counted.</p>
+    <div class="table-wrap">
+    <table>
+      <thead><tr>
+        <th scope="col">Run</th><th scope="col" class="num">Send → first body byte (ms)</th><th scope="col" class="num">Send → first word (ms)</th><th scope="col">Pre-reply changes</th>
+      </tr></thead>
+      <tbody>
+        ${runs.map((run) => `<tr>
+          <th scope="row">${runName(run.run)}</th>
+          <td class="num">${run.chat?.firstByte == null ? "?" : fmtMs(run.chat.firstByte)}</td>
+          <td class="num">${fmtMs(run.total)}</td>
+          <td class="wrap">${run.chat ? changes(run.chat) : "—"}</td>
+        </tr>`).join("")}
+      </tbody>
+    </table>
+    </div>
+  </section>`;
 }
 
 function stopSection({ pattern, verdict, fix, checks, notes }: StopReport & { pattern: string }): string {

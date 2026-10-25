@@ -78,6 +78,8 @@ report: /path/to/caliper-report.html
 | `--canary` | off | Run the [canary image check](#canary-image---canary---canary-input); you plant the canary line yourself. |
 | `--canary-input <selector>` | none | Run the canary check, typing the canary line into this input first. Implies `--canary`. |
 | `--csp` | off (on with `--canary`) | Run the [CSP check](#csp---csp). |
+| `--input <selector>` | none | Time a [chat-style page](#chat-style-pages---input---prompt): type `--prompt` into this input and send it. Makes `--measure` optional. |
+| `--prompt <text>` | required with `--input` | The message to send. |
 
 `--step` and `--measure` match accessible button names as case-insensitive regular expressions, so `"^(re)?generate$"` matches exactly "Generate" or "Regenerate". If a pattern matches more than one button, Caliper stops and asks you to make it more specific.
 
@@ -117,6 +119,20 @@ Each run's total is split into consecutive segments that add up to it. A segment
 | first byte → first paint | Replaces the last two lines for streaming responses that are still open at first paint. The note says when the response finished. |
 
 The **clock check** line compares the request's first-byte time from Playwright with the page's own Resource Timing entry for the same request. Both should land on the same clock, and they normally agree within a millisecond.
+
+### Chat-style pages (`--input`, `--prompt`)
+
+```sh
+caliper audit https://your-app.example.com/chat --input "#msg" --prompt "hello" --output "#messages"
+```
+
+Caliper types the prompt into `--input`, then sends it by clicking `--measure` if given, or by pressing Enter in the input. The click or keydown starts the timer. `--output` can be the message list: Caliper watches it for added nodes and text changes.
+
+- **Your own message doesn't count.** An added node whose trimmed text equals the prompt is ignored.
+- **Placeholders don't count.** The first word is the container's first change at or after the chosen AI request's first body byte, the same rule as the double-send check uses. Changes before that, such as a "Thinking…" bubble or a typing indicator, are printed as pre-reply changes and shown in the report's "Before the reply" table. They are never timed.
+- **Done** is the same settle window as for other runs, applied to the container.
+
+Each run also prints `send → first body byte`: the first chunk of the response body on the wire. The breakdown's `request → first byte` is when the response headers arrived, which for a stream can be earlier. `--stop`, `--double` and `--canary` can't be combined with `--input` yet.
 
 ## Checks
 

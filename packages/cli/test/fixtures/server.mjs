@@ -5,6 +5,9 @@
 // For streams Chromium ends net::ERR_ABORTED after the full body:
 //   /stream-nostore        a page that streams from /chat/stream-nostore (?abort=N aborts for real)
 //   /chat/stream-nostore   an SSE reply (POST) sent with Cache-Control: no-store
+// For chat-style triggers: a fake chat app that shows a "Thinking…" placeholder, then streams.
+//   /chat         the page (?stream=nostore streams from /chat/stream-nostore)
+//   /chat/stream  its SSE reply (POST)
 // Run on its own with `node test/fixtures/server.mjs [port]`, or import startFixtureServer().
 
 import { readFileSync } from "node:fs";
@@ -14,6 +17,7 @@ import { fileURLToPath } from "node:url";
 
 const PAGE = readFileSync(new URL("./canary-page.html", import.meta.url), "utf8");
 const STREAM_PAGE = readFileSync(new URL("./stream-page.html", import.meta.url), "utf8");
+const CHAT_PAGE = readFileSync(new URL("./chat-page.html", import.meta.url), "utf8");
 
 // The streamed reply: headers at once, the first token after a pause, then a token every 60 ms.
 const REPLY = "Hello! Here is **a streamed reply**, one token at a time.\n\nIt ends here.".split(/(?<= )/);
@@ -32,6 +36,9 @@ async function streamReply(res, cacheControl) {
   res.end("data: [DONE]\n\n");
 }
 
+const PAGES = { "/stream-nostore": STREAM_PAGE, "/chat": CHAT_PAGE };
+const STREAMS = { "/chat/stream": "no-cache", "/chat/stream-nostore": "no-store" };
+
 const VARIANTS = {
   "/no-csp": {},
   "/csp": { "content-security-policy": "img-src 'self'" },
@@ -40,14 +47,14 @@ const VARIANTS = {
 export function startFixtureServer(port = 0) {
   const server = createServer((req, res) => {
     const path = new URL(req.url, "http://localhost").pathname;
-    if (path === "/stream-nostore") {
+    if (PAGES[path]) {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
-      res.end(STREAM_PAGE);
+      res.end(PAGES[path]);
       return;
     }
-    if (path === "/chat/stream-nostore" && req.method === "POST") {
+    if (STREAMS[path] && req.method === "POST") {
       req.resume(); // the body isn't used
-      streamReply(res, "no-store");
+      streamReply(res, STREAMS[path]);
       return;
     }
     const headers = VARIANTS[path];
@@ -70,5 +77,5 @@ export function startFixtureServer(port = 0) {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const { url } = await startFixtureServer(Number(process.argv[2] ?? 0));
-  console.log(`fixture: ${url}/no-csp  ${url}/csp  ${url}/stream-nostore`);
+  console.log(`fixture: ${url}/no-csp  ${url}/csp  ${url}/stream-nostore  ${url}/chat`);
 }

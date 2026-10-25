@@ -5,13 +5,15 @@ import type { Locator, Page, Request, Response } from "playwright";
 import { launchChromium } from "./browser.js";
 import { combineImageRules, describeRule, imageRule, splitPolicies, type ImageRule } from "./csp.js";
 import { CliError, messageOf, PageLoadError } from "./errors.js";
-import { renderReport } from "./report.js";
+import { renderReport, type ReportChat } from "./report.js";
 import type {
   Breakdown,
   CanaryReport,
   CanaryResult,
   CheckReport,
+  ChatTiming,
   CheckStatus,
+  ContainerChange,
   CspReport,
   CspResult,
   DoneSummary,
@@ -45,6 +47,9 @@ declare global {
     __caliperRead: () => string; // the watcher's reader for --output
     __caliperDoubleClickAt: Promise<number>;
     __caliperDoubleChanges: OutputChange[];
+    __caliperSentAt: Promise<number>; // chat runs: the send click or Enter keydown
+    __caliperChanges: ContainerChange[]; // chat runs: every counted change in the --output container
+    __caliperStartDone: (firstWordAt: number) => void; // chat runs: start the settle window
   }
 }
 
@@ -54,9 +59,15 @@ const NETWORK_SETTLE_MS = 200;
 // Give up waiting for the output to settle this long after the first word.
 const DONE_CAP_MS = 60_000;
 
+/** A chat-style trigger: type the prompt into the input, then send it. */
+export interface ChatOptions {
+  input: string;
+  prompt: string;
+}
+
 export interface AuditOptions {
   url: string;
-  measure: string;
+  measure: string | undefined; // required without chat (cli.ts)
   output: string;
   steps: string[];
   runs: number;
@@ -71,6 +82,7 @@ export interface AuditOptions {
   canary: boolean;
   canaryInput: string | undefined;
   csp: boolean;
+  chat: ChatOptions | undefined;
 }
 
 /** A timed run whose page loaded. `run` is its 1-based number; run 1 is the cold run. */
@@ -82,15 +94,16 @@ interface LoadedRun {
 
 interface MeasureOptions {
   url: string;
-  measure: string;
+  measure: string | undefined; // required without chat (cli.ts)
   output: string;
   steps: string[];
   timeout: number;
   settleMs: number;
   requestPattern: RegExp | null;
+  chat?: ChatOptions;
 }
 
-export async function audit({ url, measure, output, steps, runs, headed, auth, timeout, settleMs, request, report, stop, double, canary, canaryInput, csp }: AuditOptions): Promise<void> {
+export async function audit({ url, measure, output, steps, runs, headed, auth, timeout, settleMs, request, report, stop, double, canary, canaryInput, csp, chat }: AuditOptions): Promise<void> {
   const authPath = resolve(auth);
   if (!existsSync(authPath)) {
     throw new CliError(
@@ -138,7 +151,7 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
       try {
         let result: RunResult;
         try {
-          result = await measureOnce(page, { url, measure, output, steps, timeout, settleMs, requestPattern });
+          result = await measureOnce(page, { url, measure, output, steps, timeout, settleMs, requestPattern, chat });
         } catch (err) {
           if (!(err instanceof PageLoadError)) throw err;
           failed.push(i);
@@ -153,6 +166,7 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
         console.log(formatRun(i, result.ms));
         console.log(formatNetwork(parts, result.requests.length));
         console.log(formatDone(result));
+        if (result.chat) console.log(formatChat(result as RunResult & { chat: ChatTiming }));
       } finally {
         await page.close();
       }
@@ -242,11 +256,12 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
       const html = renderReport({
         url,
         measure,
+        chat: chat ?? null,
         output,
         steps,
         startedAt,
         summary,
-        runs: loaded.map(({ run, result, parts }) => ({ run, total: result.ms, ...parts })),
+        runs: loaded.map(({ run, result, parts }) => ({ run, total: result.ms, ...parts, chat: result.chat && reportChat(result) })),
         failed,
         stop: stopReport && { pattern: stop!, ...stopReport },
         double: doubleReport,
@@ -264,6 +279,7 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
 }
 
 async function measureOnce(page: Page, options: MeasureOptions): Promise<RunResult> {
+  if (options.chat) return measureChatOnce(page, options, options.chat);
   const { timeout, requestPattern } = options;
   const target = await prepareRun(page, options);
   // Byte counts per request, to tell a stream that ended ERR_ABORTED after its full body.
@@ -295,33 +311,197 @@ async function measureOnce(page: Page, options: MeasureOptions): Promise<RunResu
   }
 }
 
+// A chat-style run: type the prompt, send it, and time the reply inside the --output container.
+// Same steps as measureOnce, except that the first word is decided against the AI request's
+// first byte (waitForReply), so the wire capture runs alongside.
+async function measureChatOnce(page: Page, options: MeasureOptions, chat: ChatOptions): Promise<RunResult> {
+  const { timeout, requestPattern } = options;
+  const send = await prepareChatRun(page, options, chat);
+  const wire = await startWireCapture(page, await page.evaluate(() => performance.timeOrigin));
+
+  try {
+    const network = startNetworkCapture(page);
+    const deadline = Date.now() + timeout; // --timeout counts from the send
+    await send();
+
+    const { timing, preReply } = await waitForReply(page, options, network, wire);
+    await page.evaluate((at) => window.__caliperStartDone(at), timing.firstPaintAt);
+
+    const { requests, timeOrigin } = await network.stop(timing);
+    const pick = chooseRequest(requests, timing, requestPattern);
+    if (pick) pick.request = await waitUntilFinished(page, pick.request, timeOrigin, deadline, wire);
+
+    const done = await page.evaluate(() => window.__caliperDone);
+    const firstByteAt = pick ? replyFirstByte(pick.request, wire) : null;
+    return { ms: Math.round(timing.firstPaintAt - timing.clickAt), timing, done, requests, pick, chat: { firstByteAt, preReply } };
+  } finally {
+    await wire.stop();
+  }
+}
+
+// Loads the page, clicks the --step buttons, types --prompt into --input and installs the chat
+// watcher. Returns the send: a click on the --measure button if given, else Enter in --input.
+async function prepareChatRun(page: Page, { url, measure, output, steps, timeout, settleMs }: MeasureOptions, { input, prompt }: ChatOptions): Promise<() => Promise<void>> {
+  await loadAndStep(page, url, steps, timeout);
+
+  const button = measure ? await findButton(page, measure, "--measure", timeout) : null;
+  await checkSelector(page, output, "--output");
+  await checkSelector(page, input, "--input");
+  const field = page.locator(input);
+  try {
+    // fill() focuses and types without a click or Enter, so the watcher still waits for the send.
+    await field.fill(prompt);
+  } catch (err) {
+    throw new CliError(`Couldn't type into --input "${input}": ${messageOf(err).split("\n")[0]!.trim()}`);
+  }
+  // The container is watched from the send on, so it has to be there before it.
+  if (!(await page.evaluate((sel) => !!document.querySelector(sel), output))) {
+    throw new CliError(`No element matches --output "${output}" before sending; with --input it must be the container the reply appears in.`);
+  }
+
+  // Runs in the browser, like the click watcher. It records changes; Caliper decides which is
+  // the first word (waitForReply) and then starts the settle window with __caliperStartDone.
+  const watcherArgs: [string, string, boolean, string, number, number] = [output, input, !!button, prompt, settleMs, DONE_CAP_MS];
+  await page.evaluate(([outputSelector, inputSelector, viaClick, prompt, settleMs, capMs]) => {
+    const container = document.querySelector(outputSelector)!;
+    window.__caliperRead = () => container.textContent ?? "";
+    window.__caliperLastChangeAt = -1;
+    window.__caliperChanges = [];
+    let resolveDone!: (done: DoneTiming) => void;
+    window.__caliperDone = new Promise((resolve) => (resolveDone = resolve));
+
+    // What an added or edited node shows, or null when it doesn't count: whitespace, or the
+    // user's own message (its trimmed text equals the prompt).
+    const describe = (node: Node): string | null => {
+      const text = (node.textContent ?? "").trim();
+      if (text === prompt.trim()) return null;
+      if (text) return text.length > 60 ? `${text.slice(0, 59)}…` : text;
+      return node instanceof Element ? `<${node.tagName.toLowerCase()}>` : null;
+    };
+
+    // Changes are stamped in the next animation frame, like the click watcher's first paint.
+    let pending: string[] = [];
+    let firstWordAt: number | null = null;
+    const flush = () => {
+      const t = performance.now();
+      window.__caliperChanges.push({ at: t, text: pending[0]! });
+      pending = [];
+      if (firstWordAt !== null) window.__caliperLastChangeAt = t;
+    };
+    const observer = new MutationObserver((records) => {
+      const queued = pending.length > 0;
+      for (const r of records) {
+        for (const node of r.type === "characterData" ? [r.target] : r.addedNodes) {
+          const text = describe(node);
+          if (text !== null) pending.push(text);
+        }
+      }
+      if (!queued && pending.length > 0) requestAnimationFrame(flush);
+    });
+
+    window.__caliperStartDone = (at) => {
+      firstWordAt = at;
+      const latest = () => Math.max(at, window.__caliperChanges.at(-1)?.at ?? at);
+      window.__caliperLastChangeAt = latest();
+      function check() {
+        const t = performance.now();
+        const lastChangeAt = latest();
+        if (t - lastChangeAt >= settleMs) {
+          observer.disconnect();
+          resolveDone({ settled: true, doneAt: lastChangeAt });
+        } else if (t - at > capMs) {
+          observer.disconnect();
+          resolveDone({ settled: false, lastChangeAt });
+        } else {
+          requestAnimationFrame(check);
+        }
+      }
+      requestAnimationFrame(check);
+    };
+
+    // The send starts the timer: the button click, or Enter in the input (capture phase, so
+    // the observer is already on when the page's own handler adds the user's message).
+    const type = viaClick ? "click" : "keydown";
+    window.__caliperSentAt = new Promise((resolve) => {
+      const onSend = (event: Event) => {
+        if (!viaClick && ((event as KeyboardEvent).key !== "Enter" || event.target !== document.querySelector(inputSelector))) return;
+        document.removeEventListener(type, onSend, true);
+        observer.observe(container, { childList: true, subtree: true, characterData: true });
+        resolve(event.timeStamp); // same clock as performance.now()
+      };
+      document.addEventListener(type, onSend, true);
+    });
+  }, watcherArgs);
+
+  // A full Resource Timing buffer (default 250 entries) would drop the AI request's entry.
+  await page.evaluate(() => performance.setResourceTimingBufferSize(100_000));
+  return button ? () => button.click() : () => field.press("Enter");
+}
+
+// How often waitForReply looks at the recorded changes.
+const REPLY_POLL_MS = 50;
+
+// A chat reply's first word: the first change inside the container at or after the chosen AI
+// request's first byte, the same rule as the double-send check's request-2 first word. Earlier
+// changes (the user's bubble aside, which the watcher drops) are placeholders like "Thinking…":
+// they're returned as pre-reply changes and never timed. Each change is decided once
+// NETWORK_SETTLE_MS has passed after it, so the network events from before it have reached us,
+// against the requests sent before it, exactly as the click path chooses at first paint.
+async function waitForReply(
+  page: Page,
+  { output, timeout, requestPattern }: MeasureOptions,
+  network: ReturnType<typeof startNetworkCapture>,
+  wire: Awaited<ReturnType<typeof startWireCapture>>
+): Promise<{ timing: PageTiming; preReply: ContainerChange[] }> {
+  const clickAt = await page.evaluate(() => window.__caliperSentAt);
+  let decided = 0;
+  for (;;) {
+    const [now, changes] = await page.evaluate(() => [performance.now(), window.__caliperChanges] as const);
+    const ready = changes.filter((c) => c.at + NETWORK_SETTLE_MS <= now);
+    if (ready.length > decided) {
+      const requests = await network.snapshot();
+      for (; decided < ready.length; decided++) {
+        const change = ready[decided]!;
+        const timing = { clickAt, firstPaintAt: change.at };
+        const pick = quietChoose(requests.filter((r) => r.start === null || r.start < change.at), timing, requestPattern);
+        const firstByte = pick && replyFirstByte(pick.request, wire);
+        if (firstByte != null && change.at >= firstByte) return { timing, preReply: changes.slice(0, decided) };
+      }
+    }
+    if (now - clickAt > timeout) {
+      throw new CliError(
+        `Timed out after ${timeout} ms: "${output}" never changed after the AI request's first byte ` +
+          `(${changes.length} pre-reply change${changes.length === 1 ? "" : "s"}).`
+      );
+    }
+    await sleep(REPLY_POLL_MS);
+  }
+}
+
+// chooseRequest, with a --request that matches nothing (yet) meaning no request.
+function quietChoose(requests: RequestTiming[], timing: PageTiming, pattern: RegExp | null): ScoredRequest | null {
+  try {
+    return chooseRequest(requests, timing, pattern);
+  } catch (err) {
+    if (err instanceof CliError) return null;
+    throw err;
+  }
+}
+
+// When a request's first byte arrived: its first body chunk on the wire, else its response headers.
+function replyFirstByte(r: RequestTiming, wire: Awaited<ReturnType<typeof startWireCapture>>): number | null {
+  return wire.match(r)?.chunks[0]?.at ?? r.firstByte;
+}
+
 // Loads the page, clicks the --step buttons and installs the watcher. Returns the --measure
 // button, ready to click.
 async function prepareRun(page: Page, { url, measure, output, steps, timeout, settleMs }: MeasureOptions): Promise<Locator> {
-  try {
-    await page.goto(url);
-  } catch (err) {
-    // Playwright errors carry a multi-line call log; the first line is the message.
-    throw new PageLoadError(messageOf(err).split("\n")[0]!.trim());
-  }
+  await loadAndStep(page, url, steps, timeout);
 
-  for (const step of steps) {
-    const button = await findButton(page, step, "--step", timeout);
-    await button.click();
-  }
-
-  const target = await findButton(page, measure, "--measure", timeout);
+  const target = await findButton(page, measure!, "--measure", timeout);
 
   // A bad selector would throw inside the rAF loop and hang the run, so check it up front.
-  const selectorOk = await page.evaluate((sel) => {
-    try {
-      document.querySelector(sel);
-      return true;
-    } catch {
-      return false;
-    }
-  }, output);
-  if (!selectorOk) throw new CliError(`--output "${output}" is not a valid CSS selector.`);
+  await checkSelector(page, output, "--output");
 
   // 1. Install the watcher INSIDE the page, before clicking.
   //    This function runs in the browser: it can only use DOM globals and its argument.
@@ -386,6 +566,32 @@ async function prepareRun(page: Page, { url, measure, output, steps, timeout, se
   // A full Resource Timing buffer (default 250 entries) would drop the AI request's entry.
   await page.evaluate(() => performance.setResourceTimingBufferSize(100_000));
   return target;
+}
+
+async function loadAndStep(page: Page, url: string, steps: string[], timeout: number): Promise<void> {
+  try {
+    await page.goto(url);
+  } catch (err) {
+    // Playwright errors carry a multi-line call log; the first line is the message.
+    throw new PageLoadError(messageOf(err).split("\n")[0]!.trim());
+  }
+
+  for (const step of steps) {
+    const button = await findButton(page, step, "--step", timeout);
+    await button.click();
+  }
+}
+
+async function checkSelector(page: Page, selector: string, flag: string): Promise<void> {
+  const selectorOk = await page.evaluate((sel) => {
+    try {
+      document.querySelector(sel);
+      return true;
+    } catch {
+      return false;
+    }
+  }, selector);
+  if (!selectorOk) throw new CliError(`${flag} "${selector}" is not a valid CSS selector.`);
 }
 
 async function waitForFirstWord(page: Page, { measure, output, timeout }: MeasureOptions): Promise<PageTiming> {
@@ -654,7 +860,7 @@ async function doubleOnce(page: Page, options: MeasureOptions): Promise<DoubleRe
     const bytesAfterClick = w1 ? bytesSince(w1, clickAt) : null;
     const lastByteAt = w1 ? w1.chunks.reduce((latest, c) => Math.max(latest, c.at), clickAt) : null;
     // Request 2's first word: the first output change once its first byte arrived.
-    const firstByte2 = w2?.chunks[0]?.at ?? r2.firstByte;
+    const firstByte2 = replyFirstByte(r2, wire);
     const firstWord2 = firstByte2 === null ? undefined : changes.find((c) => c.at >= firstByte2);
 
     return {
@@ -862,18 +1068,25 @@ function startNetworkCapture(page: Page) {
   page.on("request", onRequest);
   page.on("response", onResponse);
 
+  const describeSeen = async () => {
+    const timeOrigin = await page.evaluate(() => performance.timeOrigin);
+    const entries = await readResourceTiming(page);
+    const requests = seen.map((request) => describeRequest(request, responses.get(request), timeOrigin, entries));
+    return { requests, timeOrigin };
+  };
+
   return {
+    // Every request so far, still capturing; a chat run decides its first word with it.
+    async snapshot(): Promise<RequestTiming[]> {
+      return (await describeSeen()).requests;
+    },
     async stop({ firstPaintAt }: PageTiming): Promise<{ requests: RequestTiming[]; timeOrigin: number }> {
       await sleep(NETWORK_SETTLE_MS);
       page.off("request", onRequest);
       page.off("response", onResponse);
 
-      const timeOrigin = await page.evaluate(() => performance.timeOrigin);
-      const entries = await readResourceTiming(page);
-      const requests = seen
-        .map((request) => describeRequest(request, responses.get(request), timeOrigin, entries))
-        .filter((r) => r.start === null || r.start < firstPaintAt);
-      return { requests, timeOrigin };
+      const { requests, timeOrigin } = await describeSeen();
+      return { requests: requests.filter((r) => r.start === null || r.start < firstPaintAt), timeOrigin };
     },
   };
 }
@@ -1132,18 +1345,35 @@ function formatRun(i: number, ms: number): string {
 // A streaming span shorter than this means the answer arrived in one go.
 const STREAMS_MIN_MS = 250;
 
-function formatDone({ timing, done }: RunResult): string {
+// What starts the timer, in labels: the --measure click, or a chat run's send (click or Enter).
+const startLabel = ({ chat }: RunResult) => (chat ? "send" : "click");
+
+function formatDone(result: RunResult): string {
+  const { timing, done } = result;
+  const start = startLabel(result);
   const row = (label: string, value: number) => `    ${label.padEnd(26)}${String(ms(value)).padStart(6)} ms`;
-  const lines = [row("click → first word", timing.firstPaintAt - timing.clickAt)];
+  const lines = [row(`${start} → first word`, timing.firstPaintAt - timing.clickAt)];
   if (!done.settled) {
-    lines.push(`    click → done              did not settle within ${DONE_CAP_MS / 1000}s of first word`);
+    lines.push(`    ${`${start} → done`.padEnd(26)}did not settle within ${DONE_CAP_MS / 1000}s of first word`);
     return lines.join("\n");
   }
   const span = done.doneAt - timing.firstPaintAt;
-  lines.push(row("click → done", done.doneAt - timing.clickAt));
+  lines.push(row(`${start} → done`, done.doneAt - timing.clickAt));
   lines.push(row("streaming span", span));
   lines.push(`    ${verdict(span)}`);
   return lines.join("\n");
+}
+
+// A chat run's AI first byte and the changes before the reply, which weren't timed.
+function formatChat({ timing, chat }: RunResult & { chat: ChatTiming }): string {
+  const after = (t: number) => `+${ms(t - timing.clickAt)} ms`;
+  return [
+    `    ${"send → first body byte".padEnd(26)}${chat.firstByteAt === null ? "     ?" : String(ms(chat.firstByteAt - timing.clickAt)).padStart(6)} ms`,
+    chat.preReply.length
+      ? `    pre-reply changes (not timed):`
+      : `    pre-reply changes (not timed): none`,
+    ...chat.preReply.map((c) => `        ${after(c.at).padStart(9)}  ${JSON.stringify(c.text)}`),
+  ].join("\n");
 }
 
 function verdict(span: number): string {
@@ -1163,8 +1393,10 @@ const PREFLIGHT_MIN_MS = 5;
 // One run's timeline from click to first paint as consecutive segments (ms may be null when
 // unknown), plus the chosen request and the clock check. Shared by the terminal output and
 // the HTML report.
-function breakdown({ timing, pick }: RunResult): Breakdown {
+function breakdown(result: RunResult): Breakdown {
+  const { timing, pick } = result;
   const { clickAt, firstPaintAt } = timing;
+  const start = startLabel(result);
   if (!pick) return { request: null, segments: [], clock: null };
 
   const r = pick.request;
@@ -1174,10 +1406,10 @@ function breakdown({ timing, pick }: RunResult): Breakdown {
 
   const preflight = rt ? span(rt.startTime, r.start) : null;
   if (rt && preflight !== null && preflight >= PREFLIGHT_MIN_MS) {
-    segments.push({ key: "click", label: "click → fetch() called", ms: span(clickAt, rt.startTime) });
+    segments.push({ key: "click", label: `${start} → fetch() called`, ms: span(clickAt, rt.startTime) });
     segments.push({ key: "preflight", label: "CORS preflight", ms: preflight });
   } else {
-    segments.push({ key: "click", label: "click → request sent", ms: span(clickAt, r.start) });
+    segments.push({ key: "click", label: `${start} → request sent`, ms: span(clickAt, r.start) });
   }
   if (ms(r.connectionSetup) > 0) {
     segments.push({ key: "connection", label: "connection setup", ms: r.connectionSetup, note: "new connection" });
@@ -1669,6 +1901,15 @@ function describeStreaming({ done, span, warm }: DoneSummary): CheckReport {
   return span < STREAMS_MIN_MS
     ? report({ status: "fail", verdict: verdict(span), fix: STREAM_FIX })
     : report({ status: "pass", verdict: verdict(span) });
+}
+
+// A chat run's report data, in ms after the send.
+function reportChat({ timing, chat }: RunResult): ReportChat {
+  const after = (t: number) => t - timing.clickAt;
+  return {
+    firstByte: chat!.firstByteAt === null ? null : after(chat!.firstByteAt),
+    preReply: chat!.preReply.map((c) => ({ at: after(c.at), text: c.text })),
+  };
 }
 
 function summarizeRequest(r: RequestTiming): RequestSummary {

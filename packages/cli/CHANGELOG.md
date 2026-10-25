@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.0 — unreleased — not yet tested on a real chat app
+
+### Added
+
+- **Chat-style triggers: `--input <selector>` and `--prompt <text>`.** Caliper types the prompt into the input and sends it with the `--measure` button, or Enter when there's no `--measure`. The click or keydown starts the timer.
+- **`--output` may be a container** (for example the message list) with `--input`. Caliper watches it for added nodes and text changes. Your own message (an added node whose trimmed text equals the prompt) doesn't count, and the first word is the container's first change at or after the AI request's first body byte. Earlier changes, such as a "Thinking…" placeholder, are listed as pre-reply changes in the terminal and the report's new "Before the reply" table, and are never timed. Done uses the same settle window as before.
+- Test: `npm run test:chat` (chat-style run against a local fixture with a placeholder and an SSE reply), and a chat case in `npm run test:nostore`.
+
+### Unchanged
+
+- Button-and-fixed-output runs measure exactly as in 0.2.1. `--stop`, `--double` and `--canary` can't be combined with `--input` yet.
+
 ## 0.2.1 — 2026-10-26
 
 ### Fixed
