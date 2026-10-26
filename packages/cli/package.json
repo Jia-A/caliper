@@ -48,6 +48,7 @@
     "test:canary": "npm run -s build >/dev/null && node test/canary.test.mjs",
     "prepublishOnly": "npm run typecheck && npm run build",
     "test:nostore": "npm run -s build >/dev/null && node test/nostore.test.mjs",
-    "test:chat": "npm run -s build >/dev/null && node test/chat.test.mjs"
+    "test:chat": "npm run -s build >/dev/null && node test/chat.test.mjs",
+    "test:sidecall": "npm run -s build >/dev/null && node test/sidecall.test.mjs"
   }
 }

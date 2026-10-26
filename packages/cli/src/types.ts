@@ -53,18 +53,21 @@ export interface ScoredRequest {
   request: RequestTiming;
   reasons: string[];
   from: number; // how many requests it was chosen from
-  score?: number; // absent when chosen by --request
+  score?: number; // output changes it explains; absent when chosen by --request
 }
 
-/** One output change inside a --output container, as the chat watcher saw it. */
+/**
+ * One output change, as a watcher saw it. The chat watcher records additions and edits inside
+ * the container; the click watcher records each frame the output's text differs from the last.
+ */
 export interface ContainerChange {
   at: number;
-  text: string; // what changed: the added or edited text, trimmed and shortened; "<tag>" for an empty element
+  text: string; // what changed, trimmed and shortened; "<tag>" for an empty element; "" when the output went empty
 }
 
-/** What a chat-style run (--input/--prompt) saw before and at the reply. */
-export interface ChatTiming {
-  firstByteAt: number | null; // the chosen AI request's first byte; null with no request chosen
+/** When the chosen AI request's first body byte came, and what changed before the reply. */
+export interface ReplyTiming {
+  firstByteAt: number | null; // first body chunk on the wire, else response headers
   preReply: ContainerChange[]; // changes before the first word (placeholders), never timed
 }
 
@@ -74,8 +77,9 @@ export interface RunResult {
   timing: PageTiming;
   done: DoneTiming;
   requests: RequestTiming[];
-  pick: ScoredRequest | null;
-  chat?: ChatTiming; // only for --input runs
+  pick: ScoredRequest; // a run whose AI request isn't identified has no result (UnidentifiedRequestError)
+  reply: ReplyTiming;
+  chat: boolean; // an --input run: sent by click or Enter
 }
 
 export type SegmentKey =
@@ -109,15 +113,17 @@ export type Breakdown =
   | { request: RequestSummary; reasons: string[]; from: number; segments: Segment[]; clock: string };
 
 /**
- * Cold is run 1 (null if it failed to load); median covers the warm runs 2..N that loaded (null
- * with none); worst covers every run that loaded.
+ * Cold is run 1 (null if it failed to load or its AI request wasn't identified); median covers
+ * the warm runs 2..N that were measured (null with none); worst covers every measured run.
  */
 export interface Summary {
   cold: number | null;
+  coldUnidentified: boolean; // run 1 loaded, but its AI request wasn't identified
   median: number | null;
   worst: number;
   warm: number; // warm runs in the median
   warmFailed: number; // warm runs left out because the page failed to load
+  warmUnidentified: number; // warm runs left out because their AI request wasn't identified
 }
 
 /**
@@ -264,6 +270,7 @@ export type CspReport = StopReport;
 export interface DoneSummary {
   done: number | null;
   span: number | null;
-  warm: number; // warm runs
+  warm: number; // warm runs measured
   unsettled: number; // warm runs left out because they never settled
+  unidentified: number; // warm runs not measured because their AI request wasn't identified
 }

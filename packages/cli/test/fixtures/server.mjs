@@ -8,6 +8,10 @@
 // For chat-style triggers: a fake chat app that shows a "Thinking…" placeholder, then streams.
 //   /chat         the page (?stream=nostore streams from /chat/stream-nostore)
 //   /chat/stream  its SSE reply (POST)
+// For a fast side-call next to a slow streamed reply (queue-style apps):
+//   /sidecall           the page
+//   /sidecall/predict   the side-call (POST, JSON after ~200 ms; renders your message + a placeholder)
+//   /sidecall/stream    the reply (GET SSE: a status event at once, tokens after SIDECALL_WAIT_MS)
 // Run on its own with `node test/fixtures/server.mjs [port]`, or import startFixtureServer().
 
 import { readFileSync } from "node:fs";
@@ -18,6 +22,7 @@ import { fileURLToPath } from "node:url";
 const PAGE = readFileSync(new URL("./canary-page.html", import.meta.url), "utf8");
 const STREAM_PAGE = readFileSync(new URL("./stream-page.html", import.meta.url), "utf8");
 const CHAT_PAGE = readFileSync(new URL("./chat-page.html", import.meta.url), "utf8");
+const SIDECALL_PAGE = readFileSync(new URL("./sidecall-page.html", import.meta.url), "utf8");
 
 // The streamed reply: headers at once, the first token after a pause, then a token every 60 ms.
 const REPLY = "Hello! Here is **a streamed reply**, one token at a time.\n\nIt ends here.".split(/(?<= )/);
@@ -36,7 +41,32 @@ async function streamReply(res, cacheControl) {
   res.end("data: [DONE]\n\n");
 }
 
-const PAGES = { "/stream-nostore": STREAM_PAGE, "/chat": CHAT_PAGE };
+export const SIDECALL_WAIT_MS = 2500; // the reply's first token, after the stream opens
+// The reply can't be done before its last token: the side-call, the wait, then every token.
+export const SIDECALL_MIN_DONE_MS = 200 + SIDECALL_WAIT_MS + (REPLY.length - 1) * TOKEN_MS;
+
+async function sidecallPredict(req, res) {
+  let body = "";
+  for await (const chunk of req) body += chunk;
+  await sleep(200);
+  const { prompt } = JSON.parse(body || "{}");
+  res.writeHead(200, { "content-type": "application/json", "cache-control": "no-cache" });
+  res.end(JSON.stringify({ messages: [{ role: "user", text: prompt ?? "" }] }));
+}
+
+async function sidecallStream(res) {
+  res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+  res.write(`data: ${JSON.stringify({ status: "queued" })}\n\n`);
+  await sleep(SIDECALL_WAIT_MS);
+  for (const t of REPLY) {
+    if (res.destroyed) return;
+    res.write(`data: ${JSON.stringify({ t })}\n\n`);
+    await sleep(TOKEN_MS);
+  }
+  res.end();
+}
+
+const PAGES = { "/stream-nostore": STREAM_PAGE, "/chat": CHAT_PAGE, "/sidecall": SIDECALL_PAGE };
 const STREAMS = { "/chat/stream": "no-cache", "/chat/stream-nostore": "no-store" };
 
 const VARIANTS = {
@@ -55,6 +85,14 @@ export function startFixtureServer(port = 0) {
     if (STREAMS[path] && req.method === "POST") {
       req.resume(); // the body isn't used
       streamReply(res, STREAMS[path]);
+      return;
+    }
+    if (path === "/sidecall/predict" && req.method === "POST") {
+      sidecallPredict(req, res);
+      return;
+    }
+    if (path === "/sidecall/stream") {
+      sidecallStream(res);
       return;
     }
     const headers = VARIANTS[path];
@@ -77,5 +115,5 @@ export function startFixtureServer(port = 0) {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const { url } = await startFixtureServer(Number(process.argv[2] ?? 0));
-  console.log(`fixture: ${url}/no-csp  ${url}/csp  ${url}/stream-nostore  ${url}/chat`);
+  console.log(`fixture: ${url}/no-csp  ${url}/csp  ${url}/stream-nostore  ${url}/chat  ${url}/sidecall`);
 }

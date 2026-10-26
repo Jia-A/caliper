@@ -4,14 +4,13 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { Locator, Page, Request, Response } from "playwright";
 import { launchChromium } from "./browser.js";
 import { combineImageRules, describeRule, imageRule, splitPolicies, type ImageRule } from "./csp.js";
-import { CliError, messageOf, PageLoadError } from "./errors.js";
-import { renderReport, type ReportChat } from "./report.js";
+import { CliError, messageOf, PageLoadError, UnidentifiedRequestError } from "./errors.js";
+import { renderReport, type ReportReply } from "./report.js";
 import type {
   Breakdown,
   CanaryReport,
   CanaryResult,
   CheckReport,
-  ChatTiming,
   CheckStatus,
   ContainerChange,
   CspReport,
@@ -24,6 +23,7 @@ import type {
   PageTiming,
   RequestSummary,
   RequestTiming,
+  ReplyTiming,
   ResourceTimingEntry,
   RunResult,
   ScoredRequest,
@@ -48,8 +48,8 @@ declare global {
     __caliperDoubleClickAt: Promise<number>;
     __caliperDoubleChanges: OutputChange[];
     __caliperSentAt: Promise<number>; // chat runs: the send click or Enter keydown
-    __caliperChanges: ContainerChange[]; // chat runs: every counted change in the --output container
-    __caliperStartDone: (firstWordAt: number) => void; // chat runs: start the settle window
+    __caliperChanges: ContainerChange[]; // every output change since the click or send
+    __caliperRecording: boolean; // set false by Caliper once it has seen the whole reply
   }
 }
 
@@ -136,6 +136,7 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
     const startedAt = new Date();
     const loaded: LoadedRun[] = [];
     const failed: number[] = []; // run numbers whose page failed to load
+    const unidentified: number[] = []; // run numbers whose AI request wasn't identified
     const checkCsp = csp || canary || !!canaryInput;
     let cspResult: CspResult | null = null;
 
@@ -153,6 +154,13 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
         try {
           result = await measureOnce(page, { url, measure, output, steps, timeout, settleMs, requestPattern, chat });
         } catch (err) {
+          if (err instanceof UnidentifiedRequestError) {
+            unidentified.push(i);
+            console.log(`${runLabel(i)} — AI request not identified, timing inconclusive`);
+            console.log(`    ${err.message}`);
+            if (checkCsp && !cspResult) cspResult = await readCsp(page, documentResponse);
+            continue;
+          }
           if (!(err instanceof PageLoadError)) throw err;
           failed.push(i);
           console.log(`${runLabel(i)} — page failed to load`);
@@ -166,20 +174,22 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
         console.log(formatRun(i, result.ms));
         console.log(formatNetwork(parts, result.requests.length));
         console.log(formatDone(result));
-        if (result.chat) console.log(formatChat(result as RunResult & { chat: ChatTiming }));
+        const reply = formatReply(result);
+        if (reply) console.log(reply);
       } finally {
         await page.close();
       }
     }
 
-    if (loaded.length === 0) {
+    if (loaded.length === 0 && unidentified.length === 0) {
       console.log("Inconclusive — page failed to load");
       return;
     }
 
-    const summary = summarize(loaded, failed);
-    console.log(formatSummary(summary));
-    const doneSummary = summarizeDone(loaded.filter((r) => r.run > 1).map((r) => r.result));
+    // With no run measured there's no number to summarize, but the checks still run.
+    const summary = loaded.length ? summarize(loaded, failed, unidentified) : null;
+    console.log(summary ? formatSummary(summary) : "Inconclusive — AI request not identified in any run, so no timing");
+    const doneSummary = summarizeDone(loaded.filter((r) => r.run > 1).map((r) => r.result), unidentified.filter((n) => n > 1).length);
     const streamingReport = describeStreaming(doneSummary);
     console.log(formatDoneSummary(doneSummary, streamingReport));
 
@@ -261,8 +271,9 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
         steps,
         startedAt,
         summary,
-        runs: loaded.map(({ run, result, parts }) => ({ run, total: result.ms, ...parts, chat: result.chat && reportChat(result) })),
+        runs: loaded.map(({ run, result, parts }) => ({ run, total: result.ms, ...parts, reply: reportReply(result) })),
         failed,
+        unidentified,
         stop: stopReport && { pattern: stop!, ...stopReport },
         double: doubleReport,
         canary: canaryReport && { input: canaryInput, ...canaryReport },
@@ -291,57 +302,182 @@ async function measureOnce(page: Page, options: MeasureOptions): Promise<RunResu
     const deadline = Date.now() + timeout; // --timeout counts from the click
     await target.click();
 
-    // 3. Wait for the in-page watcher to report back.
-    const timing = await waitForFirstWord(page, options);
+    // 3. Wait for the in-page watcher to see the output change.
+    const { clickAt, firstPaintAt } = await waitForFirstWord(page, options);
 
-    const { requests, timeOrigin } = await network.stop(timing);
-    const pick = chooseRequest(requests, timing, requestPattern);
-    if (pick) {
-      // A streaming response is usually still open at first paint, and its Resource Timing
-      // entry only appears once it completes, so wait for it.
-      pick.request = await waitUntilFinished(page, pick.request, timeOrigin, deadline, wire);
-    }
-
-    // 4. Wait for the output to stop changing (the watcher caps this itself).
-    const done = await page.evaluate(() => window.__caliperDone);
-
-    return { ms: Math.round(timing.firstPaintAt - timing.clickAt), timing, done, requests, pick };
+    // 4. Watch the whole reply, then pick the AI request and time it.
+    return await finishRun(page, options, { clickAt, firstChangeAt: firstPaintAt, network, wire, deadline, chat: false });
   } finally {
     await wire.stop();
   }
 }
 
 // A chat-style run: type the prompt, send it, and time the reply inside the --output container.
-// Same steps as measureOnce, except that the first word is decided against the AI request's
-// first byte (waitForReply), so the wire capture runs alongside.
+// Same steps as measureOnce; the send is a click or Enter, and the container's first change is
+// whatever the chat watcher counted first (your own message aside).
 async function measureChatOnce(page: Page, options: MeasureOptions, chat: ChatOptions): Promise<RunResult> {
-  const { timeout, requestPattern } = options;
   const send = await prepareChatRun(page, options, chat);
   const wire = await startWireCapture(page, await page.evaluate(() => performance.timeOrigin));
 
   try {
     const network = startNetworkCapture(page);
-    const deadline = Date.now() + timeout; // --timeout counts from the send
+    const deadline = Date.now() + options.timeout; // --timeout counts from the send
     await send();
-
-    const { timing, preReply } = await waitForReply(page, options, network, wire);
-    await page.evaluate((at) => window.__caliperStartDone(at), timing.firstPaintAt);
-
-    const { requests, timeOrigin } = await network.stop(timing);
-    const pick = chooseRequest(requests, timing, requestPattern);
-    if (pick) pick.request = await waitUntilFinished(page, pick.request, timeOrigin, deadline, wire);
-
-    const done = await page.evaluate(() => window.__caliperDone);
-    const firstByteAt = pick ? replyFirstByte(pick.request, wire) : null;
-    return { ms: Math.round(timing.firstPaintAt - timing.clickAt), timing, done, requests, pick, chat: { firstByteAt, preReply } };
+    const clickAt = await page.evaluate(() => window.__caliperSentAt);
+    const firstChangeAt = await waitForChange(page, options, clickAt);
+    return await finishRun(page, options, { clickAt, firstChangeAt, network, wire, deadline, chat: true });
   } finally {
     await wire.stop();
   }
 }
 
+// How often Caliper looks at the recorded changes and requests while a reply comes in.
+const OBSERVE_POLL_MS = 50;
+
+// The chat watcher's first counted change after the send.
+async function waitForChange(page: Page, { output, timeout }: MeasureOptions, clickAt: number): Promise<number> {
+  for (;;) {
+    const [now, first] = await page.evaluate(() => [performance.now(), window.__caliperChanges[0]?.at ?? null] as const);
+    if (first !== null) return first;
+    if (now - clickAt > timeout) throw new CliError(`Timed out after ${timeout} ms: "${output}" never changed after sending.`);
+    await sleep(OBSERVE_POLL_MS);
+  }
+}
+
+type Wire = Awaited<ReturnType<typeof startWireCapture>>;
+
+interface RunCapture {
+  clickAt: number; // the click or send, page clock
+  firstChangeAt: number; // the output's first change after it
+  network: ReturnType<typeof startNetworkCapture>;
+  wire: Wire;
+  deadline: number; // Date.now() at which --timeout runs out
+  chat: boolean;
+}
+
+// The rest of a timed run, the same for clicks and chat sends:
+//   1. Watch until every request sent since the trigger has ended, the output has been quiet
+//      for --settle-ms, and some request's body bytes explain an output change (capped at
+//      DONE_CAP_MS after the first change). A reply stream can still be open when the output
+//      first changes, or open only after it, and a long pause before the reply (a placeholder,
+//      then nothing until the fetch) mustn't end the run. Without any explained change by
+//      --timeout from the trigger, the run ends unidentified.
+//   2. Pick the AI request by time correlation (pickByCorrelation), or by --request.
+//   3. First word: the first output change at or after its first body byte. Earlier changes
+//      are pre-reply changes, never timed.
+//   4. Done: the last output change, but never before the AI request's last byte or end.
+// Throws UnidentifiedRequestError when no request can be named; nothing is guessed.
+async function finishRun(
+  page: Page,
+  { settleMs, timeout, requestPattern }: MeasureOptions,
+  { clickAt, firstChangeAt, network, wire, deadline, chat }: RunCapture
+): Promise<RunResult> {
+  let capped = false;
+  for (;;) {
+    const [now, seen] = await page.evaluate(() => [performance.now(), window.__caliperChanges] as const);
+    const requests = wire.requests();
+    const open = requests.some((w) => w.finishedAt === null && w.failedAt === null);
+    const quiet = now - Math.max(seen.at(-1)?.at ?? 0, firstChangeAt) >= settleMs;
+    if (!open && quiet && explainsAny(seen, requests)) break;
+    if (now - clickAt > timeout && !explainsAny(seen, requests)) break; // ends unidentified
+    if (now - firstChangeAt > DONE_CAP_MS) {
+      capped = true;
+      break;
+    }
+    await sleep(OBSERVE_POLL_MS);
+  }
+  const changes = await page.evaluate(() => {
+    window.__caliperRecording = false;
+    return window.__caliperChanges;
+  });
+  const { requests, timeOrigin } = await network.stop({ clickAt, firstPaintAt: Infinity });
+
+  const pick = requestPattern
+    ? chooseRequest(requests, { clickAt, firstPaintAt: firstChangeAt }, requestPattern)!
+    : pickByCorrelation(changes, requests, wire);
+  const w = wire.match(pick.request);
+  const ended = w ? w.finishedAt !== null || w.failedAt !== null : pick.request.end !== null;
+  // Its Resource Timing entry only appears once it completes; a capped run may still be open.
+  if (ended) pick.request = await waitUntilFinished(page, pick.request, timeOrigin, deadline, wire);
+
+  const r = pick.request;
+  const firstByteAt = replyFirstByte(r, wire);
+  // The click watcher records the output going empty too; that's never a first word.
+  const firstWord = firstByteAt === null ? undefined : changes.find((c) => c.at >= firstByteAt && c.text !== "");
+  if (!firstWord) {
+    throw new UnidentifiedRequestError(`${r.method} ${r.url}: no output change after its first body byte`);
+  }
+
+  const lastChange = changes.at(-1)!.at;
+  const requestEnd = w ? (w.finishedAt ?? w.failedAt ?? w.chunks.at(-1)?.at ?? null) : r.end;
+  const doneAt = Math.max(lastChange, requestEnd ?? lastChange);
+  const timing = { clickAt, firstPaintAt: firstWord.at };
+  return {
+    ms: Math.round(firstWord.at - clickAt),
+    timing,
+    done: capped ? { settled: false, lastChangeAt: doneAt } : { settled: true, doneAt },
+    requests,
+    pick,
+    // The output going empty (e.g. cleared at the click) isn't a placeholder; it's left out.
+    reply: { firstByteAt, preReply: changes.filter((c) => c.at < firstWord.at && c.text !== "") },
+    chat,
+  };
+}
+
+// An output change counts toward the request whose body bytes arrived last, at most this long
+// before it. Measured on a real queue-style app: the reply stream's chunks were followed by an
+// output change 9–12 ms later (median), 15–18 ms (p90).
+const CORRELATION_MS = 250;
+
+// Some request's body bytes arrived within CORRELATION_MS before some output change.
+function explainsAny(changes: ContainerChange[], requests: WireRequest[]): boolean {
+  return changes.some((change) => requests.some((w) => w.chunks.some((c) => c.at <= change.at && change.at - c.at <= CORRELATION_MS)));
+}
+
+// The AI request is the one whose body bytes are followed by the output changing: each output
+// change counts toward the request with the most recent body chunk within CORRELATION_MS before
+// it, and the request with the most changes wins. Matched on timing only, never on text. It
+// must be the unique top with at least one change; a tie, or no change explained, throws
+// UnidentifiedRequestError.
+function pickByCorrelation(changes: ContainerChange[], requests: RequestTiming[], wire: Wire): ScoredRequest {
+  const explained = new Map<WireRequest, number>();
+  const all = wire.requests();
+  for (const change of changes) {
+    let best: WireRequest | null = null;
+    let bestAt = -Infinity;
+    for (const w of all) {
+      for (const c of w.chunks) {
+        if (c.at <= change.at && change.at - c.at <= CORRELATION_MS && c.at > bestAt) {
+          best = w;
+          bestAt = c.at;
+        }
+      }
+    }
+    if (best) explained.set(best, (explained.get(best) ?? 0) + 1);
+  }
+
+  const name = (w: WireRequest) => `${w.method} ${w.url}`;
+  const ranked = [...explained].sort((a, b) => b[1] - a[1]);
+  const [top, next] = ranked;
+  if (!top) {
+    throw new UnidentifiedRequestError(
+      `no request's body bytes arrived within ${CORRELATION_MS} ms before any of the ${changes.length} output change(s)`
+    );
+  }
+  if (next && next[1] === top[1]) {
+    throw new UnidentifiedRequestError(`${name(top[0])} and ${name(next[0])} each explain ${top[1]} output change(s)`);
+  }
+  const request = requests.find((r) => wire.match(r) === top[0]);
+  if (!request) throw new UnidentifiedRequestError(`${name(top[0])} explains the most output changes, but the page's request for it wasn't seen`);
+
+  const reasons = [`explains ${top[1]} of ${changes.length} output changes (body bytes ≤ ${CORRELATION_MS} ms before each)`];
+  reasons.push(next ? `next: ${next[0].method} ${new URL(next[0].url).pathname} with ${next[1]}` : "no other request explains any");
+  return { request, reasons, from: requests.length, score: top[1] };
+}
+
 // Loads the page, clicks the --step buttons, types --prompt into --input and installs the chat
 // watcher. Returns the send: a click on the --measure button if given, else Enter in --input.
-async function prepareChatRun(page: Page, { url, measure, output, steps, timeout, settleMs }: MeasureOptions, { input, prompt }: ChatOptions): Promise<() => Promise<void>> {
+async function prepareChatRun(page: Page, { url, measure, output, steps, timeout }: MeasureOptions, { input, prompt }: ChatOptions): Promise<() => Promise<void>> {
   await loadAndStep(page, url, steps, timeout);
 
   const button = measure ? await findButton(page, measure, "--measure", timeout) : null;
@@ -359,16 +495,14 @@ async function prepareChatRun(page: Page, { url, measure, output, steps, timeout
     throw new CliError(`No element matches --output "${output}" before sending; with --input it must be the container the reply appears in.`);
   }
 
-  // Runs in the browser, like the click watcher. It records changes; Caliper decides which is
-  // the first word (waitForReply) and then starts the settle window with __caliperStartDone.
-  const watcherArgs: [string, string, boolean, string, number, number] = [output, input, !!button, prompt, settleMs, DONE_CAP_MS];
-  await page.evaluate(([outputSelector, inputSelector, viaClick, prompt, settleMs, capMs]) => {
+  // Runs in the browser, like the click watcher. It only records changes; Caliper picks the AI
+  // request, the first word and done from them (finishRun).
+  const watcherArgs: [string, string, boolean, string] = [output, input, !!button, prompt];
+  await page.evaluate(([outputSelector, inputSelector, viaClick, prompt]) => {
     const container = document.querySelector(outputSelector)!;
     window.__caliperRead = () => container.textContent ?? "";
-    window.__caliperLastChangeAt = -1;
     window.__caliperChanges = [];
-    let resolveDone!: (done: DoneTiming) => void;
-    window.__caliperDone = new Promise((resolve) => (resolveDone = resolve));
+    window.__caliperRecording = true;
 
     // What an added or edited node shows, or null when it doesn't count: whitespace, or the
     // user's own message (its trimmed text equals the prompt).
@@ -379,16 +513,14 @@ async function prepareChatRun(page: Page, { url, measure, output, steps, timeout
       return node instanceof Element ? `<${node.tagName.toLowerCase()}>` : null;
     };
 
-    // Changes are stamped in the next animation frame, like the click watcher's first paint.
+    // Changes are stamped in the next animation frame, like the click watcher's.
     let pending: string[] = [];
-    let firstWordAt: number | null = null;
     const flush = () => {
-      const t = performance.now();
-      window.__caliperChanges.push({ at: t, text: pending[0]! });
+      window.__caliperChanges.push({ at: performance.now(), text: pending[0]! });
       pending = [];
-      if (firstWordAt !== null) window.__caliperLastChangeAt = t;
     };
     const observer = new MutationObserver((records) => {
+      if (!window.__caliperRecording) return observer.disconnect();
       const queued = pending.length > 0;
       for (const r of records) {
         for (const node of r.type === "characterData" ? [r.target] : r.addedNodes) {
@@ -398,26 +530,6 @@ async function prepareChatRun(page: Page, { url, measure, output, steps, timeout
       }
       if (!queued && pending.length > 0) requestAnimationFrame(flush);
     });
-
-    window.__caliperStartDone = (at) => {
-      firstWordAt = at;
-      const latest = () => Math.max(at, window.__caliperChanges.at(-1)?.at ?? at);
-      window.__caliperLastChangeAt = latest();
-      function check() {
-        const t = performance.now();
-        const lastChangeAt = latest();
-        if (t - lastChangeAt >= settleMs) {
-          observer.disconnect();
-          resolveDone({ settled: true, doneAt: lastChangeAt });
-        } else if (t - at > capMs) {
-          observer.disconnect();
-          resolveDone({ settled: false, lastChangeAt });
-        } else {
-          requestAnimationFrame(check);
-        }
-      }
-      requestAnimationFrame(check);
-    };
 
     // The send starts the timer: the button click, or Enter in the input (capture phase, so
     // the observer is already on when the page's own handler adds the user's message).
@@ -438,58 +550,8 @@ async function prepareChatRun(page: Page, { url, measure, output, steps, timeout
   return button ? () => button.click() : () => field.press("Enter");
 }
 
-// How often waitForReply looks at the recorded changes.
-const REPLY_POLL_MS = 50;
-
-// A chat reply's first word: the first change inside the container at or after the chosen AI
-// request's first byte, the same rule as the double-send check's request-2 first word. Earlier
-// changes (the user's bubble aside, which the watcher drops) are placeholders like "Thinking…":
-// they're returned as pre-reply changes and never timed. Each change is decided once
-// NETWORK_SETTLE_MS has passed after it, so the network events from before it have reached us,
-// against the requests sent before it, exactly as the click path chooses at first paint.
-async function waitForReply(
-  page: Page,
-  { output, timeout, requestPattern }: MeasureOptions,
-  network: ReturnType<typeof startNetworkCapture>,
-  wire: Awaited<ReturnType<typeof startWireCapture>>
-): Promise<{ timing: PageTiming; preReply: ContainerChange[] }> {
-  const clickAt = await page.evaluate(() => window.__caliperSentAt);
-  let decided = 0;
-  for (;;) {
-    const [now, changes] = await page.evaluate(() => [performance.now(), window.__caliperChanges] as const);
-    const ready = changes.filter((c) => c.at + NETWORK_SETTLE_MS <= now);
-    if (ready.length > decided) {
-      const requests = await network.snapshot();
-      for (; decided < ready.length; decided++) {
-        const change = ready[decided]!;
-        const timing = { clickAt, firstPaintAt: change.at };
-        const pick = quietChoose(requests.filter((r) => r.start === null || r.start < change.at), timing, requestPattern);
-        const firstByte = pick && replyFirstByte(pick.request, wire);
-        if (firstByte != null && change.at >= firstByte) return { timing, preReply: changes.slice(0, decided) };
-      }
-    }
-    if (now - clickAt > timeout) {
-      throw new CliError(
-        `Timed out after ${timeout} ms: "${output}" never changed after the AI request's first byte ` +
-          `(${changes.length} pre-reply change${changes.length === 1 ? "" : "s"}).`
-      );
-    }
-    await sleep(REPLY_POLL_MS);
-  }
-}
-
-// chooseRequest, with a --request that matches nothing (yet) meaning no request.
-function quietChoose(requests: RequestTiming[], timing: PageTiming, pattern: RegExp | null): ScoredRequest | null {
-  try {
-    return chooseRequest(requests, timing, pattern);
-  } catch (err) {
-    if (err instanceof CliError) return null;
-    throw err;
-  }
-}
-
 // When a request's first byte arrived: its first body chunk on the wire, else its response headers.
-function replyFirstByte(r: RequestTiming, wire: Awaited<ReturnType<typeof startWireCapture>>): number | null {
+function replyFirstByte(r: RequestTiming, wire: Wire): number | null {
   return wire.match(r)?.chunks[0]?.at ?? r.firstByte;
 }
 
@@ -516,6 +578,8 @@ async function prepareRun(page: Page, { url, measure, output, steps, timeout, se
     window.__caliperRead = read; // the double-send recorder reads the output the same way
 
     window.__caliperLastChangeAt = -1;
+    window.__caliperChanges = [];
+    window.__caliperRecording = true;
     let resolveDone!: (done: DoneTiming) => void;
     window.__caliperDone = new Promise((resolve) => (resolveDone = resolve));
 
@@ -529,31 +593,48 @@ async function prepareRun(page: Page, { url, measure, output, steps, timeout, se
           let lastChangeAt = 0;
           let last = before;
 
-          function check() {
-            const t = performance.now();
-            const now = read();
+          // The first frame with output (__caliperTiming) and the settle window (__caliperDone),
+          // which the Stop, double-send and canary checks wait on. True once both are settled.
+          function step(t: number, now: string): boolean {
             if (firstChangeAt === null) {
-              // First word: the first frame with non-empty output that differs from before the click.
+              // First change: the first frame with non-empty output that differs from before the click.
               if (now && now !== before) {
                 firstChangeAt = lastChangeAt = window.__caliperLastChangeAt = t;
                 last = now;
                 resolve({ clickAt, firstPaintAt: t });
               } else if (t - clickAt > timeoutMs) {
                 reject(new Error(`No output within ${timeoutMs / 1000}s`));
-                return;
+                return true;
               }
             } else if (now !== last) {
               lastChangeAt = window.__caliperLastChangeAt = t;
               last = now;
             } else if (t - lastChangeAt >= settleMs) {
               resolveDone({ settled: true, doneAt: lastChangeAt });
-              return;
+              return true;
             }
             if (firstChangeAt !== null && t - firstChangeAt > capMs) {
               resolveDone({ settled: false, lastChangeAt });
-              return;
+              return true;
             }
-            requestAnimationFrame(check);
+            return false;
+          }
+
+          // Every frame whose output differs from the frame before, for the timed runs, which
+          // pick the AI request and the first word from them. Kept up past the settle window,
+          // until Caliper has seen the whole reply.
+          let seen = before;
+          let settled = false;
+          function check() {
+            const t = performance.now();
+            const now = read();
+            if (now !== seen) {
+              seen = now;
+              const text = now.trim();
+              window.__caliperChanges.push({ at: t, text: text.length > 60 ? `${text.slice(0, 59)}…` : text });
+            }
+            if (!settled) settled = step(t, now);
+            if (window.__caliperRecording && t - clickAt <= timeoutMs + capMs) requestAnimationFrame(check);
           }
 
           requestAnimationFrame(check);
@@ -1016,7 +1097,8 @@ async function waitUntilFinished(
   deadline: number,
   wire: Awaited<ReturnType<typeof startWireCapture>>
 ): Promise<RequestTiming> {
-  if (r.end !== null || !r.response) return r;
+  // A failed request goes on to the full-body check below even when its end is known.
+  if (!r.response || (r.end !== null && !r.failure)) return r;
 
   const timer = new AbortController();
   let onFailed!: (request: Request) => void;
@@ -1164,6 +1246,8 @@ async function startWireCapture(page: Page, timeOrigin: number) {
   await cdp.send("Network.enable");
 
   return {
+    // Every request seen since the capture started.
+    requests: () => [...wire.values()],
     // The same URL and method, sent closest to when Playwright says the request was issued.
     match(r: RequestTiming): WireRequest | null {
       const same = [...wire.values()].filter((w) => w.url === r.url && w.method === r.method);
@@ -1365,14 +1449,17 @@ function formatDone(result: RunResult): string {
 }
 
 // A chat run's AI first byte and the changes before the reply, which weren't timed.
-function formatChat({ timing, chat }: RunResult & { chat: ChatTiming }): string {
+// The AI request's first body byte and the changes before the reply, which weren't timed.
+// Chat runs always show both; click runs show pre-reply changes only when there were any.
+function formatReply({ timing, reply, chat }: RunResult): string | null {
+  if (!chat && reply.preReply.length === 0) return null;
   const after = (t: number) => `+${ms(t - timing.clickAt)} ms`;
   return [
-    `    ${"send → first body byte".padEnd(26)}${chat.firstByteAt === null ? "     ?" : String(ms(chat.firstByteAt - timing.clickAt)).padStart(6)} ms`,
-    chat.preReply.length
-      ? `    pre-reply changes (not timed):`
-      : `    pre-reply changes (not timed): none`,
-    ...chat.preReply.map((c) => `        ${after(c.at).padStart(9)}  ${JSON.stringify(c.text)}`),
+    ...(chat
+      ? [`    ${"send → first body byte".padEnd(26)}${reply.firstByteAt === null ? "     ?" : String(ms(reply.firstByteAt - timing.clickAt)).padStart(6)} ms`]
+      : []),
+    reply.preReply.length ? `    pre-reply changes (not timed):` : `    pre-reply changes (not timed): none`,
+    ...reply.preReply.map((c) => `        ${after(c.at).padStart(9)}  ${c.text ? JSON.stringify(c.text) : "(empty)"}`),
   ].join("\n");
 }
 
@@ -1892,8 +1979,9 @@ function formatSummaryBlock(entries: SummaryEntry[]): string {
 const STREAM_FIX = "Fix: stream the response; users see the first word sooner, total time stays the same.";
 
 // The streaming verdict over the warm runs, shared by the terminal summary and the report.
-function describeStreaming({ done, span, warm }: DoneSummary): CheckReport {
+function describeStreaming({ done, span, warm, unidentified }: DoneSummary): CheckReport {
   const report = (r: Pick<CheckReport, "status" | "verdict" | "fix">): CheckReport => ({ ...r, checks: [], notes: [] });
+  if (warm === 0 && unidentified > 0) return report({ status: "unknown", verdict: "Inconclusive — AI request not identified in the warm runs" });
   if (warm === 0) return report({ status: "unknown", verdict: "Inconclusive — no warm runs for a median (use --runs 2 or more)" });
   if (done === null || span === null) {
     return report({ status: "unknown", verdict: `Inconclusive — no warm run settled within ${DONE_CAP_MS / 1000}s` });
@@ -1903,12 +1991,12 @@ function describeStreaming({ done, span, warm }: DoneSummary): CheckReport {
     : report({ status: "pass", verdict: verdict(span) });
 }
 
-// A chat run's report data, in ms after the send.
-function reportChat({ timing, chat }: RunResult): ReportChat {
+// A run's first body byte and pre-reply changes for the report, in ms after the click or send.
+function reportReply({ timing, reply }: RunResult): ReportReply {
   const after = (t: number) => t - timing.clickAt;
   return {
-    firstByte: chat!.firstByteAt === null ? null : after(chat!.firstByteAt),
-    preReply: chat!.preReply.map((c) => ({ at: after(c.at), text: c.text })),
+    firstByte: reply.firstByteAt === null ? null : after(reply.firstByteAt),
+    preReply: reply.preReply.map((c) => ({ at: after(c.at), text: c.text })),
   };
 }
 
@@ -1936,18 +2024,27 @@ function ms(value: number): number {
   return Math.round(value);
 }
 
-// Median covers the warm runs (2..N) that loaded; cold is run 1 on its own, null if it failed
-// to load; worst covers every run that loaded. Called with at least one loaded run.
-function summarize(loaded: LoadedRun[], failed: number[]): Summary {
+// Median covers the warm runs (2..N) that were measured; cold is run 1 on its own, null if it
+// failed to load or its AI request wasn't identified; worst covers every measured run. Called
+// with at least one measured run.
+function summarize(loaded: LoadedRun[], failed: number[], unidentified: number[]): Summary {
   const cold = loaded[0]!.run === 1 ? loaded[0]!.result.ms : null;
   const warm = loaded.filter((r) => r.run > 1).map((r) => r.result.ms);
   const worst = Math.max(...loaded.map((r) => r.result.ms));
-  return { cold, median: median(warm), worst, warm: warm.length, warmFailed: failed.filter((n) => n > 1).length };
+  return {
+    cold,
+    coldUnidentified: unidentified.includes(1),
+    median: median(warm),
+    worst,
+    warm: warm.length,
+    warmFailed: failed.filter((n) => n > 1).length,
+    warmUnidentified: unidentified.filter((n) => n > 1).length,
+  };
 }
 
-// Same warm-runs rule for done and span, given the warm runs that loaded. Runs that never
+// Same warm-runs rule for done and span, given the warm runs that were measured. Runs that never
 // settled have no done time, so they are left out and counted.
-function summarizeDone(warm: RunResult[]): DoneSummary {
+function summarizeDone(warm: RunResult[], unidentified: number): DoneSummary {
   const settled = warm.flatMap(({ timing, done }) =>
     done.settled ? [{ done: done.doneAt - timing.clickAt, span: done.doneAt - timing.firstPaintAt }] : []
   );
@@ -1956,6 +2053,7 @@ function summarizeDone(warm: RunResult[]): DoneSummary {
     span: median(settled.map((r) => r.span)),
     warm: warm.length,
     unsettled: warm.length - settled.length,
+    unidentified,
   };
 }
 
@@ -1966,11 +2064,18 @@ function median(values: number[]): number | null {
   return Math.round(sorted.length % 2 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2);
 }
 
-function formatSummary({ cold, median, worst, warm, warmFailed }: Summary): string {
-  const coldPart = cold === null ? "cold: run 1 failed to load" : `cold ${cold} ms`;
-  const lost = warmFailed ? ` (${warmFailed} failed to load)` : "";
+function formatSummary({ cold, coldUnidentified, median, worst, warm, warmFailed, warmUnidentified }: Summary): string {
+  const coldPart =
+    cold !== null ? `cold ${cold} ms`
+    : coldUnidentified ? "cold: run 1 AI request not identified"
+    : "cold: run 1 failed to load";
+  const reasons = [
+    warmFailed ? `${warmFailed} failed to load` : "",
+    warmUnidentified ? `${warmUnidentified} AI request not identified` : "",
+  ].filter(Boolean);
+  const lost = reasons.length ? ` (${reasons.join(", ")})` : "";
   if (median === null) return `${coldPart} · worst ${worst} ms (no warm runs for a median${lost})`;
-  const used = warmFailed ? ` · median of ${warm} warm run${warm === 1 ? "" : "s"}${lost}` : "";
+  const used = lost ? ` · median of ${warm} warm run${warm === 1 ? "" : "s"}${lost}` : "";
   return `${coldPart} · median ${median} ms · worst ${worst} ms${used}`;
 }
 

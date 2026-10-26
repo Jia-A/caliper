@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.0 — unreleased — not yet tested on a real chat app
+## 0.3.0 — unreleased — tested on one real chat app so far (a Gradio Space)
 
 ### Added
 
@@ -8,9 +8,15 @@
 - **`--output` may be a container** (for example the message list) with `--input`. Caliper watches it for added nodes and text changes. Your own message (an added node whose trimmed text equals the prompt) doesn't count, and the first word is the container's first change at or after the AI request's first body byte. Earlier changes, such as a "Thinking…" placeholder, are listed as pre-reply changes in the terminal and the report's new "Before the reply" table, and are never timed. Done uses the same settle window as before.
 - Test: `npm run test:chat` (chat-style run against a local fixture with a placeholder and an SSE reply), and a chat case in `npm run test:nostore`.
 
-### Unchanged
+### Changed
 
-- Button-and-fixed-output runs measure exactly as in 0.2.1. `--stop`, `--double` and `--canary` can't be combined with `--input` yet.
+- **The AI request is picked by time correlation, for clicks and chat sends alike.** The old scoring (longest, last to finish before first paint, …) only rewarded requests that had already finished, so on a queue-style app (a Gradio Space) it picked a 230 ms JSON side-call and reported a 281 ms first word for a reply that took far longer. Now every request sent since the trigger is a candidate, including streams still open, or opened only after, when the output starts changing. Caliper watches until they've all ended and the output has been quiet for `--settle-ms`, counts each output change toward the request whose body bytes (CDP `dataReceived`) arrived last within 250 ms before it, and picks the request that explains the most changes. It must be the unique top with at least one; a tie, or none, is reported as "AI request not identified, timing inconclusive", with no number, and the run is left out of the medians. Matched on timing, never on text.
+- **First word** is the first output change at or after the chosen request's first body byte, for click runs too. **Done** is never earlier than that request's last body byte or end.
+- Click runs list pre-reply changes when there are any. On a page whose output simply fills in from one stream (Quill), the numbers match 0.2.1 within run-to-run noise; only the "chosen from" line reads differently.
+- The Stop and double-send checks still pick their request with the old scoring.
+- A page whose output no request explains (for example, generated in the page itself) is now inconclusive instead of timed. Its run waits up to `--timeout` for a request to explain a change.
+- Test: `npm run test:sidecall` (a fast side-call that renders a placeholder, next to a slow streamed reply; and a page no request explains).
+- `--stop`, `--double` and `--canary` can't be combined with `--input` yet.
 
 ## 0.2.1 — 2026-10-26
 

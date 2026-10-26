@@ -14,13 +14,13 @@ import type {
   SummaryEntry,
 } from "./types.js";
 
-/** A chat run's first byte and pre-reply changes, in ms after the send. */
-export interface ReportChat {
+/** A run's first body byte and pre-reply changes, in ms after the click or send. */
+export interface ReportReply {
   firstByte: number | null;
   preReply: { at: number; text: string }[];
 }
 
-export type ReportRun = Breakdown & { run: number; total: number; chat?: ReportChat }; // run: 1-based number, 1 = cold
+export type ReportRun = Breakdown & { run: number; total: number; reply: ReportReply }; // run: 1-based number, 1 = cold
 
 export interface ReportInput {
   url: string;
@@ -29,9 +29,10 @@ export interface ReportInput {
   output: string;
   steps: string[];
   startedAt: Date;
-  summary: Summary;
+  summary: Summary | null; // null when no run was measured
   runs: ReportRun[]; // the runs whose page loaded
   failed: number[]; // run numbers whose page failed to load
+  unidentified: number[]; // run numbers whose AI request wasn't identified
   stop: (StopReport & { pattern: string }) | null; // null without --stop
   double: DoubleReport | null; // null without --double
   canary: (CanaryReport & { input: string | undefined }) | null; // null without --canary
@@ -57,7 +58,7 @@ const SEGMENTS: { key: SegmentKey; legend: string }[] = [
   { key: "other", legend: "unattributed" },
 ];
 
-export function renderReport({ url, measure, chat, output, steps, startedAt, summary, runs, failed, stop, double, canary, csp, streaming, checks }: ReportInput): string {
+export function renderReport({ url, measure, chat, output, steps, startedAt, summary, runs, failed, unidentified, stop, double, canary, csp, streaming, checks }: ReportInput): string {
   const bars: ChartRun[] = runs.map((run) => ({ ...run, bars: barSegments(run) }));
   const scale = Math.max(...runs.map((r) => r.total), 1);
   const ticks = niceTicks(scale);
@@ -85,14 +86,18 @@ export function renderReport({ url, measure, chat, output, steps, startedAt, sum
       ${steps.length ? `<dt>Steps</dt><dd>${steps.map((s) => `<code>${esc(s)}</code>`).join(" → ")}</dd>` : ""}
       <dt>${chat ? "Output container" : "Output selector"}</dt><dd><code>${esc(output)}</code></dd>
       <dt>Date</dt><dd>${esc(startedAt.toLocaleString("en-US", { dateStyle: "medium", timeStyle: "long" }))}</dd>
-      <dt>Runs</dt><dd>${runs.length + failed.length}${
-        failed.length ? ` (${failed.map((n) => `run ${n}`).join(", ")} failed to load)` : ""
-      }</dd>
+      <dt>Runs</dt><dd>${runs.length + failed.length + unidentified.length}${[
+        failed.length ? ` (${failed.map((n) => `run ${n}`).join(", ")} failed to load)` : "",
+        unidentified.length ? ` (${unidentified.map((n) => `run ${n}`).join(", ")}: AI request not identified, timing inconclusive)` : "",
+      ].join("")}</dd>
     </dl>
     <div class="tiles">
-      ${tile(summary.cold === null ? "Cold (run 1 failed to load)" : "Cold (run 1)", summary.cold)}
-      ${tile(medianLabel(summary, runs.length + failed.length), summary.median)}
-      ${tile("Worst (all runs)", summary.worst)}
+      ${summary ? `${tile(
+        summary.cold !== null ? "Cold (run 1)" : summary.coldUnidentified ? "Cold (run 1: AI request not identified)" : "Cold (run 1 failed to load)",
+        summary.cold
+      )}
+      ${tile(medianLabel(summary, runs.length + failed.length + unidentified.length), summary.median)}
+      ${tile("Worst (all runs)", summary.worst)}` : tile("AI request not identified in any run", null)}
     </div>
   </header>
   ${summaryBlock(checks)}
@@ -135,7 +140,7 @@ export function renderReport({ url, measure, chat, output, steps, startedAt, sum
     </table>
     </div>
   </section>
-  ${chat ? replySection(runs) : ""}
+  ${chat || runs.some((r) => r.reply.preReply.length) ? replySection(runs, chat ? "Send" : "Click") : ""}
   ${streamingSection(streaming)}
   ${stop ? stopSection(stop) : ""}
   ${double ? doubleSection(double) : ""}
@@ -221,27 +226,27 @@ function requestRow(run: ReportRun): string {
         </tr>`;
 }
 
-// Chat runs: when the AI request's first byte came, and what changed in the container before
-// the reply. Those changes are placeholders (or a slow first byte) and never count as the first word.
-function replySection(runs: ReportRun[]): string {
-  const changes = (chat: ReportChat) =>
-    chat.preReply.length
-      ? `<ul class="notes">${chat.preReply.map((c) => `<li>+${fmtMs(c.at)} ms ${esc(JSON.stringify(c.text))}</li>`).join("")}</ul>`
+// When the AI request's first body byte came, and what changed in the output before the reply.
+// Those changes are placeholders (or a slow first byte) and never count as the first word.
+function replySection(runs: ReportRun[], start: "Send" | "Click"): string {
+  const changes = (reply: ReportReply) =>
+    reply.preReply.length
+      ? `<ul class="notes">${reply.preReply.map((c) => `<li>+${fmtMs(c.at)} ms ${c.text ? esc(JSON.stringify(c.text)) : "(empty)"}</li>`).join("")}</ul>`
       : `<span class="muted">none</span>`;
   return `<section aria-labelledby="reply-h">
     <h2 id="reply-h">Before the reply</h2>
-    <p class="muted">The first word is the container&rsquo;s first change at or after the AI request&rsquo;s first body byte. Earlier changes are pre-reply changes, listed here and never timed. Your own message isn't counted.</p>
+    <p class="muted">The first word is the output&rsquo;s first change at or after the AI request&rsquo;s first body byte. Earlier changes are pre-reply changes, listed here and never timed.${start === "Send" ? " Your own message isn't counted." : ""}</p>
     <div class="table-wrap">
     <table>
       <thead><tr>
-        <th scope="col">Run</th><th scope="col" class="num">Send → first body byte (ms)</th><th scope="col" class="num">Send → first word (ms)</th><th scope="col">Pre-reply changes</th>
+        <th scope="col">Run</th><th scope="col" class="num">${start} → first body byte (ms)</th><th scope="col" class="num">${start} → first word (ms)</th><th scope="col">Pre-reply changes</th>
       </tr></thead>
       <tbody>
         ${runs.map((run) => `<tr>
           <th scope="row">${runName(run.run)}</th>
-          <td class="num">${run.chat?.firstByte == null ? "?" : fmtMs(run.chat.firstByte)}</td>
+          <td class="num">${run.reply.firstByte === null ? "?" : fmtMs(run.reply.firstByte)}</td>
           <td class="num">${fmtMs(run.total)}</td>
-          <td class="wrap">${run.chat ? changes(run.chat) : "—"}</td>
+          <td class="wrap">${changes(run.reply)}</td>
         </tr>`).join("")}
       </tbody>
     </table>
@@ -329,8 +334,9 @@ function checksBody({ verdict, fix, checks, notes }: Pick<CheckReport, "verdict"
 
 const runName = (n: number) => `run&nbsp;${n}${n === 1 ? " (cold)" : ""}`;
 
-function medianLabel({ warm, warmFailed }: Summary, total: number): string {
-  if (warmFailed) return `Median (${warm} warm run${warm === 1 ? "" : "s"}, ${warmFailed} failed to load)`;
+function medianLabel({ warm, warmFailed, warmUnidentified }: Summary, total: number): string {
+  const lost = [warmFailed ? `${warmFailed} failed to load` : "", warmUnidentified ? `${warmUnidentified} AI request not identified` : ""].filter(Boolean);
+  if (lost.length) return `Median (${warm} warm run${warm === 1 ? "" : "s"}, ${lost.join(", ")})`;
   return total > 2 ? `Median (runs 2–${total})` : total === 2 ? "Median (run 2)" : "Median (needs 2+ runs)";
 }
 

@@ -14,6 +14,15 @@ export class PageLoadError extends CliError {
   }
 }
 
+// A timed run whose AI request couldn't be identified: no request's body bytes explain the
+// output changes, or two explain them equally. The run reports it and isn't timed.
+export class UnidentifiedRequestError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UnidentifiedRequestError";
+  }
+}
+
 // The message of anything thrown; catch clauses see `unknown`.
 export function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);

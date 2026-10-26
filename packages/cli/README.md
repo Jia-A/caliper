@@ -87,21 +87,17 @@ report: /path/to/caliper-report.html
 
 Each run opens a fresh page and loads the URL. Caliper clicks the steps and then installs a small watcher in the page. The watcher listens for the next click and, on every animation frame after it, checks whether the output element's content has changed. Then Caliper clicks the measured button.
 
-The total is the time from the click event to the first frame in which the output differs from what it was at the click. Both ends come from the page's own `performance.now()` clock.
+The total is the time from the click event to the first word: the first frame in which the output changed after the AI request's first body byte arrived. Both ends come from the page's own `performance.now()` clock. Changes before that byte (a "Loading…" placeholder, say) are listed as pre-reply changes and never timed.
 
 ### How the AI request is detected
 
-Caliper records every request the page makes from just before the click until first paint, then scores each one:
+Caliper records every request the page makes from just before the click, and when each chunk of each response body arrives (Chrome's own network events). It keeps watching until every one of those requests has ended and the output has been quiet for `--settle-ms`, so a reply stream that is still open, or only opens after the output first changes, is included.
 
-| Points | Rule |
-|---|---|
-| +1 | Starts within 200 ms after the click |
-| +1 | POST with a JSON body |
-| +1 | Longest duration |
-| +1 | Response is `text/event-stream` |
-| +2 | Last request to finish before first paint |
+Then it matches on timing: each output change counts toward the request whose body bytes arrived most recently, at most 250 ms before the change. The request that explains the most output changes is the AI request. It must explain at least one, and no other request may explain as many. Otherwise the run is reported as **AI request not identified, timing inconclusive**, without a number, and left out of the medians. The output shows how many changes the chosen request explained, and the runner-up. To name the request yourself, use `--request`.
 
-The highest score wins, and ties go to the longer request. The output shows the chosen request and the points it earned. If the guess is wrong, use `--request`.
+Done is never earlier than the AI request's last body byte.
+
+(The Stop and double-send checks still pick their request by an older score: starts soon after the click, POST with JSON, longest, `text/event-stream`, last to finish before first paint.)
 
 ### Timing segments
 
@@ -218,7 +214,8 @@ An allowed domain that anyone can make send a request (an image proxy, an open r
 - **The clock check needs `Timing-Allow-Origin` on cross-origin APIs.** Without that header the browser hides the detailed timings from Resource Timing, so the check prints `n/a`. The CORS preflight line still works. To enable the check, have your API send `Timing-Allow-Origin: <your page's origin>`.
 - **Headless by default.** In a visible window, Chromium slows down animation frames when the window is hidden, minimized or behind other windows. Caliper's watcher checks the output on every animation frame, so a slowed window would inflate the numbers. Headless runs aren't affected by window focus, and they work on servers and in CI. Use `--headed` to watch a flow, but keep the window visible while it runs.
 - **Chromium only.** Timings come from Chromium's network events.
-- **HTTP requests only.** Output delivered over a WebSocket isn't tied to any request. The run's total is still correct, but Caliper will either pick an unrelated HTTP request or show the run as "unattributed".
+- **HTTP requests only.** Output delivered over a WebSocket isn't tied to any request. Such runs are reported as "AI request not identified", unless an unrelated HTTP request happens to be followed by more output changes.
+- **A reply that starts after a long gap with nothing open can be missed.** Caliper stops watching once every request has ended and the output has been quiet for `--settle-ms`. A page that renders a placeholder from one request and opens the reply stream only after a longer pause would end the run first. Raise `--settle-ms`, or use `--request`.
 - **`auth.json` holds your session cookies.** Treat it like a password and don't commit it.
 - **A run whose page fails to load doesn't stop the audit.** It's reported as "page failed to load" and left out of the medians, and the summary says how many runs were used. If every run fails, Caliper prints "Inconclusive — page failed to load" and exits.
 
@@ -227,4 +224,7 @@ An allowed domain that anyone can make send a request (an image proxy, an open r
 ```sh
 npm run test:csp     # CSP parser unit tests (Node 22.18+)
 npm run test:canary  # builds, then runs the canary check against a local fixture with and without CSP
+npm run test:nostore # builds, then checks streams that end ERR_ABORTED after their full body (click and chat)
+npm run test:chat    # builds, then times a chat page with a "Thinking…" placeholder
+npm run test:sidecall # builds, then checks the AI request is picked by timing next to a fast side-call
 ```

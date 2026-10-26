@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Side-call fixture</title>
+</head>
+<body>
+<!-- A queue-style chat app: Send first POSTs a fast JSON side-call (~200 ms) whose response
+     renders your message and a "Loading content" placeholder. The reply comes over a separate
+     SSE GET, opened right after: one status event at once (rendered nowhere), then, after a
+     long wait, the streamed tokens. Caliper must time the stream, not the side-call. -->
+<div id="chat"><p class="empty">Ask anything…</p></div>
+<input id="msg" size="60" placeholder="Message">
+<button id="send">Send</button>
+<script>
+  const chat = document.getElementById("chat");
+  const input = document.getElementById("msg");
+
+  document.getElementById("send").addEventListener("click", async () => {
+    const prompt = input.value;
+    input.value = "";
+    const res = await fetch("/sidecall/predict", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ prompt }),
+    });
+    const { messages } = await res.json();
+    chat.innerHTML = "";
+    for (const m of messages) {
+      const p = document.createElement("p");
+      p.className = m.role;
+      p.textContent = m.text;
+      chat.append(p);
+    }
+    const loading = document.createElement("div");
+    loading.textContent = "Loading content";
+    chat.append(loading);
+
+    const stream = await fetch("/sidecall/stream");
+    const reader = stream.body.pipeThrough(new TextDecoderStream()).getReader();
+    let buffer = "";
+    let reply = null;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += value;
+      const events = buffer.split("\n\n");
+      buffer = events.pop();
+      for (const event of events) {
+        const data = JSON.parse(event.replace(/^data: /, ""));
+        if (data.status) continue; // queue status: nothing to show
+        if (!reply) {
+          reply = document.createElement("p");
+          reply.className = "assistant";
+          loading.replaceWith(reply);
+        }
+        reply.textContent += data.t;
+      }
+    }
+  });
+</script>
+</body>
+</html>
