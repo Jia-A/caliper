@@ -1,13 +1,13 @@
 # Changelog
 
-## 0.3.0 — unreleased — tested on one real chat app so far (a Gradio Space)
+## 0.3.0 — unreleased — tested on two real apps: a Gradio Space and a custom-built chat app (PDFSimpli)
 
 ### Added
 
 - **Chat-style triggers: `--input <selector>` and `--prompt <text>`.** Caliper types the prompt into the input and sends it with the `--measure` button, or Enter when there's no `--measure`. The click or keydown starts the timer.
 - **`--output` may be a container** (for example the message list) with `--input`. Caliper watches it for added nodes and text changes. Your own message (an added node whose trimmed text equals the prompt) doesn't count, and the first word is the container's first change at or after the AI request's first body byte. Earlier changes, such as a "Thinking…" placeholder, are listed as pre-reply changes in the terminal and the report's new "Before the reply" table, and are never timed. Done uses the same settle window as before.
 - Test: `npm run test:chat` (chat-style run against a local fixture with a placeholder and an SSE reply), and a chat case in `npm run test:nostore`.
-- **`--measure-selector <css>`: click by CSS selector.** For icon-only buttons (an `<svg>` with no text or `aria-label`) that `--measure` can't find by name. It must match exactly one element: 0 or more than one stops the audit with an error that gives the count. The clicked element (tag, id, and the first 60 characters of its `aria-label` or text) is printed before each run. Works in click runs, with `--input`/`--prompt`, and in the Stop, double-send and canary checks. Passing it together with `--measure` is an error. `--measure` still matches by name only. The report shows the selector under "Measured button" or "Sent with".
+- **`--measure-selector <css>`: click by CSS selector.** For icon-only buttons (an `<svg>` with no text or `aria-label`) that `--measure` can't find by name. It must match exactly one element: 0 or more than one stops the audit with an error that gives the count. The clicked element (tag, id, and the first 60 characters of its `aria-label` or text) is printed before each run. Tested in click runs and with `--input`/`--prompt` only, not yet with `--stop`, `--double` or `--canary`. Passing it together with `--measure` is an error. `--measure` still matches by name only. The report shows the selector under "Measured button" or "Sent with".
 - Test: `npm run test:selector` (an icon-only send button where Enter doesn't send, in click and chat mode, plus the 0-match, 2-match and both-flags errors).
 
 ### Changed

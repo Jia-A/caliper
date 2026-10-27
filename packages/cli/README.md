@@ -95,7 +95,7 @@ caliper audit https://your-app.example.com/chat --input "#msg" --prompt "hello" 
 
 - **Exactly one match.** If the selector matches no element (after waiting up to `--timeout`) or more than one, Caliper stops with an error that gives the count. It never picks one for you.
 - **Printed before each run**, so you can confirm it's the element you meant: `clicking <button id="SendButton"> (no text or aria-label)`. When the element has an `aria-label` or text, the first 60 characters are shown instead.
-- **Works wherever `--measure` does:** plain click runs, chat-style runs with `--input`/`--prompt`, and the Stop, double-send and canary checks.
+- **Tested in click runs and chat-style runs** (`--input`/`--prompt`) only. It isn't tested with `--stop`, `--double` or `--canary` yet.
 - **Not combined with `--measure`.** Passing both is an error, because Caliper won't guess which one you meant.
 
 `--measure` itself only matches by name. It has not changed.

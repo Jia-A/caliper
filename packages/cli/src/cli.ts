@@ -36,8 +36,9 @@ const USAGE = `Usage:
       "Thinking…" don't count. Not yet combinable with --stop, --double or --canary.
       --measure-selector clicks the one element a CSS selector matches instead of a
       button by name, for icon-only buttons with no text or aria-label. It must match
-      exactly one element; Caliper prints it before each run. Use it wherever --measure
-      goes, but not together with --measure.
+      exactly one element; Caliper prints it before each run. Tested in click runs and
+      chat-style runs (--input/--prompt) only. It isn't tested with --stop, --double or
+      --canary yet. Not together with --measure.
 
   --step, --measure and --stop are button names, matched as case-insensitive regexes.`;
 
