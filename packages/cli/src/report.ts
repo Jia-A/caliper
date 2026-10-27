@@ -7,6 +7,7 @@ import type {
   CheckStatus,
   CspReport,
   DoubleReport,
+  Measure,
   Segment,
   SegmentKey,
   StopReport,
@@ -24,7 +25,7 @@ export type ReportRun = Breakdown & { run: number; total: number; reply: ReportR
 
 export interface ReportInput {
   url: string;
-  measure: string | undefined; // undefined for a chat run sent with Enter
+  measure: Measure | undefined; // undefined for a chat run sent with Enter
   chat: { input: string; prompt: string } | null; // null without --input
   output: string;
   steps: string[];
@@ -40,6 +41,10 @@ export interface ReportInput {
   streaming: CheckReport;
   checks: SummaryEntry[]; // every check that ran, in summary order
 }
+
+// The button by name (as the regex it's matched with), or the CSS selector.
+const measureHtml = (m: Measure) =>
+  "name" in m ? `button <code>${esc(String(new RegExp(m.name, "i")))}</code>` : `selector <code>${esc(m.selector)}</code>`;
 
 /** A segment as drawn: known, non-negative width. */
 type BarSegment = Segment & { ms: number };
@@ -81,8 +86,8 @@ export function renderReport({ url, measure, chat, output, steps, startedAt, sum
       <dt>URL</dt><dd class="wrap">${esc(url)}</dd>
       ${chat
         ? `<dt>Prompt</dt><dd class="wrap">${esc(JSON.stringify(chat.prompt))} typed into <code>${esc(chat.input)}</code></dd>
-      <dt>Sent with</dt><dd>${measure ? `button <code>${esc(String(new RegExp(measure, "i")))}</code>` : `Enter in <code>${esc(chat.input)}</code>`}</dd>`
-        : `<dt>Measured button</dt><dd><code>${esc(String(new RegExp(measure!, "i")))}</code></dd>`}
+      <dt>Sent with</dt><dd>${measure ? measureHtml(measure) : `Enter in <code>${esc(chat.input)}</code>`}</dd>`
+        : `<dt>Measured button</dt><dd>${measureHtml(measure!)}</dd>`}
       ${steps.length ? `<dt>Steps</dt><dd>${steps.map((s) => `<code>${esc(s)}</code>`).join(" → ")}</dd>` : ""}
       <dt>${chat ? "Output container" : "Output selector"}</dt><dd><code>${esc(output)}</code></dd>
       <dt>Date</dt><dd>${esc(startedAt.toLocaleString("en-US", { dateStyle: "medium", timeStyle: "long" }))}</dd>

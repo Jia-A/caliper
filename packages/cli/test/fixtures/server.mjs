@@ -12,6 +12,8 @@
 //   /sidecall           the page
 //   /sidecall/predict   the side-call (POST, JSON after ~200 ms; renders your message + a placeholder)
 //   /sidecall/stream    the reply (GET SSE: a status event at once, tokens after SIDECALL_WAIT_MS)
+// For an icon-only send button (no accessible name; Enter doesn't send):
+//   /icon         the page (streams from /chat/stream)
 // Run on its own with `node test/fixtures/server.mjs [port]`, or import startFixtureServer().
 
 import { readFileSync } from "node:fs";
@@ -23,6 +25,7 @@ const PAGE = readFileSync(new URL("./canary-page.html", import.meta.url), "utf8"
 const STREAM_PAGE = readFileSync(new URL("./stream-page.html", import.meta.url), "utf8");
 const CHAT_PAGE = readFileSync(new URL("./chat-page.html", import.meta.url), "utf8");
 const SIDECALL_PAGE = readFileSync(new URL("./sidecall-page.html", import.meta.url), "utf8");
+const ICON_PAGE = readFileSync(new URL("./icon-page.html", import.meta.url), "utf8");
 
 // The streamed reply: headers at once, the first token after a pause, then a token every 60 ms.
 const REPLY = "Hello! Here is **a streamed reply**, one token at a time.\n\nIt ends here.".split(/(?<= )/);
@@ -66,7 +69,7 @@ async function sidecallStream(res) {
   res.end();
 }
 
-const PAGES = { "/stream-nostore": STREAM_PAGE, "/chat": CHAT_PAGE, "/sidecall": SIDECALL_PAGE };
+const PAGES = { "/stream-nostore": STREAM_PAGE, "/chat": CHAT_PAGE, "/sidecall": SIDECALL_PAGE, "/icon": ICON_PAGE };
 const STREAMS = { "/chat/stream": "no-cache", "/chat/stream-nostore": "no-store" };
 
 const VARIANTS = {
@@ -115,5 +118,5 @@ export function startFixtureServer(port = 0) {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const { url } = await startFixtureServer(Number(process.argv[2] ?? 0));
-  console.log(`fixture: ${url}/no-csp  ${url}/csp  ${url}/stream-nostore  ${url}/chat  ${url}/sidecall`);
+  console.log(`fixture: ${url}/no-csp  ${url}/csp  ${url}/stream-nostore  ${url}/chat  ${url}/sidecall  ${url}/icon`);
 }

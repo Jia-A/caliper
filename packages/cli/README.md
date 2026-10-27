@@ -63,7 +63,8 @@ report: /path/to/caliper-report.html
 
 | Flag | Default | |
 |---|---|---|
-| `--measure <text>` | required | The button whose click starts the timer. |
+| `--measure <text>` | required (or `--measure-selector`) | The button whose click starts the timer. |
+| `--measure-selector <css>` | none | Click the one element this CSS selector matches instead of a button by name. See [icon-only buttons](#icon-only-buttons---measure-selector). |
 | `--output <selector>` | required | CSS selector for the element where the AI output appears. Caliper reads `value` (inputs and textareas) or else `textContent`. |
 | `--step <text>` | none | A button to click before measuring. Repeat the flag for several, clicked in order. |
 | `--runs <n>` | `3` | Number of runs. |
@@ -78,10 +79,26 @@ report: /path/to/caliper-report.html
 | `--canary` | off | Run the [canary image check](#canary-image---canary---canary-input); you plant the canary line yourself. |
 | `--canary-input <selector>` | none | Run the canary check, typing the canary line into this input first. Implies `--canary`. |
 | `--csp` | off (on with `--canary`) | Run the [CSP check](#csp---csp). |
-| `--input <selector>` | none | Time a [chat-style page](#chat-style-pages---input---prompt): type `--prompt` into this input and send it. Makes `--measure` optional. |
+| `--input <selector>` | none | Time a [chat-style page](#chat-style-pages---input---prompt): type `--prompt` into this input and send it. Makes `--measure` and `--measure-selector` optional. |
 | `--prompt <text>` | required with `--input` | The message to send. |
 
 `--step` and `--measure` match accessible button names as case-insensitive regular expressions, so `"^(re)?generate$"` matches exactly "Generate" or "Regenerate". If a pattern matches more than one button, Caliper stops and asks you to make it more specific.
+
+### Icon-only buttons (`--measure-selector`)
+
+`--measure` finds buttons by accessible name: their text or `aria-label`. A button that only holds an icon (an `<svg>` with no text and no `aria-label`) has no name, so `--measure` can't find it. Use `--measure-selector` to click it by CSS selector instead:
+
+```sh
+caliper audit https://your-app.example.com/chat --input "#msg" --prompt "hello" \
+  --measure-selector "#SendButton" --output "#messages"
+```
+
+- **Exactly one match.** If the selector matches no element (after waiting up to `--timeout`) or more than one, Caliper stops with an error that gives the count. It never picks one for you.
+- **Printed before each run**, so you can confirm it's the element you meant: `clicking <button id="SendButton"> (no text or aria-label)`. When the element has an `aria-label` or text, the first 60 characters are shown instead.
+- **Works wherever `--measure` does:** plain click runs, chat-style runs with `--input`/`--prompt`, and the Stop, double-send and canary checks.
+- **Not combined with `--measure`.** Passing both is an error, because Caliper won't guess which one you meant.
+
+`--measure` itself only matches by name. It has not changed.
 
 ## What gets measured
 
@@ -122,7 +139,7 @@ The **clock check** line compares the request's first-byte time from Playwright 
 caliper audit https://your-app.example.com/chat --input "#msg" --prompt "hello" --output "#messages"
 ```
 
-Caliper types the prompt into `--input`, then sends it by clicking `--measure` if given, or by pressing Enter in the input. The click or keydown starts the timer. `--output` can be the message list: Caliper watches it for added nodes and text changes.
+Caliper types the prompt into `--input`, then sends it by clicking `--measure` or `--measure-selector` if given, or by pressing Enter in the input. If Enter doesn't send on your page, pass one of them. The click or keydown starts the timer. `--output` can be the message list: Caliper watches it for added nodes and text changes.
 
 - **Your own message doesn't count.** An added node whose trimmed text equals the prompt is ignored.
 - **Placeholders don't count.** The first word is the container's first change at or after the chosen AI request's first body byte, the same rule as the double-send check uses. Changes before that, such as a "Thinking…" bubble or a typing indicator, are printed as pre-reply changes and shown in the report's "Before the reply" table. They are never timed.
@@ -227,4 +244,5 @@ npm run test:canary  # builds, then runs the canary check against a local fixtur
 npm run test:nostore # builds, then checks streams that end ERR_ABORTED after their full body (click and chat)
 npm run test:chat    # builds, then times a chat page with a "Thinking…" placeholder
 npm run test:sidecall # builds, then checks the AI request is picked by timing next to a fast side-call
+npm run test:selector # builds, then clicks an icon-only send button with --measure-selector (click and chat)
 ```

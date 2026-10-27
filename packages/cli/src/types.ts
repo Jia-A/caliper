@@ -2,6 +2,12 @@ import type { Request, Response } from "playwright";
 
 // All times are page-clock ms (performance.now() in the audited page) unless noted.
 
+/**
+ * What to click to start the timer: a button by accessible name (--measure, a case-insensitive
+ * regex), or the one element a CSS selector matches (--measure-selector). Never both.
+ */
+export type Measure = { name: string } | { selector: string };
+
 /** What the in-page watcher reports: the measured click and the first frame with new output. */
 export interface PageTiming {
   clickAt: number;

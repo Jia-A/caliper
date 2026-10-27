@@ -19,6 +19,7 @@ import type {
   DoneTiming,
   DoubleReport,
   DoubleResult,
+  Measure,
   OutputChange,
   PageTiming,
   RequestSummary,
@@ -67,7 +68,7 @@ export interface ChatOptions {
 
 export interface AuditOptions {
   url: string;
-  measure: string | undefined; // required without chat (cli.ts)
+  measure: Measure | undefined; // required without chat (cli.ts)
   output: string;
   steps: string[];
   runs: number;
@@ -94,7 +95,7 @@ interface LoadedRun {
 
 interface MeasureOptions {
   url: string;
-  measure: string | undefined; // required without chat (cli.ts)
+  measure: Measure | undefined; // required without chat (cli.ts)
   output: string;
   steps: string[];
   timeout: number;
@@ -480,7 +481,7 @@ function pickByCorrelation(changes: ContainerChange[], requests: RequestTiming[]
 async function prepareChatRun(page: Page, { url, measure, output, steps, timeout }: MeasureOptions, { input, prompt }: ChatOptions): Promise<() => Promise<void>> {
   await loadAndStep(page, url, steps, timeout);
 
-  const button = measure ? await findButton(page, measure, "--measure", timeout) : null;
+  const button = measure ? await findMeasure(page, measure, timeout) : null;
   await checkSelector(page, output, "--output");
   await checkSelector(page, input, "--input");
   const field = page.locator(input);
@@ -560,7 +561,7 @@ function replyFirstByte(r: RequestTiming, wire: Wire): number | null {
 async function prepareRun(page: Page, { url, measure, output, steps, timeout, settleMs }: MeasureOptions): Promise<Locator> {
   await loadAndStep(page, url, steps, timeout);
 
-  const target = await findButton(page, measure!, "--measure", timeout);
+  const target = await findMeasure(page, measure!, timeout);
 
   // A bad selector would throw inside the rAF loop and hang the run, so check it up front.
   await checkSelector(page, output, "--output");
@@ -683,7 +684,7 @@ async function waitForFirstWord(page: Page, { measure, output, timeout }: Measur
     const exists = await page.evaluate((sel) => !!document.querySelector(sel), output);
     throw new CliError(
       exists
-        ? `Timed out after ${timeout} ms: "${output}" never changed after clicking --measure "${measure}".`
+        ? `Timed out after ${timeout} ms: "${output}" never changed after clicking ${measureFlag(measure!)}.`
         : `Timed out after ${timeout} ms: no element matches --output "${output}".`
     );
   }
@@ -1392,6 +1393,41 @@ function readResourceTiming(page: Page): Promise<ResourceTimingEntry[]> {
 function matchResourceTiming(entries: ResourceTimingEntry[], url: string, start: number): ResourceTimingEntry | null {
   const candidates = entries.filter((e) => e.name === url && e.startTime <= start + 1);
   return candidates.length ? maxBy(candidates, (e) => e.startTime) : null;
+}
+
+const measureFlag = (m: Measure) => ("name" in m ? `--measure "${m.name}"` : `--measure-selector "${m.selector}"`);
+
+// The element to click for --measure (a button by name) or --measure-selector (exactly one CSS
+// match, else an error naming the count; never the first of several). A selector's element is
+// printed, since it may have no name to recognise it by.
+async function findMeasure(page: Page, measure: Measure, timeout: number): Promise<Locator> {
+  if ("name" in measure) return findButton(page, measure.name, "--measure", timeout);
+
+  const { selector } = measure;
+  await checkSelector(page, selector, "--measure-selector");
+  const target = page.locator(`css=${selector}`);
+  try {
+    await target.first().waitFor({ state: "attached", timeout });
+  } catch (err) {
+    if (!(err instanceof Error && err.name === "TimeoutError")) throw err;
+  }
+  const count = await target.count();
+  if (count !== 1) {
+    throw new CliError(
+      `--measure-selector "${selector}" matches ${count} elements${count === 0 ? ` (waited ${timeout} ms)` : ""}; it must match exactly one.`
+    );
+  }
+
+  const el = await target.evaluate((el) => ({
+    tag: el.tagName.toLowerCase(),
+    id: el.id,
+    label: (el.getAttribute("aria-label") ?? "").replace(/\s+/g, " ").trim(),
+    text: (el.textContent ?? "").replace(/\s+/g, " ").trim(),
+  }));
+  const clip = (s: string) => (s.length > 60 ? `${s.slice(0, 59)}…` : s);
+  const name = el.label ? `aria-label ${JSON.stringify(clip(el.label))}` : el.text ? JSON.stringify(clip(el.text)) : "(no text or aria-label)";
+  console.log(`clicking <${el.tag}${el.id ? ` id="${el.id}"` : ""}> ${name}`);
+  return target;
 }
 
 async function findButton(page: Page, text: string, flag: string, timeout: number): Promise<Locator> {

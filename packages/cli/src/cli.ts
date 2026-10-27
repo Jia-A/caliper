@@ -8,8 +8,9 @@ const USAGE = `Usage:
   caliper login <url> [--auth auth.json]
       Open a browser, log in by hand, save the session.
 
-  caliper audit <url> --measure <text> --output <selector>
-  caliper audit <url> --input <selector> --prompt <text> --output <selector> [--measure <text>]
+  caliper audit <url> (--measure <text> | --measure-selector <css>) --output <selector>
+  caliper audit <url> --input <selector> --prompt <text> --output <selector>
+      [--measure <text> | --measure-selector <css>]
       [--step <text>]... [--runs 3] [--headed] [--auth auth.json] [--timeout 60000]
       [--request <regex>] [--report [path]] [--settle-ms 2000] [--stop <text>] [--double]
       [--canary] [--canary-input <selector>] [--csp]
@@ -33,6 +34,10 @@ const USAGE = `Usage:
       --output may then be the message list; the first word is its first change
       after the AI request's first byte, so your own message and placeholders like
       "Thinking…" don't count. Not yet combinable with --stop, --double or --canary.
+      --measure-selector clicks the one element a CSS selector matches instead of a
+      button by name, for icon-only buttons with no text or aria-label. It must match
+      exactly one element; Caliper prints it before each run. Use it wherever --measure
+      goes, but not together with --measure.
 
   --step, --measure and --stop are button names, matched as case-insensitive regexes.`;
 
@@ -68,6 +73,7 @@ const COMMANDS = {
   audit: command({
     options: {
       measure: { type: "string" },
+      "measure-selector": { type: "string" },
       output: { type: "string" },
       step: { type: "string", multiple: true, default: [] },
       runs: { type: "string", default: "3" },
@@ -87,7 +93,12 @@ const COMMANDS = {
     },
     optionalValues: { report: DEFAULT_REPORT },
     async run({ url, values }) {
-      if (!values.measure && !values.input) throw new CliError("audit: --measure <text> (or --input <selector>) is required.");
+      if (values.measure !== undefined && values["measure-selector"] !== undefined) {
+        throw new CliError("audit: pass --measure <text> or --measure-selector <css>, not both.");
+      }
+      if (!values.measure && !values["measure-selector"] && !values.input) {
+        throw new CliError("audit: --measure <text> or --measure-selector <css> (or --input <selector>) is required.");
+      }
       if (!values.output) throw new CliError("audit: --output <selector> is required.");
       if (values.input && values.prompt === undefined) throw new CliError("audit: --input needs --prompt <text>.");
       if (values.prompt !== undefined && !values.input) throw new CliError("audit: --prompt needs --input <selector>.");
@@ -99,7 +110,7 @@ const COMMANDS = {
       const { audit } = await import("./audit.js");
       await audit({
         url,
-        measure: values.measure,
+        measure: values.measure ? { name: values.measure } : values["measure-selector"] ? { selector: values["measure-selector"] } : undefined,
         output: values.output,
         steps: values.step,
         runs: positiveInt(values.runs, "--runs"),
