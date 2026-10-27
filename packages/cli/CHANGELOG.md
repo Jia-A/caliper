@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.0 — unreleased — tested on two real apps: a Gradio Space and a custom-built chat app (PDFSimpli)
+## 0.3.0 — 2026-10-27 — tested on two real apps: a Gradio Space and a custom-built chat app (PDFSimpli)
 
 ### Added
 
