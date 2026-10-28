@@ -50,6 +50,7 @@
     "test:nostore": "npm run -s build >/dev/null && node test/nostore.test.mjs",
     "test:chat": "npm run -s build >/dev/null && node test/chat.test.mjs",
     "test:sidecall": "npm run -s build >/dev/null && node test/sidecall.test.mjs",
-    "test:selector": "npm run -s build >/dev/null && node test/selector.test.mjs"
+    "test:selector": "npm run -s build >/dev/null && node test/selector.test.mjs",
+    "test:marked": "npm run -s build >/dev/null && node test/marked.test.mjs"
   }
 }

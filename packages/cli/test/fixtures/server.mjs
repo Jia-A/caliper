@@ -14,6 +14,10 @@
 //   /sidecall/stream    the reply (GET SSE: a status event at once, tokens after SIDECALL_WAIT_MS)
 // For an icon-only send button (no accessible name; Enter doesn't send):
 //   /icon         the page (streams from /chat/stream)
+// For the marked visit (server timings): a page whose reply URL varies per ?case and per load.
+//   /marked       the page (?case=a…f&id=<test id>; see marked-page.html)
+//   /marked/…     its requests: …/reply (POST; SSE, or JSON with ?kind=ping), font.woff2, analytics (204).
+//                 Each is recorded with its x-caliper-* headers: server.marked(id).
 // Run on its own with `node test/fixtures/server.mjs [port]`, or import startFixtureServer().
 
 import { readFileSync } from "node:fs";
@@ -26,6 +30,7 @@ const STREAM_PAGE = readFileSync(new URL("./stream-page.html", import.meta.url),
 const CHAT_PAGE = readFileSync(new URL("./chat-page.html", import.meta.url), "utf8");
 const SIDECALL_PAGE = readFileSync(new URL("./sidecall-page.html", import.meta.url), "utf8");
 const ICON_PAGE = readFileSync(new URL("./icon-page.html", import.meta.url), "utf8");
+const MARKED_PAGE = readFileSync(new URL("./marked-page.html", import.meta.url), "utf8");
 
 // The streamed reply: headers at once, the first token after a pause, then a token every 60 ms.
 const REPLY = "Hello! Here is **a streamed reply**, one token at a time.\n\nIt ends here.".split(/(?<= )/);
@@ -77,9 +82,55 @@ const VARIANTS = {
   "/csp": { "content-security-policy": "img-src 'self'" },
 };
 
+// /marked: page loads and requests per test id, with the x-caliper-* headers each request carried.
+function markedRoute(req, res, url, loads, seen) {
+  const id = url.searchParams.get("id") ?? "";
+  if (url.pathname === "/marked") {
+    const load = (loads.get(id) ?? 0) + 1;
+    loads.set(id, load);
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+    res.end(MARKED_PAGE.replace("__LOAD__", String(load)));
+    return;
+  }
+  if (!seen.has(id)) seen.set(id, []);
+  seen.get(id).push({
+    method: req.method,
+    url: url.pathname + url.search,
+    load: Number(url.searchParams.get("load")),
+    run: req.headers["x-caliper-run"] ?? null,
+    token: req.headers["x-caliper-token"] ?? null,
+    contentType: req.headers["content-type"] ?? null, // a page header that must survive the stamp
+  });
+  req.resume(); // bodies aren't used
+  if (url.pathname.endsWith("/reply") && req.method === "POST") {
+    if (url.searchParams.get("kind") === "ping") {
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+      res.end("{}");
+    } else {
+      streamReply(res, "no-cache");
+    }
+    return;
+  }
+  if (url.pathname.endsWith(".woff2")) {
+    res.writeHead(200, { "content-type": "font/woff2", "cache-control": "no-store" });
+    res.end("not a font");
+    return;
+  }
+  // Analytics: an empty 204, like a beacon endpoint. (A body the page never reads keeps the
+  // request open on the wire, and the run would never settle.)
+  res.writeHead(204, { "cache-control": "no-store" }).end();
+}
+
 export function startFixtureServer(port = 0) {
+  const loads = new Map(); // /marked page loads per test id
+  const seen = new Map(); // /marked/… requests per test id
   const server = createServer((req, res) => {
-    const path = new URL(req.url, "http://localhost").pathname;
+    const url = new URL(req.url, "http://localhost");
+    const path = url.pathname;
+    if (path === "/marked" || path.startsWith("/marked/")) {
+      markedRoute(req, res, url, loads, seen);
+      return;
+    }
     if (PAGES[path]) {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
       res.end(PAGES[path]);
@@ -111,6 +162,8 @@ export function startFixtureServer(port = 0) {
       resolve({
         url: `http://127.0.0.1:${server.address().port}`,
         close: () => new Promise((done) => server.close(done)),
+        // The /marked page loads and requests seen for one test id.
+        marked: (id) => ({ loads: loads.get(id) ?? 0, requests: seen.get(id) ?? [] }),
       });
     });
   });
@@ -118,5 +171,5 @@ export function startFixtureServer(port = 0) {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const { url } = await startFixtureServer(Number(process.argv[2] ?? 0));
-  console.log(`fixture: ${url}/no-csp  ${url}/csp  ${url}/stream-nostore  ${url}/chat  ${url}/sidecall  ${url}/icon`);
+  console.log(`fixture: ${url}/no-csp  ${url}/csp  ${url}/stream-nostore  ${url}/chat  ${url}/sidecall  ${url}/icon  ${url}/marked?case=a&id=x`);
 }

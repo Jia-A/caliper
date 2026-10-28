@@ -81,6 +81,7 @@ report: /path/to/caliper-report.html
 | `--csp` | off (on with `--canary`) | Run the [CSP check](#csp---csp). |
 | `--input <selector>` | none | Time a [chat-style page](#chat-style-pages---input---prompt): type `--prompt` into this input and send it. Makes `--measure` and `--measure-selector` optional. |
 | `--prompt <text>` | required with `--input` | The message to send. |
+| `--server-timings <origin>` | off | With `CALIPER_TOKEN` set, add one [marked visit](#marked-visit---server-timings) that stamps the AI request to this origin. |
 
 `--step` and `--measure` match accessible button names as case-insensitive regular expressions, so `"^(re)?generate$"` matches exactly "Generate" or "Regenerate". If a pattern matches more than one button, Caliper stops and asks you to make it more specific.
 
@@ -99,6 +100,26 @@ caliper audit https://your-app.example.com/chat --input "#msg" --prompt "hello" 
 - **Not combined with `--measure`.** Passing both is an error, because Caliper won't guess which one you meant.
 
 `--measure` itself only matches by name. It has not changed.
+
+### Marked visit (`--server-timings`)
+
+This is the first step toward server-side timings. It marks one request so your server can recognise it. Caliper doesn't fetch any server timings yet.
+
+```sh
+CALIPER_TOKEN=… caliper audit http://localhost:5173/post/1 --measure "^generate$" --output textarea \
+  --server-timings http://localhost:8787
+```
+
+After the timed runs, Caliper builds a match key from the AI request each run picked (auto-detected, or by `--request`). The key is the method, origin and path, with the query string dropped. A path segment that differs between runs becomes a one-segment wildcard (`POST https://api.example.com/chat/*/reply`). Then it loads the page once more. The first request after the click that matches the key gets two headers: `x-caliper-run` (a fresh id, printed) and `x-caliper-token` (the value of `CALIPER_TOKEN`, never printed). No other request is touched, and the timed runs are never stamped.
+
+- **The token only goes to the origin you name.** The key's origin must equal `--server-timings` exactly (scheme, host and port). A subdomain, a longer host or a longer port is not a match. Otherwise Caliper sends nothing and prints `Server timings ? — AI request goes to <origin>, not <named origin>; token not sent.`
+- **Both are needed.** `CALIPER_TOKEN` without `--server-timings` does nothing. `--server-timings` without `CALIPER_TOKEN`, or with anything other than an `http(s)` origin, is an error before any run.
+- **No marked visit, with the reason, when:** any run's page failed to load or its AI request wasn't identified; or the runs disagree on method, origin or number of path segments (the line names each run's request).
+- **The marked visit is invalid** (`Server timings ? — …`) when no request matches the key, when 2 or more do (all are listed), or when the marked visit's AI request isn't the stamped one.
+- **On success** it prints `Server timings — marked visit sent x-caliper-run <id> on <request> (matched <key>); timings not fetched yet`. With `--runs 1` the line adds `(key from 1 run — changing path parts can't be detected)`.
+- **Its timing isn't reported.** The marked visit isn't a timed run and is left out of the medians, because it runs with request interception on, which Playwright documents as turning off the HTTP cache.
+- **Requests made during page load are never stamped or counted.** Interception starts just before the click and ends with the run.
+- **Tested** against local fixtures only, in click runs and chat-style runs, with and without `--request`. It hasn't been tested on a real server, on a cross-origin API behind a CORS preflight, or together with `--stop`, `--double` or `--canary`. The result isn't in the HTML report yet.
 
 ## What gets measured
 
@@ -245,4 +266,5 @@ npm run test:nostore # builds, then checks streams that end ERR_ABORTED after th
 npm run test:chat    # builds, then times a chat page with a "Thinking…" placeholder
 npm run test:sidecall # builds, then checks the AI request is picked by timing next to a fast side-call
 npm run test:selector # builds, then clicks an icon-only send button with --measure-selector (click and chat)
+npm run test:marked  # builds, then checks the --server-timings marked visit: match key, stamping, origin guard
 ```

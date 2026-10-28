@@ -1,7 +1,8 @@
+import { randomUUID } from "node:crypto";
 import { existsSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import type { Locator, Page, Request, Response } from "playwright";
+import type { BrowserContext, Locator, Page, Request, Response } from "playwright";
 import { launchChromium } from "./browser.js";
 import { combineImageRules, describeRule, imageRule, splitPolicies, type ImageRule } from "./csp.js";
 import { CliError, messageOf, PageLoadError, UnidentifiedRequestError } from "./errors.js";
@@ -84,6 +85,7 @@ export interface AuditOptions {
   canaryInput: string | undefined;
   csp: boolean;
   chat: ChatOptions | undefined;
+  serverTimings: { origin: string; token: string } | undefined; // --server-timings, with CALIPER_TOKEN
 }
 
 /** A timed run whose page loaded. `run` is its 1-based number; run 1 is the cold run. */
@@ -102,9 +104,10 @@ interface MeasureOptions {
   settleMs: number;
   requestPattern: RegExp | null;
   chat?: ChatOptions;
+  beforeTrigger?: () => Promise<void>; // just before the click or send (the marked visit's stamping)
 }
 
-export async function audit({ url, measure, output, steps, runs, headed, auth, timeout, settleMs, request, report, stop, double, canary, canaryInput, csp, chat }: AuditOptions): Promise<void> {
+export async function audit({ url, measure, output, steps, runs, headed, auth, timeout, settleMs, request, report, stop, double, canary, canaryInput, csp, chat, serverTimings }: AuditOptions): Promise<void> {
   const authPath = resolve(auth);
   if (!existsSync(authPath)) {
     throw new CliError(
@@ -193,6 +196,12 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
     const doneSummary = summarizeDone(loaded.filter((r) => r.run > 1).map((r) => r.result), unidentified.filter((n) => n > 1).length);
     const streamingReport = describeStreaming(doneSummary);
     console.log(formatDoneSummary(doneSummary, streamingReport));
+
+    if (serverTimings) {
+      // Its own fresh page, after the timed runs, which are never stamped.
+      const options = { url, measure, output, steps, timeout, settleMs, requestPattern, chat };
+      console.log(await markedVisit(context, options, serverTimings, loaded, failed, unidentified));
+    }
 
     let stopReport: StopReport | null = null;
     if (stopPattern) {
@@ -299,6 +308,7 @@ async function measureOnce(page: Page, options: MeasureOptions): Promise<RunResu
 
   try {
     // 2. Click — this is where the timer starts. Network capture starts just before it.
+    await options.beforeTrigger?.();
     const network = startNetworkCapture(page);
     const deadline = Date.now() + timeout; // --timeout counts from the click
     await target.click();
@@ -321,6 +331,7 @@ async function measureChatOnce(page: Page, options: MeasureOptions, chat: ChatOp
   const wire = await startWireCapture(page, await page.evaluate(() => performance.timeOrigin));
 
   try {
+    await options.beforeTrigger?.();
     const network = startNetworkCapture(page);
     const deadline = Date.now() + options.timeout; // --timeout counts from the send
     await send();
@@ -474,6 +485,108 @@ function pickByCorrelation(changes: ContainerChange[], requests: RequestTiming[]
   const reasons = [`explains ${top[1]} of ${changes.length} output changes (body bytes ≤ ${CORRELATION_MS} ms before each)`];
   reasons.push(next ? `next: ${next[0].method} ${new URL(next[0].url).pathname} with ${next[1]}` : "no other request explains any");
   return { request, reasons, from: requests.length, score: top[1] };
+}
+
+/** What the marked visit stamps: method + origin + path segments, null where runs differed. */
+interface MatchKey {
+  method: string;
+  origin: string;
+  segments: (string | null)[];
+}
+
+const keyText = (k: MatchKey) => `${k.method} ${k.origin}/${k.segments.map((s) => s ?? "*").join("/")}`;
+const pathSegments = (u: URL) => u.pathname.split("/").slice(1);
+
+// Same method, origin and number of segments; a wildcard matches any one non-empty segment.
+function matchesKey(k: MatchKey, method: string, url: string): boolean {
+  const u = new URL(url);
+  const segments = pathSegments(u);
+  return method === k.method && u.origin === k.origin && segments.length === k.segments.length &&
+    segments.every((s, i) => (k.segments[i] === null ? s !== "" : s === k.segments[i]));
+}
+
+// The match key from the AI request each run picked (query dropped), or why there's none: the
+// runs disagree on method, origin or number of path segments. Segments that differ become wildcards.
+function buildKey(picks: { run: number; method: string; url: URL }[]): MatchKey | string {
+  const disagree = (what: string, value: (p: (typeof picks)[number]) => string | number, show = value) =>
+    new Set(picks.map(value)).size > 1 ? `runs disagree on the ${what}: ${picks.map((p) => `run ${p.run} ${show(p)}`).join(", ")}` : null;
+  const reason =
+    disagree("method", (p) => p.method) ??
+    disagree("origin", (p) => p.url.origin) ??
+    disagree("number of path segments", (p) => pathSegments(p.url).length, (p) => `${p.method} ${p.url.origin}${p.url.pathname}`);
+  if (reason) return reason;
+  const all = picks.map((p) => pathSegments(p.url));
+  return {
+    method: picks[0]!.method,
+    origin: picks[0]!.url.origin,
+    segments: all[0]!.map((s, i) => (all.every((segs) => segs[i] === s) ? s : null)),
+  };
+}
+
+// The marked visit (--server-timings): one extra run on a fresh page whose first request after
+// the click that matches the key gets x-caliper-run + x-caliper-token, and nothing else is
+// touched. Only when every run identified its AI request and the key's origin is exactly the
+// named one; the token never goes anywhere else, and is never printed. Returns the line to print.
+async function markedVisit(
+  context: BrowserContext,
+  options: MeasureOptions,
+  { origin, token }: { origin: string; token: string },
+  loaded: LoadedRun[],
+  failed: number[],
+  unidentified: number[]
+): Promise<string> {
+  const unknown = (reason: string) => `Server timings ? — ${reason}`;
+  const inconclusive = [
+    ...failed.map((run) => ({ run, why: "page failed to load" })),
+    ...unidentified.map((run) => ({ run, why: "AI request not identified" })),
+  ].sort((a, b) => a.run - b.run);
+  if (inconclusive.length) {
+    return unknown(`${inconclusive.map((r) => `run ${r.run}: ${r.why}`).join("; ")} — no match key, so no marked visit`);
+  }
+
+  const key = buildKey(loaded.map(({ run, result }) => ({ run, method: result.pick.request.method, url: new URL(result.pick.request.url) })));
+  if (typeof key === "string") return unknown(key);
+  if (key.origin !== origin) return unknown(`AI request goes to ${key.origin}, not ${origin}; token not sent.`);
+  const oneRun = loaded.length === 1 ? " (key from 1 run — changing path parts can't be detected)" : "";
+
+  const runId = randomUUID();
+  const matched: Request[] = [];
+  let armed = false;
+  const page = await context.newPage();
+  page.setDefaultTimeout(options.timeout);
+  let result: RunResult | null = null;
+  let error: string | null = null;
+  try {
+    // From just before the click to the end of the run; requests during page load aren't routed.
+    const beforeTrigger = async () => {
+      await page.route("**/*", (route) => {
+        const r = route.request();
+        if (!matchesKey(key, r.method(), r.url())) return route.fallback();
+        matched.push(r);
+        if (matched.length > 1) return route.fallback();
+        return route.fallback({ headers: { ...r.headers(), "x-caliper-run": runId, "x-caliper-token": token } });
+      });
+      armed = true;
+    };
+    result = await measureOnce(page, { ...options, beforeTrigger });
+  } catch (err) {
+    if (!(err instanceof CliError || err instanceof UnidentifiedRequestError)) throw err;
+    error = err instanceof UnidentifiedRequestError ? `AI request not identified: ${err.message}` : messageOf(err).split("\n")[0]!.trim();
+  } finally {
+    await page.unrouteAll({ behavior: "ignoreErrors" });
+    await page.close();
+  }
+
+  if (!armed) return unknown(`the marked visit didn't get to the click: ${error}`);
+  if (matched.length === 0) return unknown(`no request matched ${keyText(key)}${oneRun}`);
+  if (matched.length > 1) return unknown(`${matched.length} requests matched ${keyText(key)}: ${matched.map((r) => r.url()).join(", ")}${oneRun}`);
+  const stamped = matched[0]!;
+  if (!result) return unknown(`the marked visit stamped ${stamped.method()} ${stamped.url()}, then: ${error}${oneRun}`);
+  const picked = result.pick.request;
+  if (picked.raw !== stamped) {
+    return unknown(`the marked visit's AI request was ${picked.method} ${picked.url}, not the stamped ${stamped.method()} ${stamped.url()}${oneRun}`);
+  }
+  return `Server timings — marked visit sent x-caliper-run ${runId} on ${stamped.method()} ${stamped.url()} (matched ${keyText(key)}); timings not fetched yet${oneRun}`;
 }
 
 // Loads the page, clicks the --step buttons, types --prompt into --input and installs the chat

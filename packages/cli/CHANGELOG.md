@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`--server-timings <origin>`: marked visit (step 1 of server timings).** With `CALIPER_TOKEN` set in the environment, one extra page load after the timed runs stamps the AI request with `x-caliper-run` (a fresh id, printed) and `x-caliper-token` (never printed). The request stamped is the first one after the click that matches the key built from each run's AI request: method, origin and path, with the query string dropped and path segments that differ between runs as one-segment wildcards. Nothing else is touched, and the timed runs are never stamped. Server timings aren't fetched yet.
+- The token only goes to the named origin: the key's origin must equal it exactly, so a subdomain, a longer host or a longer port is not a match. Otherwise nothing is sent, and the line says where the request went.
+- When Caliper can't tell, it reports `Server timings ? — <reason>` instead. That happens when a run was inconclusive, when the runs disagree on method, origin or number of path segments, or when 0 or 2+ requests matched during the marked visit. It also happens when the marked visit's AI request wasn't the stamped one. With `--runs 1` the line says changing path parts can't be detected.
+- Without `CALIPER_TOKEN`, `--server-timings` is an error, as is a value that isn't an `http(s)` origin. `CALIPER_TOKEN` alone does nothing.
+- Known limits: tested on local fixtures only (click and chat runs, with and without `--request`). It hasn't been tried on a real server, a cross-origin API behind a CORS preflight, or with `--stop`, `--double` or `--canary`. Not in the HTML report yet.
+- Test: `npm run test:marked`.
+
 ## 0.3.0 — 2026-10-27 — tested on two real apps: a Gradio Space and a custom-built chat app (PDFSimpli)
 
 ### Added

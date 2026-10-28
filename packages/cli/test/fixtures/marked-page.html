@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Marked-visit fixture</title>
+</head>
+<body>
+<!-- For the marked visit (server timings). Generate POSTs an SSE reply whose URL depends on
+     ?case, and the server records which requests carried x-caliper-* headers. The server counts
+     page loads per ?id and fills in LOAD, so with --runs 2, loads 1–2 are the unmarked runs and
+     load 3 is the marked visit. Every request carries id and load in its query string, which the
+     match key drops.
+       a  query-only change:      /marked/reply?nonce=<random>
+       b  one changing segment:   /marked/s/<random>/reply
+       c  segment counts differ:  odd loads /marked/a/reply, even loads /marked/a/b/reply
+       d  two matches:            a JSON ping to /marked/reply, then the reply from /marked/reply
+       e  zero matches:           /marked/reply, but /marked/other/reply after --runs loads (?runs)
+       f  side requests:          a POST to /marked/reply at page load (before the click), then
+                                  after the click a font and an analytics POST next to the reply
+       g  stamped ≠ AI request:   /marked/reply, but after --runs loads a JSON ping to
+                                  /marked/reply, then the reply from /marked/other/reply
+     #msg is there for chat-style runs (--input/--prompt); the page doesn't read it. -->
+<input id="msg" size="40">
+<button id="generate">Generate</button>
+<div id="out"></div>
+<script>
+  const LOAD = Number("__LOAD__");
+  const params = new URLSearchParams(location.search);
+  const kase = params.get("case");
+  const runs = Number(params.get("runs") ?? 2);
+  const tag = `id=${encodeURIComponent(params.get("id"))}&load=${LOAD}`;
+  const random = () => Math.random().toString(36).slice(2, 10);
+
+  const post = (path, extra = "") =>
+    fetch(`${path}?${tag}${extra}`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+
+  if (kase === "f") post("/marked/reply", "&kind=ping&at=load");
+
+  async function stream(res) {
+    const out = document.getElementById("out");
+    const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+    let buffer = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += value;
+      const events = buffer.split("\n\n");
+      buffer = events.pop();
+      for (const event of events) {
+        const data = event.replace(/^data: /, "");
+        if (data !== "[DONE]") out.textContent += JSON.parse(data).t;
+      }
+    }
+  }
+
+  document.getElementById("generate").addEventListener("click", async () => {
+    document.getElementById("out").textContent = "";
+    let path = "/marked/reply";
+    let extra = "";
+    if (kase === "a") extra = `&nonce=${random()}`;
+    if (kase === "b") path = `/marked/s/${random()}/reply`;
+    if (kase === "c") path = LOAD % 2 ? "/marked/a/reply" : "/marked/a/b/reply";
+    if (kase === "d") await (await post("/marked/reply", "&kind=ping")).json();
+    if (kase === "e" && LOAD > runs) path = "/marked/other/reply";
+    if (kase === "g" && LOAD > runs) {
+      await (await post("/marked/reply", "&kind=ping")).json();
+      path = "/marked/other/reply";
+    }
+    if (kase === "f") {
+      new FontFace("fixture", `url(/marked/font.woff2?${tag})`).load().catch(() => {});
+      fetch(`/marked/analytics?${tag}`, { method: "POST", body: "{}" });
+    }
+    await stream(await post(path, extra));
+  });
+</script>
+</body>
+</html>
