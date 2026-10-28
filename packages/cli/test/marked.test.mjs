@@ -26,6 +26,15 @@
 // their marks are there, and the Workers note only when the record says runtime "workers";
 // nothing that wasn't recorded (partial record),
 // and "?" for a missing record. The user-timing summary never includes these numbers.
+// Several marked visits (--server-runs <n>, default 3, 1–10): before any run one line says how
+// many times the audit triggers the AI feature; the pre-check runs once, then n visits, each
+// with a fresh run id and the same key and rules. A failed visit prints its own "?" line and is
+// left out; the block shows each visit's values, then min · median · max over the visits that
+// recorded them (just the value with one visit), spans computed inside each visit first. With
+// no visit succeeding: "0 of n marked visits succeeded". Fails unless (m) n = 3 by default, all
+// succeed, the numbers and the summary match the records, and the median span isn't the
+// difference of the medians; (q) one visit's record lacks a mark: "–"; (v) one of three fails: its "?" line, k = 2; (e3) all fail;
+// (m1) n = 1: no median; out-of-range n is an error before any run.
 // Run with `npm run test:marked` (builds first).
 
 import { execFile } from "node:child_process";
@@ -46,6 +55,12 @@ const NOTE = "    Workers time waits only — computation between steps isn't me
 
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const timedRuns = (stdout) => (stdout.match(/^run \d.*\s\d+ ms$/gm) ?? []).length;
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+const median = (values) => {
+  const s = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return Math.round(s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2);
+};
 
 // Runs the CLI; never throws. Returns { code, stdout, stderr }.
 async function caliper(url, args, env) {
@@ -76,9 +91,11 @@ const check = (ok, what, out) => {
 
 // One case: run Caliper on /marked?case=…, then check what's common to every case. By default
 // with the token and --server-timings naming the page's own origin.
-async function runCase(label, kase, { srv = server, runs = 2, host = srv.url, named = host, env = { CALIPER_TOKEN: TOKEN }, args = [] } = {}) {
+// serverRuns: --server-runs to pass (null: leave it out, so the default applies).
+async function runCase(label, kase, { srv = server, runs = 2, serverRuns = 1, host = srv.url, named = host, env = { CALIPER_TOKEN: TOKEN }, args = [] } = {}) {
   const id = `${kase}-${randomBytes(4).toString("hex")}`;
-  const flags = ["--runs", String(runs), ...(named ? ["--server-timings", named] : []), ...args];
+  const visits = named && serverRuns !== null ? ["--server-runs", String(serverRuns)] : [];
+  const flags = ["--runs", String(runs), ...(named ? ["--server-timings", named, ...visits] : []), ...args];
   const [asked, lookups] = [srv.caliper.asked.length, srv.caliper.lookups];
   const out = await caliper(`${host}/marked?case=${kase}&id=${id}&runs=${runs}`, flags, env);
   const { loads, requests } = srv.marked(id);
@@ -102,7 +119,7 @@ function checkPrecheck({ label, out, asked }) {
 // The "Inside the server" block: the record's marks, as recorded, and only those.
 function checkBlock({ label, out }, record) {
   const text = out.stdout;
-  const header = `Inside the server (from 1 marked run) — ms after the request arrived, status ${record.status}`;
+  const header = `Inside the server (from 1 of 1 marked run) — ms after the request arrived, status ${record.status}`;
   check(text.split("\n").includes(header), `(${label}) prints the block header (want: ${header})`, out);
   for (const [name, wording] of Object.entries(LABELS)) {
     const v = record.marks[name];
@@ -136,7 +153,7 @@ function checkStamped(c, url, key) {
   check(!!s && s.token === TOKEN && new RegExp(`^${UUID}$`).test(s.run ?? ""), `(${label}) it carries x-caliper-token and a fresh x-caliper-run id`, out);
   check(!!s && s.contentType === "application/json", `(${label}) its own content-type header is untouched (got ${s?.contentType})`, out);
   const suffix = runs === 1 ? esc(ONE_RUN) : "";
-  const want = new RegExp(`^Server timings — marked visit sent x-caliper-run (${UUID}) on POST ${esc(host)}\\S+ \\(matched ${esc(key)}\\)${suffix}$`);
+  const want = new RegExp(`^Server timings — marked visit 1 of 1 sent x-caliper-run (${UUID}) on POST ${esc(host)}\\S+ \\(matched ${esc(key)}\\)${suffix}$`);
   const m = line?.match(want);
   check(!!m && m[1] === s?.run, `(${label}) prints the stamped request, its key and run id (got: ${line ?? "nothing"})`, out);
   check(lookups === 1, `(${label}) the record is looked up once, for the run id (lookups: ${lookups})`, out);
@@ -150,6 +167,63 @@ function checkNoVisit({ label, runs, out, loads, stamped, lookups }) {
   check(loads === runs, `(${label}) no marked visit (page loads: ${loads})`, out);
   check(stamped.length === 0, `(${label}) nothing stamped (got ${stamped.length})`, out);
   check(lookups === 0 && !/^Inside the server/m.test(out.stdout), `(${label}) no record fetched or printed (lookups: ${lookups})`, out);
+}
+
+// A row of the several-visits block: each visit's value (– where it wasn't recorded), then
+// min · median · max, or just the values with fewer than two.
+function statsRow(text, wording) {
+  const m = new RegExp(`^    ${esc(wording)} +((?:\\d+|–)(?: +(?:\\d+|–))*)(?:   min (\\d+) · median (\\d+) · max (\\d+))? ms(?:   \\(.*\\))?$`, "m").exec(text);
+  if (!m) return null;
+  const values = m[1].trim().split(/ +/).map((x) => (x === "–" ? null : Number(x)));
+  return { values, stats: m[2] === undefined ? null : { min: Number(m[2]), median: Number(m[3]), max: Number(m[4]) }, median: m[3] === undefined ? null : Number(m[3]) };
+}
+
+// n marked visits, of which `ok` (visit numbers) succeeded and the rest matched nothing: the
+// count line before any run, one pre-check, a fresh run id per stamped visit, and a block whose
+// values are each successful visit's record, summarised per mark and per span.
+function checkVisits(c, n, ok) {
+  const { label, runs, out, loads, stamped, asked, lookups, lines } = c;
+  const text = out.stdout;
+  const k = ok.length;
+  const count = `This audit triggers the AI feature up to ${runs + n} times for timing (${runs} timed + ${n} marked).`;
+  const at = text.split("\n").indexOf(count);
+  check(at !== -1 && at < text.indexOf("run 1"), `(${label}) prints "${count}" before any run`, out);
+  checkPrecheck(c);
+  check(asked.filter((id) => !RUN_ID.test(id)).length === 1, `(${label}) the token pre-check runs once (asked: ${asked.join(", ")})`, out);
+  check(loads === runs + n, `(${label}) ${n} marked visit(s) after the runs (page loads: ${loads})`, out);
+  check(stamped.length === k && stamped.every((s) => s.token === TOKEN && new RegExp(`^${UUID}$`).test(s.run ?? "")) && new Set(stamped.map((s) => s.run)).size === k,
+    `(${label}) ${k} request(s) stamped, each with the token and its own run id (got ${stamped.map((s) => s.run).join(", ")})`, out);
+  check(stamped.every((s) => s.load > runs && /^\/marked\/reply\?/.test(s.url)), `(${label}) only marked visits' replies are stamped`, out);
+  check(lookups === k, `(${label}) one record lookup per successful visit (lookups: ${lookups})`, out);
+  ok.forEach((visit, j) => {
+    const sent = new RegExp(`^Server timings — marked visit ${visit} of ${n} sent x-caliper-run (${UUID}) on POST `);
+    const line = lines.find((l) => sent.test(l));
+    check(line?.match(sent)?.[1] === stamped[j]?.run, `(${label}) visit ${visit} prints its run id (got: ${line ?? "nothing"})`, out);
+  });
+
+  const records = stamped.map((s) => server.caliper.records.get(s.run));
+  check(records.every(Boolean), `(${label}) the fake wrapper recorded every stamped request`, out);
+  if (!records.every(Boolean)) return;
+  const header = `Inside the server (from ${k} of ${plural(n, "marked run")}) — ms after the request arrived, status 200`;
+  check(text.split("\n").includes(header), `(${label}) prints the block header (want: ${header})`, out);
+  const columns = new RegExp(`^    marked visit +${ok.join(" +")}$`, "m");
+  check(k === 1 ? !/^    marked visit/m.test(text) : columns.test(text), `(${label}) ${k === 1 ? "no visit column row" : `columns are visits ${ok.join(", ")}`}`, out);
+
+  const checkRow = (wording, values) => {
+    const row = statsRow(text, wording);
+    const want = values.filter((x) => x !== null);
+    check(!!row && JSON.stringify(row.values) === JSON.stringify(values), `(${label}) "${wording}" per visit is ${values.join(", ")} (got ${row?.values.join(", ") ?? "nothing"})`, out);
+    if (want.length < 2) check(!!row && row.stats === null, `(${label}) "${wording}" has no min · median · max with ${want.length} value`, out);
+    else {
+      const stats = { min: Math.min(...want), median: median(want), max: Math.max(...want) };
+      check(JSON.stringify(row?.stats) === JSON.stringify(stats), `(${label}) "${wording}" is min ${stats.min} · median ${stats.median} · max ${stats.max} (got ${JSON.stringify(row?.stats ?? null)})`, out);
+    }
+  };
+  for (const [name, wording] of Object.entries(LABELS)) checkRow(wording, records.map((r) => r.marks[name] ?? null));
+  const span = (r, from, to) => (r.marks[from] === undefined || r.marks[to] === undefined ? null : r.marks[to] - r.marks[from]);
+  checkRow("database wait", records.map((r) => span(r, "postgresStart", "postgresEnd")));
+  checkRow("model: sent → first chunk", records.map((r) => span(r, "modelCallSent", "firstChunk")));
+  if (k === 1) check(!/median/.test(text.slice(text.indexOf("Inside the server"))), `(${label}) the word "median" isn't in the block with 1 visit`, out);
 }
 
 try {
@@ -175,14 +249,14 @@ try {
   const d = await runCase("d", "d");
   check(d.loads === 3, `(d) one marked visit after the runs (page loads: ${d.loads})`, d.out);
   const reply = `${origin}/marked/reply`;
-  const two = new RegExp(`^Server timings \\? — 2 requests matched POST ${esc(reply)}: ${esc(reply)}\\?\\S*kind=ping\\S*, ${esc(reply)}\\?(?!\\S*kind=ping)\\S+$`);
+  const two = new RegExp(`^Server timings \\? — marked visit 1 of 1: 2 requests matched POST ${esc(reply)}: ${esc(reply)}\\?\\S*kind=ping\\S*, ${esc(reply)}\\?(?!\\S*kind=ping)\\S+$`);
   check(two.test(d.line ?? ""), `(d) reports 2 matches with both URLs (got: ${d.line ?? "nothing"})`, d.out);
 
   // (e) No request matches the key during the marked visit.
   const e = await runCase("e", "e");
   check(e.loads === 3, `(e) one marked visit after the runs (page loads: ${e.loads})`, e.out);
   check(e.stamped.length === 0, `(e) nothing stamped (got ${e.stamped.length})`, e.out);
-  check(e.line === `Server timings ? — no request matched POST ${origin}/marked/reply`, `(e) reports no match, naming the key (got: ${e.line ?? "nothing"})`, e.out);
+  check(e.line === `Server timings ? — marked visit 1 of 1: no request matched POST ${origin}/marked/reply`, `(e) reports no match, naming the key (got: ${e.line ?? "nothing"})`, e.out);
 
   // (f) Font, analytics and a page-load request to the same endpoint are left alone.
   const f = await runCase("f", "f");
@@ -198,7 +272,7 @@ try {
   const g = await runCase("g", "g");
   check(g.loads === 3 && g.stamped.length === 1 && /kind=ping/.test(g.stamped[0]?.url ?? ""),
     `(g) the marked visit stamped its ping (loads ${g.loads}, stamped: ${g.stamped.map((r) => r.url).join(", ") || "none"})`, g.out);
-  const notPicked = new RegExp(`^Server timings \\? — the marked visit's AI request was POST ${esc(origin)}/marked/other/reply\\?\\S+, not the stamped POST ${esc(reply)}\\?\\S*kind=ping\\S*$`);
+  const notPicked = new RegExp(`^Server timings \\? — marked visit 1 of 1: its AI request was POST ${esc(origin)}/marked/other/reply\\?\\S+, not the stamped POST ${esc(reply)}\\?\\S*kind=ping\\S*$`);
   check(notPicked.test(g.line ?? ""), `(g) reports the AI request isn't the stamped one, naming both (got: ${g.line ?? "nothing"})`, g.out);
 
   // (h) The token without --server-timings: nothing happens.
@@ -233,6 +307,7 @@ try {
   // Server-side failures after the stamp: no fetch for a visit that wasn't valid.
   for (const [label, c] of [["d", d], ["e", e], ["g", g]]) {
     check(c.lookups === 0 && !/^Inside the server/m.test(c.out.stdout), `(${label}) no record fetched or printed (lookups: ${c.lookups})`, c.out);
+    check(c.lines[1] === "Server timings ? — 0 of 1 marked visit succeeded", `(${label}) ends with 0 of 1 succeeded (got: ${c.lines[1] ?? "nothing"})`, c.out);
   }
 
   // A partial record: only what was recorded, no span missing one of its marks.
@@ -250,7 +325,8 @@ try {
   checkPrecheck(n);
   const nRun = n.stamped[0]?.run;
   check(n.stamped.length === 1 && n.lookups === 1, `(n) stamped once, looked up once (stamped ${n.stamped.length}, lookups ${n.lookups})`, n.out);
-  check(n.lines[1] === `Server timings ? — token OK and wrapper present, but no record for run ${nRun}.` && !/^Inside the server/m.test(n.out.stdout),
+  check(n.lines[1] === `Server timings ? — marked visit 1 of 1: token OK and wrapper present, but no record for run ${nRun}.` &&
+    n.lines[2] === "Server timings ? — 0 of 1 marked visit succeeded" && !/^Inside the server/m.test(n.out.stdout),
     `(n) reports the missing record with its run id (got: ${n.lines.join(" | ") || "nothing"})`, n.out);
 
   // Pre-check answers that skip the marked visit.
@@ -284,6 +360,55 @@ try {
   const noToken = await caliper(`${origin}/marked?case=a&id=notoken`, ["--runs", "1", "--server-timings", origin], {});
   check(noToken.code !== 0 && noToken.stderr.includes("--server-timings needs CALIPER_TOKEN set in the environment.") && timedRuns(noToken.stdout) === 0,
     "--server-timings without CALIPER_TOKEN is an error before any run", noToken);
+
+  // (m) Default --server-runs: 3 marked visits, all succeed.
+  const m = await runCase("m, 3 visits by default", "m", { serverRuns: null });
+  checkVisits(m, 3, [1, 2, 3]);
+  const mRunMs = [...m.out.stdout.matchAll(/^run \d.*?\s(\d+) ms$/gm)].map((r) => Number(r[1]));
+  const mSummary = m.out.stdout.match(/^cold (\d+) ms · median (\d+) ms/m);
+  check(!!mSummary && Number(mSummary[1]) === mRunMs[0] && Number(mSummary[2]) === mRunMs[1],
+    `(m) the browser summary is the 2 timed runs only (runs ${mRunMs.join(", ")}; got: ${mSummary?.[0] ?? "nothing"})`, m.out);
+  // Spans inside each visit first: with these marks the median span isn't median(end) − median(start).
+  const mRecords = m.stamped.map((r) => server.caliper.records.get(r.run)).filter(Boolean);
+  const starts = mRecords.map((r) => r.marks.postgresStart);
+  const ends = mRecords.map((r) => r.marks.postgresEnd);
+  const spans = mRecords.map((r) => r.marks.postgresEnd - r.marks.postgresStart);
+  const dbRow = statsRow(m.out.stdout, "database wait");
+  check(median(spans) !== median(ends) - median(starts), `(m) the fixture tells the two apart (median span ${median(spans)}, difference of medians ${median(ends) - median(starts)})`, m.out);
+  check(dbRow?.median === median(spans), `(m) "database wait" median is the median of the per-visit spans, ${median(spans)} (got ${dbRow?.median ?? "nothing"})`, m.out);
+
+  // (v) One of three visits fails: its own "?" line, and it's left out of the block.
+  const v = await runCase("v, visit 2 of 3 fails", "v", { serverRuns: 3 });
+  checkVisits(v, 3, [1, 3]);
+  check(v.lines.includes(`Server timings ? — marked visit 2 of 3: no request matched POST ${origin}/marked/reply`),
+    `(v) visit 2 prints its own ? line (got: ${v.lines.join(" | ") || "nothing"})`, v.out);
+
+  // (q) Visit 2's record has no firstChunk: "–" in its column, the summary over visits 1 and 3.
+  const q = await runCase("q, visit 2 partial", "q", { serverRuns: 3 });
+  checkVisits(q, 3, [1, 2, 3]);
+  check(/^    model: first chunk +\d+ +– +\d+   min /m.test(q.out.stdout), `(q) "model: first chunk" shows – for visit 2`, q.out);
+
+  // (e3) All three visits fail.
+  const e3 = await runCase("e3, all 3 fail", "e", { serverRuns: 3 });
+  checkPrecheck(e3);
+  check(e3.loads === 5 && e3.stamped.length === 0 && e3.lookups === 0, `(e3) 3 visits, nothing stamped or looked up (loads ${e3.loads}, stamped ${e3.stamped.length}, lookups ${e3.lookups})`, e3.out);
+  const want3 = [1, 2, 3].map((i) => `Server timings ? — marked visit ${i} of 3: no request matched POST ${origin}/marked/reply`);
+  check(JSON.stringify(e3.lines) === JSON.stringify([...want3, "Server timings ? — 0 of 3 marked visits succeeded"]) && !/^Inside the server/m.test(e3.out.stdout),
+    `(e3) three ? lines, then 0 of 3 succeeded, no block (got: ${e3.lines.join(" | ") || "nothing"})`, e3.out);
+
+  // (m1) --server-runs 1: just the values, no median.
+  const m1 = await runCase("m1, --server-runs 1", "m", { serverRuns: 1 });
+  checkVisits(m1, 1, [1]);
+
+  // Out of range, or without --server-timings: an error before any run, and no count line.
+  for (const bad of ["0", "11", "-1", "2.5", "abc", ""]) {
+    const out = await caliper(`${origin}/marked?case=a&id=bad`, ["--runs", "1", "--server-timings", origin, `--server-runs=${bad}`], { CALIPER_TOKEN: TOKEN });
+    check(out.code !== 0 && out.stderr.includes(`--server-runs must be a whole number from 1 to 10, got "${bad}".`) && timedRuns(out.stdout) === 0 && !/^This audit/m.test(out.stdout),
+      `--server-runs "${bad}" is an error before any run`, out);
+  }
+  const alone = await caliper(`${origin}/marked?case=a&id=alone`, ["--runs", "1", "--server-runs", "2"], { CALIPER_TOKEN: TOKEN });
+  check(alone.code !== 0 && alone.stderr.includes("--server-runs needs --server-timings <origin>.") && timedRuns(alone.stdout) === 0,
+    "--server-runs without --server-timings is an error before any run", alone);
 } finally {
   await Promise.all([server, noSecret, otherSecret, broken].map((srv) => srv.close()));
 }

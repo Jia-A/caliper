@@ -85,7 +85,14 @@ export interface AuditOptions {
   canaryInput: string | undefined;
   csp: boolean;
   chat: ChatOptions | undefined;
-  serverTimings: { origin: string; token: string } | undefined; // --server-timings, with CALIPER_TOKEN
+  serverTimings: ServerTimingsOptions | undefined; // --server-timings, with CALIPER_TOKEN
+}
+
+/** --server-timings: the named origin, CALIPER_TOKEN, and --server-runs (1–10, cli.ts). */
+export interface ServerTimingsOptions {
+  origin: string;
+  token: string;
+  runs: number;
 }
 
 /** A timed run whose page loaded. `run` is its 1-based number; run 1 is the cold run. */
@@ -131,6 +138,12 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
     } catch (err) {
       throw new CliError(`--stop "${stop}" is not a valid regular expression: ${messageOf(err)}`);
     }
+  }
+
+  // The endpoint isn't known until the runs pick it, so this counts triggers, not requests.
+  if (serverTimings) {
+    const total = runs + serverTimings.runs;
+    console.log(`This audit triggers the AI feature up to ${total} times for timing (${runs} timed + ${serverTimings.runs} marked).`);
   }
 
   const browser = await launchChromium({ headless: !headed });
@@ -200,7 +213,7 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
     if (serverTimings) {
       // Its own fresh page, after the timed runs, which are never stamped.
       const options = { url, measure, output, steps, timeout, settleMs, requestPattern, chat };
-      console.log(await markedVisit(context, options, serverTimings, loaded, failed, unidentified));
+      await markedVisits(context, options, serverTimings, loaded, failed, unidentified);
     }
 
     let stopReport: StopReport | null = null;
@@ -558,52 +571,89 @@ function fetchError(err: unknown): string {
   return cause?.code ?? cause?.message ?? messageOf(err);
 }
 
-// The wrapper's record for one run as the "Inside the server" block: every recorded mark as
-// recorded (ms after the request reached the route), then the waits whose two marks are both
-// there. Nothing else is computed. The Workers note only when the record says runtime "workers";
-// Caliper doesn't guess the server's runtime. "?" when the record isn't the expected shape.
-function formatServerRecord(record: unknown, runId: string): string {
-  const unknown = (reason: string) => `Server timings ? — ${reason}`;
+/** One run's record from the wrapper: its marks (ms after the request reached the route). */
+interface ServerRecord {
+  status: number | null;
+  runtime: unknown;
+  at: Map<string, number>;
+}
+
+// The wrapper's record for one run, or why it can't be used: not the expected shape, another
+// run's record, or a mark that isn't a number.
+function parseServerRecord(record: unknown, runId: string): ServerRecord | string {
   const r = record as { id?: unknown; status?: unknown; runtime?: unknown; marks?: unknown } | null;
   if (typeof r !== "object" || r === null || typeof r.marks !== "object" || r.marks === null) {
-    return unknown(`the record for run ${runId} has no marks object.`);
+    return `the record for run ${runId} has no marks object.`;
   }
-  if (r.id !== runId) return unknown(`the record fetched for run ${runId} is for run ${JSON.stringify(r.id)}.`);
+  if (r.id !== runId) return `the record fetched for run ${runId} is for run ${JSON.stringify(r.id)}.`;
   const marks = Object.entries(r.marks as Record<string, unknown>);
   const bad = marks.find(([, v]) => typeof v !== "number" || !Number.isFinite(v));
-  if (bad) return unknown(`the record for run ${runId} has a mark that isn't a number: ${bad[0]} = ${JSON.stringify(bad[1])}.`);
-  const at = new Map(marks as [string, number][]);
+  if (bad) return `the record for run ${runId} has a mark that isn't a number: ${bad[0]} = ${JSON.stringify(bad[1])}.`;
+  return { status: typeof r.status === "number" ? r.status : null, runtime: r.runtime, at: new Map(marks as [string, number][]) };
+}
 
-  const row = (label: string, value: number, note?: string) =>
-    `    ${label.padEnd(26)}${String(ms(value)).padStart(6)} ms${note ? `   (${note})` : ""}`;
-  const known = Object.keys(SERVER_MARKS).filter((name) => at.has(name));
-  // Marks Caliper has no label for are shown under their own name, in the order they happened.
-  const other = [...at].filter(([name]) => !(name in SERVER_MARKS)).sort((a, b) => a[1] - b[1]).map(([name]) => name);
-  const waits = SERVER_WAITS.filter((w) => at.has(w.from) && at.has(w.to));
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+// The "Inside the server" block from the k visits that succeeded out of n: every recorded mark
+// as recorded, then the waits, each computed inside a visit from its own two marks. With one
+// visit, its values; with more, one column per visit ("–" where it didn't record that mark or
+// span), then min · median · max over the visits that did (only with two or more). Medians of
+// marks are never subtracted from each other. The Workers note when a record says runtime
+// "workers"; Caliper doesn't guess the server's runtime.
+function formatServerBlock(visits: { visit: number; record: ServerRecord }[], n: number): string {
+  const k = visits.length;
+  const statuses = visits.map((v) => v.record.status);
+  const status =
+    statuses.every((x) => x === null) ? ""
+    : statuses.every((x) => x === statuses[0]) ? `, status ${statuses[0]}`
+    : `, status per visit: ${statuses.map((x) => x ?? "?").join(", ")}`;
+
+  const row = (label: string, values: (number | null)[], note?: string) => {
+    const tail = note ? `   (${note})` : "";
+    if (k === 1) return `    ${label.padEnd(26)}${String(ms(values[0]!)).padStart(6)} ms${tail}`;
+    const cells = values.map((v) => (v === null ? "–" : String(ms(v))).padStart(6)).join("");
+    const got = values.filter((v): v is number => v !== null);
+    const stats = got.length > 1 ? `   min ${ms(Math.min(...got))} · median ${median(got)} · max ${ms(Math.max(...got))}` : "";
+    return `    ${label.padEnd(26)}${cells}${stats} ms${tail}`;
+  };
+  const markValues = (name: string) => visits.map((v) => v.record.at.get(name) ?? null);
+  const recorded = new Set(visits.flatMap((v) => [...v.record.at.keys()]));
+  const known = Object.keys(SERVER_MARKS).filter((name) => recorded.has(name));
+  // Marks Caliper has no label for are shown under their own name, in the order they happened
+  // (by their median across visits).
+  const middle = (name: string) => median(markValues(name).filter((v): v is number => v !== null))!;
+  const other = [...recorded].filter((name) => !(name in SERVER_MARKS)).sort((a, b) => middle(a) - middle(b));
+  const waits = SERVER_WAITS.map((w) => ({
+    ...w,
+    values: visits.map(({ record: { at } }) => (at.has(w.from) && at.has(w.to) ? at.get(w.to)! - at.get(w.from)! : null)),
+  })).filter((w) => w.values.some((v) => v !== null));
+
   return [
-    `Inside the server (from 1 marked run) — ms after the request arrived${typeof r.status === "number" ? `, status ${r.status}` : ""}`,
-    ...(at.size === 0 ? ["    (no marks recorded)"] : []),
-    ...known.map((name) => row(SERVER_MARKS[name]!, at.get(name)!, name === "firstChunk" ? "at the server, not the browser" : undefined)),
-    ...other.map((name) => row(name, at.get(name)!)),
-    ...(waits.length ? ["  spans", ...waits.map((w) => row(w.label, at.get(w.to)! - at.get(w.from)!, w.note))] : []),
-    ...(r.runtime === "workers" ? ["    Workers time waits only — computation between steps isn't measured."] : []),
+    `Inside the server (from ${k} of ${plural(n, "marked run")}) — ms after the request arrived${status}`,
+    ...(k > 1 ? [`    ${"marked visit".padEnd(26)}${visits.map((v) => String(v.visit).padStart(6)).join("")}`] : []),
+    ...(recorded.size === 0 ? ["    (no marks recorded)"] : []),
+    ...known.map((name) => row(SERVER_MARKS[name]!, markValues(name), name === "firstChunk" ? "at the server, not the browser" : undefined)),
+    ...other.map((name) => row(name, markValues(name))),
+    ...(waits.length ? ["  spans", ...waits.map((w) => row(w.label, w.values, w.note))] : []),
+    ...(visits.some((v) => v.record.runtime === "workers") ? ["    Workers time waits only — computation between steps isn't measured."] : []),
   ].join("\n");
 }
 
-// The marked visit (--server-timings): one extra run on a fresh page whose first request after
-// the click that matches the key gets x-caliper-run + x-caliper-token, and nothing else is
-// touched. Only when every run identified its AI request, the key's origin is exactly the named
-// one and the wrapper accepts the token (pre-check); the token never goes anywhere else, and is
-// never printed. After a stamped run, fetches its record. Returns the lines to print.
-async function markedVisit(
+// The marked visits (--server-timings): --server-runs extra runs, each on a fresh page whose
+// first request after the click that matches the key gets x-caliper-run (a fresh id per visit) +
+// x-caliper-token, and nothing else is touched. Only when every run identified its AI request,
+// the key's origin is exactly the named one and the wrapper accepts the token (one pre-check);
+// the token never goes anywhere else, and is never printed. Each visit prints its own line, and
+// "?" with the reason when it fails; the visits that got a record are summarised together.
+async function markedVisits(
   context: BrowserContext,
   options: MeasureOptions,
-  { origin, token }: { origin: string; token: string },
+  { origin, token, runs }: ServerTimingsOptions,
   loaded: LoadedRun[],
   failed: number[],
   unidentified: number[]
-): Promise<string> {
-  const unknown = (reason: string) => `Server timings ? — ${reason}`;
+): Promise<void> {
+  const unknown = (reason: string) => console.log(`Server timings ? — ${reason}`);
   const inconclusive = [
     ...failed.map((run) => ({ run, why: "page failed to load" })),
     ...unidentified.map((run) => ({ run, why: "AI request not identified" })),
@@ -630,6 +680,29 @@ async function markedVisit(
   if (pre.status === 404) return unknown(`no Caliper wrapper at ${origin} (or CALIPER_TOKEN not set on the server); no marked visit.`);
   if (pre.status !== 400) return unknown(`token pre-check got HTTP ${pre.status} from ${precheckUrl}; no marked visit.`);
 
+  const succeeded: { visit: number; record: ServerRecord }[] = [];
+  for (let visit = 1; visit <= runs; visit++) {
+    const label = `marked visit ${visit} of ${runs}`;
+    const got = await markedVisit(context, options, { origin, token }, key, oneRun);
+    if (got.sent) console.log(`Server timings — ${label} sent ${got.sent}`);
+    if (typeof got.result === "string") unknown(`${label}: ${got.result}`);
+    else succeeded.push({ visit, record: got.result });
+  }
+  if (succeeded.length) console.log(formatServerBlock(succeeded, runs));
+  else unknown(`0 of ${plural(runs, "marked visit")} succeeded`);
+}
+
+// One marked visit: stamps the first request after the click that matches the key, then
+// fetches the record for its run id. Returns what was sent (if the visit was valid) and the
+// record, or why there's none.
+async function markedVisit(
+  context: BrowserContext,
+  options: MeasureOptions,
+  { origin, token }: { origin: string; token: string },
+  key: MatchKey,
+  oneRun: string
+): Promise<{ sent: string | null; result: ServerRecord | string }> {
+  const fail = (reason: string) => ({ sent: null, result: reason });
   const runId = randomUUID();
   const matched: Request[] = [];
   let armed = false;
@@ -658,35 +731,33 @@ async function markedVisit(
     await page.close();
   }
 
-  if (!armed) return unknown(`the marked visit didn't get to the click: ${error}`);
-  if (matched.length === 0) return unknown(`no request matched ${keyText(key)}${oneRun}`);
-  if (matched.length > 1) return unknown(`${matched.length} requests matched ${keyText(key)}: ${matched.map((r) => r.url()).join(", ")}${oneRun}`);
+  if (!armed) return fail(`didn't get to the click: ${error}`);
+  if (matched.length === 0) return fail(`no request matched ${keyText(key)}${oneRun}`);
+  if (matched.length > 1) return fail(`${matched.length} requests matched ${keyText(key)}: ${matched.map((r) => r.url()).join(", ")}${oneRun}`);
   const stamped = matched[0]!;
-  if (!result) return unknown(`the marked visit stamped ${stamped.method()} ${stamped.url()}, then: ${error}${oneRun}`);
+  if (!result) return fail(`stamped ${stamped.method()} ${stamped.url()}, then: ${error}${oneRun}`);
   const picked = result.pick.request;
   if (picked.raw !== stamped) {
-    return unknown(`the marked visit's AI request was ${picked.method} ${picked.url}, not the stamped ${stamped.method()} ${stamped.url()}${oneRun}`);
+    return fail(`its AI request was ${picked.method} ${picked.url}, not the stamped ${stamped.method()} ${stamped.url()}${oneRun}`);
   }
-  const sent = `Server timings — marked visit sent x-caliper-run ${runId} on ${stamped.method()} ${stamped.url()} (matched ${keyText(key)})${oneRun}`;
+  const sent = `x-caliper-run ${runId} on ${stamped.method()} ${stamped.url()} (matched ${keyText(key)})${oneRun}`;
 
   const recordUrl = `${origin}/__caliper/timings/${runId}`;
   let res: globalThis.Response;
   try {
     res = await askWrapper(origin, token, runId, options.timeout);
   } catch (err) {
-    return [sent, unknown(`fetching ${recordUrl} failed: ${fetchError(err)}.`)].join("\n");
+    return { sent, result: `fetching ${recordUrl} failed: ${fetchError(err)}.` };
   }
   if (res.status !== 200) {
     await res.body?.cancel();
-    return [sent, unknown(res.status === 404 ? `token OK and wrapper present, but no record for run ${runId}.` : `fetching ${recordUrl} got HTTP ${res.status}.`)].join("\n");
+    return { sent, result: res.status === 404 ? `token OK and wrapper present, but no record for run ${runId}.` : `fetching ${recordUrl} got HTTP ${res.status}.` };
   }
-  let record: unknown;
   try {
-    record = await res.json();
+    return { sent, result: parseServerRecord(await res.json(), runId) };
   } catch {
-    return [sent, unknown(`the record for run ${runId} isn't JSON.`)].join("\n");
+    return { sent, result: `the record for run ${runId} isn't JSON.` };
   }
-  return [sent, formatServerRecord(record, runId)].join("\n");
 }
 
 // Loads the page, clicks the --step buttons, types --prompt into --input and installs the chat

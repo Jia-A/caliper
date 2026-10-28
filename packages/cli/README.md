@@ -81,7 +81,8 @@ report: /path/to/caliper-report.html
 | `--csp` | off (on with `--canary`) | Run the [CSP check](#csp---csp). |
 | `--input <selector>` | none | Time a [chat-style page](#chat-style-pages---input---prompt): type `--prompt` into this input and send it. Makes `--measure` and `--measure-selector` optional. |
 | `--prompt <text>` | required with `--input` | The message to send. |
-| `--server-timings <origin>` | off | With `CALIPER_TOKEN` set, add one [marked visit](#marked-visit---server-timings) that stamps the AI request to this origin. |
+| `--server-timings <origin>` | off | With `CALIPER_TOKEN` set, add [marked visits](#marked-visit---server-timings) that stamp the AI request to this origin. |
+| `--server-runs <n>` | `3` | Number of marked visits, 1 to 10. Only with `--server-timings`. |
 
 `--step` and `--measure` match accessible button names as case-insensitive regular expressions, so `"^(re)?generate$"` matches exactly "Generate" or "Regenerate". If a pattern matches more than one button, Caliper stops and asks you to make it more specific.
 
@@ -103,29 +104,44 @@ caliper audit https://your-app.example.com/chat --input "#msg" --prompt "hello" 
 
 ### Marked visit (`--server-timings`)
 
-Server-side timings for one marked run, read from a Caliper wrapper on your server (for example Quill's `/__caliper/timings/:id`). They're printed in the terminal only, not in the HTML report yet.
+Server-side timings from marked runs, read from a Caliper wrapper on your server (for example Quill's `/__caliper/timings/:id`). They're printed in the terminal only, not in the HTML report yet.
 
 ```sh
 CALIPER_TOKEN=… caliper audit http://localhost:5173/post/1 --measure "^generate$" --output textarea \
   --server-timings http://localhost:8787
 ```
 
-After the timed runs, Caliper builds a match key from the AI request each run picked (auto-detected, or by `--request`). The key is the method, origin and path, with the query string dropped. A path segment that differs between runs becomes a one-segment wildcard (`POST https://api.example.com/chat/*/reply`). Then it loads the page once more. The first request after the click that matches the key gets two headers: `x-caliper-run` (a fresh id, printed) and `x-caliper-token` (the value of `CALIPER_TOKEN`, never printed). No other request is touched, and the timed runs are never stamped.
+After the timed runs, Caliper builds a match key from the AI request each run picked (auto-detected, or by `--request`). The key is the method, origin and path, with the query string dropped. A path segment that differs between runs becomes a one-segment wildcard (`POST https://api.example.com/chat/*/reply`). Then it loads the page once more for each marked visit (`--server-runs`, default 3). In each visit, the first request after the click that matches the key gets two headers: `x-caliper-run` (a fresh id per visit, printed) and `x-caliper-token` (the value of `CALIPER_TOKEN`, never printed). No other request is touched, and the timed runs are never stamped.
 
 - **The token only goes to the origin you name.** The key's origin must equal `--server-timings` exactly (scheme, host and port). A subdomain, a longer host or a longer port is not a match. Otherwise Caliper sends nothing and prints `Server timings ? — AI request goes to <origin>, not <named origin>; token not sent.`
-- **Both are needed.** `CALIPER_TOKEN` without `--server-timings` does nothing. `--server-timings` without `CALIPER_TOKEN`, or with anything other than an `http(s)` origin, is an error before any run.
+- **Both are needed.** `CALIPER_TOKEN` without `--server-timings` does nothing. `--server-timings` without `CALIPER_TOKEN`, or with anything other than an `http(s)` origin, is an error before any run. So is `--server-runs` outside 1–10, or without `--server-timings`.
+- **Before any run** it prints how many times the audit will trigger the AI feature: `This audit triggers the AI feature up to 5 times for timing (2 timed + 3 marked).` It counts triggers, not requests, because the endpoint isn't known until the runs pick it. One trigger can send more than one request, and the count leaves out `--stop`, `--double` and `--canary`.
 - **No marked visit, with the reason, when:** any run's page failed to load or its AI request wasn't identified; or the runs disagree on method, origin or number of path segments (the line names each run's request).
-- **Token pre-check first.** Before the marked visit, Caliper asks `GET <origin>/__caliper/timings/caliper.precheck` with `Authorization: Bearer <token>`. That id is deliberately malformed (`.` isn't allowed in run ids), so the request can never reach a real record. A `400` means the wrapper is there and took the token, and the marked visit goes ahead. Otherwise there's no marked visit:
+- **Token pre-check first, once.** Before the marked visits, Caliper asks `GET <origin>/__caliper/timings/caliper.precheck` with `Authorization: Bearer <token>`. That id is deliberately malformed (`.` isn't allowed in run ids), so the request can never reach a real record. A `400` means the wrapper is there and took the token, and the marked visits go ahead. Otherwise there's no marked visit:
   - `401`: `Server timings ? — server rejected the token (wrong, expired or rotated); no marked visit.`
   - `404`: `Server timings ? — no Caliper wrapper at <origin> (or CALIPER_TOKEN not set on the server); no marked visit.`
   - anything else, or a network error: the line gives the status or the error.
   Redirects are never followed, so the token can't be carried to another origin.
-- **The marked visit is invalid** (`Server timings ? — …`) when no request matches the key, when 2 or more do (all are listed), or when the marked visit's AI request isn't the stamped one.
-- **On success** it prints `Server timings — marked visit sent x-caliper-run <id> on <request> (matched <key>)`. With `--runs 1` the line adds `(key from 1 run — changing path parts can't be detected)`.
-- **Then it fetches the record** (`GET <origin>/__caliper/timings/<id>`, same bearer) and prints it under the user timings, never mixed into them. This output is from the local test fixture (a fake wrapper with a 40 ms stand-in query, record with `"runtime": "workers"`), not a real server:
+- **A marked visit fails** (`Server timings ? — marked visit <i> of <n>: …`) when no request matches the key, when 2 or more do (all are listed), when its AI request isn't the stamped one, or when its record can't be read (see below). Each visit is judged on its own. A failed visit is left out of the block below.
+- **Each valid visit** prints `Server timings — marked visit <i> of <n> sent x-caliper-run <id> on <request> (matched <key>)`. With `--runs 1` the line adds `(key from 1 run — changing path parts can't be detected)`.
+- **Then it fetches each visit's record** (`GET <origin>/__caliper/timings/<id>`, same bearer) and prints them under the user timings, never mixed into them. The header says how many of the marked visits it's from. With several, there's one column per visit, then min · median · max across the visits that recorded that mark. Spans are worked out inside each visit first, then summarised, never by subtracting one median from another. If no visit succeeds: `Server timings ? — 0 of <n> marked visits succeeded`. This output is from the local test fixture (a fake wrapper whose wait before the query and query length vary per visit), not a real server:
 
   ```txt
-  Inside the server (from 1 marked run) — ms after the request arrived, status 200
+  Inside the server (from 3 of 3 marked runs) — ms after the request arrived, status 200
+      marked visit                   1     2     3
+      database query started         1    31    11   min 1 · median 11 · max 31 ms
+      database query done           42    42    82   min 42 · median 42 · max 82 ms
+      model call sent               42    42    82   min 42 · median 42 · max 82 ms
+      model: first chunk           344   343   382   min 343 · median 344 · max 382 ms   (at the server, not the browser)
+    spans
+      database wait                 41    11    71   min 11 · median 41 · max 71 ms   (query start → done)
+      model: sent → first chunk    302   301   300   min 300 · median 301 · max 302 ms
+  ```
+
+  With one successful visit (for example `--server-runs 1`) there's no column row and no min · median · max, only the values. A mark or span that a successful visit didn't record shows `–` in its column, and min · median · max cover only the visits that recorded it (none with fewer than two). This one is from a fixture record with `"runtime": "workers"`:
+
+  ```txt
+  Inside the server (from 1 of 1 marked run) — ms after the request arrived, status 200
       database query started         0 ms
       database query done           41 ms
       model call sent               41 ms
@@ -136,10 +152,10 @@ After the timed runs, Caliper builds a match key from the AI request each run pi
       Workers time waits only — computation between steps isn't measured.
   ```
 
-  The last line appears only when the record says `"runtime": "workers"`. Without that field, or with any other value, there's no note: Caliper doesn't guess where the server ran. Each mark is shown as the server recorded it, in ms after the request reached the route. A mark that isn't in the record isn't shown, and a span is shown only when both of its marks are there. There's no span between the query and the model call: that's computation, which the Workers clock doesn't measure. Marks without a known label are shown under their own name. A `404` prints `Server timings ? — token OK and wrapper present, but no record for run <id>.`; any other status, a record for another run id, or a mark that isn't a number prints `?` with the reason. The record comes from one run, not a median.
-- **Its timing isn't reported.** The marked visit isn't a timed run and is left out of the medians, because it runs with request interception on, which Playwright documents as turning off the HTTP cache.
+  The last line appears only when the record says `"runtime": "workers"`. Without that field, or with any other value, there's no note: Caliper doesn't guess where the server ran. Each mark is shown as the server recorded it, in ms after the request reached the route. A mark that isn't in the record isn't shown, and a span is shown only when both of its marks are there. There's no span between the query and the model call: that's computation, which the Workers clock doesn't measure. Marks without a known label are shown under their own name. A `404` prints `Server timings ? — token OK and wrapper present, but no record for run <id>.`; any other status, a record for another run id, or a mark that isn't a number prints `?` with the reason, and that visit is left out.
+- **Their timing isn't reported.** Marked visits aren't timed runs and are left out of the medians, because they run with request interception on, which Playwright documents as turning off the HTTP cache.
 - **Requests made during page load are never stamped or counted.** Interception starts just before the click and ends with the run.
-- **Tested** against local fixtures only (including a fake wrapper that answers like Quill's, in the same order), in click runs and chat-style runs, with and without `--request`. It hasn't been tested on a real server, on a cross-origin API behind a CORS preflight, or together with `--stop`, `--double` or `--canary`. The result isn't in the HTML report yet.
+- **Tested** against local fixtures only (including a fake wrapper that answers like Quill's, in the same order), in click runs and chat-style runs, with and without `--request`. Several visits are tested in click runs: all succeed, one of three fails, all fail, one visit, and one visit's record missing a mark. It hasn't been tested on a real server, on a cross-origin API behind a CORS preflight, or together with `--stop`, `--double` or `--canary`. The result isn't in the HTML report yet.
 
 ## What gets measured
 

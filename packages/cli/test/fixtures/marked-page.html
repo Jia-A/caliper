@@ -23,6 +23,12 @@
        n  no record:              /marked/reply, recorded nowhere
        w  Workers record:         /marked/reply, recorded with runtime "workers"
        o  other runtime:          /marked/reply, recorded with runtime "node"
+       m  marks vary per load:    /marked/reply, with the wait before the query and the query's
+                                  length set by LOAD % 3 (pre 0/30/10 ms, query 40/10/70 ms), so
+                                  the median span differs from the difference of the medians
+       q  one record partial:     /marked/reply, recorded without firstChunk on load --runs + 2 only
+       v  one visit fails:        /marked/reply, but /marked/other/reply on load --runs + 2 (the
+                                  second marked visit), so that visit matches nothing
      #msg is there for chat-style runs (--input/--prompt); the page doesn't read it. -->
 <input id="msg" size="40">
 <button id="generate">Generate</button>
@@ -66,6 +72,9 @@
     if (kase === "n") extra = "&norecord=1"; // the server records nothing
     if (kase === "w") extra = "&runtime=workers"; // the record says it ran on Workers
     if (kase === "o") extra = "&runtime=node"; // the record names another runtime
+    if (kase === "m") extra = `&pre=${[0, 30, 10][LOAD % 3]}&db=${[40, 10, 70][LOAD % 3]}`;
+    if (kase === "q" && LOAD === runs + 2) extra = "&partial=1";
+    if (kase === "v" && LOAD === runs + 2) path = "/marked/other/reply";
     if (kase === "b") path = `/marked/s/${random()}/reply`;
     if (kase === "c") path = LOAD % 2 ? "/marked/a/reply" : "/marked/a/b/reply";
     if (kase === "d") await (await post("/marked/reply", "&kind=ping")).json();

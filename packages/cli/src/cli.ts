@@ -13,7 +13,7 @@ const USAGE = `Usage:
       [--measure <text> | --measure-selector <css>]
       [--step <text>]... [--runs 3] [--headed] [--auth auth.json] [--timeout 60000]
       [--request <regex>] [--report [path]] [--settle-ms 2000] [--stop <text>] [--double]
-      [--canary] [--canary-input <selector>] [--csp] [--server-timings <origin>]
+      [--canary] [--canary-input <selector>] [--csp] [--server-timings <origin> [--server-runs 3]]
       Measure time from clicking the --measure button to first painted output,
       and break it down using the AI request (auto-detected, or the first whose
       URL matches --request). --report writes an HTML timeline
@@ -34,14 +34,15 @@ const USAGE = `Usage:
       --output may then be the message list; the first word is its first change
       after the AI request's first byte, so your own message and placeholders like
       "Thinking…" don't count. Not yet combinable with --stop, --double or --canary.
-      --server-timings <origin> (with CALIPER_TOKEN set) adds one marked visit after
-      the runs: the first request after the click that matches the AI request the
-      runs picked (method, origin, path; changing path parts as wildcards) gets
-      x-caliper-run and x-caliper-token headers. Only if that request goes to
-      exactly this origin, and only after a token pre-check against its
-      /__caliper/timings endpoint; otherwise nothing is sent. Then the server's
-      record for that run is fetched and printed (terminal only), apart from the
-      user timings. The token is never printed.
+      --server-timings <origin> (with CALIPER_TOKEN set) adds --server-runs marked
+      visits (default 3, 1 to 10) after the runs: in each, the first request after
+      the click that matches the AI request the runs picked (method, origin, path;
+      changing path parts as wildcards) gets x-caliper-run (a fresh id per visit)
+      and x-caliper-token headers. Only if that request goes to exactly this origin,
+      and only after one token pre-check against its /__caliper/timings endpoint;
+      otherwise nothing is sent. Then each visit's server record is fetched and
+      printed with min · median · max across the visits that succeeded (terminal
+      only), apart from the user timings. The token is never printed.
       --measure-selector clicks the one element a CSS selector matches instead of a
       button by name, for icon-only buttons with no text or aria-label. It must match
       exactly one element; Caliper prints it before each run. Tested in click runs and
@@ -100,6 +101,7 @@ const COMMANDS = {
       input: { type: "string" },
       prompt: { type: "string" },
       "server-timings": { type: "string" },
+      "server-runs": { type: "string" },
     },
     optionalValues: { report: DEFAULT_REPORT },
     async run({ url, values }) {
@@ -117,11 +119,14 @@ const COMMANDS = {
         if (clash) throw new CliError(`audit: --${clash} can't be combined with --input yet.`);
       }
 
-      let serverTimings: { origin: string; token: string } | undefined;
+      let serverTimings: { origin: string; token: string; runs: number } | undefined;
+      if (values["server-runs"] !== undefined && values["server-timings"] === undefined) {
+        throw new CliError("audit: --server-runs needs --server-timings <origin>.");
+      }
       if (values["server-timings"] !== undefined) {
         const token = process.env.CALIPER_TOKEN;
         if (!token) throw new CliError("audit: --server-timings needs CALIPER_TOKEN set in the environment.");
-        serverTimings = { origin: parseOrigin(values["server-timings"]), token };
+        serverTimings = { origin: parseOrigin(values["server-timings"]), token, runs: serverRuns(values["server-runs"] ?? "3") };
       }
 
       const { audit } = await import("./audit.js");
@@ -174,6 +179,16 @@ function parseOrigin(value: string): string {
   const extra = url.pathname !== "/" || url.search || url.hash || url.username || url.password || value.includes("?") || value.includes("#");
   if (!/^https?:$/.test(url.protocol) || extra) throw fail();
   return url.origin;
+}
+
+const MAX_SERVER_RUNS = 10;
+
+function serverRuns(value: string): number {
+  const n = Number(value);
+  if (!/^\d+$/.test(value) || n < 1 || n > MAX_SERVER_RUNS) {
+    throw new CliError(`audit: --server-runs must be a whole number from 1 to ${MAX_SERVER_RUNS}, got "${value}".`);
+  }
+  return n;
 }
 
 function positiveInt(value: string, flag: string): number {

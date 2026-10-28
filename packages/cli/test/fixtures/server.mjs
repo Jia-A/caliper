@@ -26,7 +26,8 @@
 //   A stamped /marked/…/reply (valid x-caliper-run, x-caliper-token equal to the secret) gets a
 //   record like Quill's generate route: postgresStart/End around a stand-in query, modelCallSent,
 //   firstChunk. ?partial=1 leaves out firstChunk; ?norecord=1 records nothing; ?runtime=<name>
-//   adds runtime: <name> (left out otherwise, as in Quill's record today).
+//   adds runtime: <name> (left out otherwise, as in Quill's record today); ?pre=<ms> waits
+//   before postgresStart and ?db=<ms> sets the stand-in query's length (default 40).
 // Run on its own with `node test/fixtures/server.mjs [port]`, or import startFixtureServer().
 
 import { readFileSync } from "node:fs";
@@ -141,8 +142,12 @@ function markedRoute(req, res, url, loads, seen, caliper) {
     const record = { id: run, status: null, marks: {} };
     if (url.searchParams.has("runtime")) record.runtime = url.searchParams.get("runtime");
     const mark = (name) => (record.marks[name] = Date.now() - start);
-    mark("postgresStart");
-    sleep(DB_MS).then(() => {
+    const pre = Number(url.searchParams.get("pre") ?? 0);
+    const db = Number(url.searchParams.get("db") ?? DB_MS);
+    sleep(pre).then(() => {
+      mark("postgresStart");
+      return sleep(db);
+    }).then(() => {
       mark("postgresEnd");
       mark("modelCallSent");
       record.status = 200;
