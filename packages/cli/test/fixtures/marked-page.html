@@ -19,6 +19,10 @@
                                   after the click a font and an analytics POST next to the reply
        g  stamped ≠ AI request:   /marked/reply, but after --runs loads a JSON ping to
                                   /marked/reply, then the reply from /marked/other/reply
+       p  partial record:         /marked/reply, recorded without firstChunk
+       n  no record:              /marked/reply, recorded nowhere
+       w  Workers record:         /marked/reply, recorded with runtime "workers"
+       o  other runtime:          /marked/reply, recorded with runtime "node"
      #msg is there for chat-style runs (--input/--prompt); the page doesn't read it. -->
 <input id="msg" size="40">
 <button id="generate">Generate</button>
@@ -58,6 +62,10 @@
     let path = "/marked/reply";
     let extra = "";
     if (kase === "a") extra = `&nonce=${random()}`;
+    if (kase === "p") extra = "&partial=1"; // the server's record leaves out firstChunk
+    if (kase === "n") extra = "&norecord=1"; // the server records nothing
+    if (kase === "w") extra = "&runtime=workers"; // the record says it ran on Workers
+    if (kase === "o") extra = "&runtime=node"; // the record names another runtime
     if (kase === "b") path = `/marked/s/${random()}/reply`;
     if (kase === "c") path = LOAD % 2 ? "/marked/a/reply" : "/marked/a/b/reply";
     if (kase === "d") await (await post("/marked/reply", "&kind=ping")).json();

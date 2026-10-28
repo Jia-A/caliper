@@ -18,6 +18,15 @@
 //   /marked       the page (?case=a…f&id=<test id>; see marked-page.html)
 //   /marked/…     its requests: …/reply (POST; SSE, or JSON with ?kind=ping), font.woff2, analytics (204).
 //                 Each is recorded with its x-caliper-* headers: server.marked(id).
+// A fake Caliper wrapper, off unless startFixtureServer(port, { caliperToken }) sets its secret
+// (caliperStatus makes it answer every lookup with that status instead):
+//   /__caliper/timings/:id   answers like Quill's: no secret → 404, bad bearer → 401,
+//                            malformed id → 400, no record → 404, record → 200. server.caliper
+//                            holds its records, the ids it was asked for and its store lookups.
+//   A stamped /marked/…/reply (valid x-caliper-run, x-caliper-token equal to the secret) gets a
+//   record like Quill's generate route: postgresStart/End around a stand-in query, modelCallSent,
+//   firstChunk. ?partial=1 leaves out firstChunk; ?norecord=1 records nothing; ?runtime=<name>
+//   adds runtime: <name> (left out otherwise, as in Quill's record today).
 // Run on its own with `node test/fixtures/server.mjs [port]`, or import startFixtureServer().
 
 import { readFileSync } from "node:fs";
@@ -37,10 +46,11 @@ const REPLY = "Hello! Here is **a streamed reply**, one token at a time.\n\nIt e
 const FIRST_TOKEN_MS = 300;
 const TOKEN_MS = 60;
 
-async function streamReply(res, cacheControl) {
+async function streamReply(res, cacheControl, onFirstChunk = () => {}) {
   res.writeHead(200, { "content-type": "text/event-stream", "cache-control": cacheControl });
   res.flushHeaders();
   await sleep(FIRST_TOKEN_MS);
+  onFirstChunk();
   for (const t of REPLY) {
     if (res.destroyed) return; // the page aborted
     res.write(`data: ${JSON.stringify({ t })}\n\n`);
@@ -82,8 +92,25 @@ const VARIANTS = {
   "/csp": { "content-security-policy": "img-src 'self'" },
 };
 
+const RUN_ID = /^[A-Za-z0-9_-]{1,64}$/; // Quill's isValidRunId
+const DB_MS = 40; // the stand-in database query before every /marked reply
+
+// The fake wrapper's timings endpoint, checking in the same order as Quill's.
+function caliperRoute(req, res, url, caliper) {
+  const json = (status, body) => res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
+  const id = decodeURIComponent(url.pathname.slice("/__caliper/timings/".length));
+  caliper.asked.push(id);
+  if (caliper.status) return json(caliper.status, { error: "forced" }); // an unexpected answer
+  if (!caliper.token) return json(404, { error: "not found" });
+  if (req.headers.authorization !== `Bearer ${caliper.token}`) return json(401, { error: { code: "UNAUTHORIZED" } });
+  if (!RUN_ID.test(id)) return json(400, { error: { code: "INVALID_RUN_ID" } });
+  caliper.lookups++;
+  const record = caliper.records.get(id);
+  return record ? json(200, record) : json(404, { error: { code: "NOT_FOUND" } });
+}
+
 // /marked: page loads and requests per test id, with the x-caliper-* headers each request carried.
-function markedRoute(req, res, url, loads, seen) {
+function markedRoute(req, res, url, loads, seen, caliper) {
   const id = url.searchParams.get("id") ?? "";
   if (url.pathname === "/marked") {
     const load = (loads.get(id) ?? 0) + 1;
@@ -106,9 +133,24 @@ function markedRoute(req, res, url, loads, seen) {
     if (url.searchParams.get("kind") === "ping") {
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
       res.end("{}");
-    } else {
-      streamReply(res, "no-cache");
+      return;
     }
+    const start = Date.now();
+    const run = req.headers["x-caliper-run"];
+    const marked = !!caliper.token && req.headers["x-caliper-token"] === caliper.token && RUN_ID.test(run ?? "") && !url.searchParams.has("norecord");
+    const record = { id: run, status: null, marks: {} };
+    if (url.searchParams.has("runtime")) record.runtime = url.searchParams.get("runtime");
+    const mark = (name) => (record.marks[name] = Date.now() - start);
+    mark("postgresStart");
+    sleep(DB_MS).then(() => {
+      mark("postgresEnd");
+      mark("modelCallSent");
+      record.status = 200;
+      streamReply(res, "no-cache", () => {
+        if (!url.searchParams.has("partial")) mark("firstChunk");
+        if (marked) caliper.records.set(run, record); // saved at the first chunk, like Quill's
+      });
+    });
     return;
   }
   if (url.pathname.endsWith(".woff2")) {
@@ -121,14 +163,19 @@ function markedRoute(req, res, url, loads, seen) {
   res.writeHead(204, { "cache-control": "no-store" }).end();
 }
 
-export function startFixtureServer(port = 0) {
+export function startFixtureServer(port = 0, { caliperToken = null, caliperStatus = null } = {}) {
   const loads = new Map(); // /marked page loads per test id
   const seen = new Map(); // /marked/… requests per test id
+  const caliper = { token: caliperToken, status: caliperStatus, records: new Map(), asked: [], lookups: 0 };
   const server = createServer((req, res) => {
     const url = new URL(req.url, "http://localhost");
     const path = url.pathname;
     if (path === "/marked" || path.startsWith("/marked/")) {
-      markedRoute(req, res, url, loads, seen);
+      markedRoute(req, res, url, loads, seen, caliper);
+      return;
+    }
+    if (path.startsWith("/__caliper/timings/") && req.method === "GET") {
+      caliperRoute(req, res, url, caliper);
       return;
     }
     if (PAGES[path]) {
@@ -164,6 +211,7 @@ export function startFixtureServer(port = 0) {
         close: () => new Promise((done) => server.close(done)),
         // The /marked page loads and requests seen for one test id.
         marked: (id) => ({ loads: loads.get(id) ?? 0, requests: seen.get(id) ?? [] }),
+        caliper, // the fake wrapper's records, ids asked for and store lookups
       });
     });
   });

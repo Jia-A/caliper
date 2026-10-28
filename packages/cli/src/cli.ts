@@ -38,8 +38,10 @@ const USAGE = `Usage:
       the runs: the first request after the click that matches the AI request the
       runs picked (method, origin, path; changing path parts as wildcards) gets
       x-caliper-run and x-caliper-token headers. Only if that request goes to
-      exactly this origin; otherwise nothing is sent. Server timings themselves
-      aren't fetched yet. The token is never printed.
+      exactly this origin, and only after a token pre-check against its
+      /__caliper/timings endpoint; otherwise nothing is sent. Then the server's
+      record for that run is fetched and printed (terminal only), apart from the
+      user timings. The token is never printed.
       --measure-selector clicks the one element a CSS selector matches instead of a
       button by name, for icon-only buttons with no text or aria-label. It must match
       exactly one element; Caliper prints it before each run. Tested in click runs and

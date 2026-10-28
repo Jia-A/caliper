@@ -523,10 +523,78 @@ function buildKey(picks: { run: number; method: string; url: URL }[]): MatchKey 
   };
 }
 
+// The token pre-check asks the wrapper for this id. "." isn't in the run-id alphabet
+// (A-Z a-z 0-9 _ -) and Caliper's own run ids are UUIDs, so it can never name a real record;
+// a wrapper that checks the bearer first answers 401 or, with the token right, 400.
+const PRECHECK_ID = "caliper.precheck";
+
+// Labels for the marks a Caliper wrapper records (Quill's TimingStore), in the order they happen.
+const SERVER_MARKS: Record<string, string> = {
+  postgresStart: "database query started",
+  postgresEnd: "database query done",
+  modelCallSent: "model call sent",
+  firstChunk: "model: first chunk",
+};
+// Waits between two recorded marks, shown only when both are there. The step between the query
+// and the model call is computation, which the Workers clock doesn't measure, so it isn't one.
+const SERVER_WAITS = [
+  { label: "database wait", from: "postgresStart", to: "postgresEnd", note: "query start → done" },
+  { label: "model: sent → first chunk", from: "modelCallSent", to: "firstChunk" },
+];
+
+// GET <origin>/__caliper/timings/<id> with the token as bearer. Redirects aren't followed, so the
+// token can't be carried anywhere else.
+function askWrapper(origin: string, token: string, id: string, timeout: number): Promise<globalThis.Response> {
+  return fetch(`${origin}/__caliper/timings/${id}`, {
+    headers: { authorization: `Bearer ${token}` },
+    redirect: "manual",
+    signal: AbortSignal.timeout(timeout),
+  });
+}
+
+// Why a fetch failed: Node's fetch says only "fetch failed" and puts the reason in `cause`.
+function fetchError(err: unknown): string {
+  const cause = (err as { cause?: { code?: string; message?: string } }).cause;
+  return cause?.code ?? cause?.message ?? messageOf(err);
+}
+
+// The wrapper's record for one run as the "Inside the server" block: every recorded mark as
+// recorded (ms after the request reached the route), then the waits whose two marks are both
+// there. Nothing else is computed. The Workers note only when the record says runtime "workers";
+// Caliper doesn't guess the server's runtime. "?" when the record isn't the expected shape.
+function formatServerRecord(record: unknown, runId: string): string {
+  const unknown = (reason: string) => `Server timings ? — ${reason}`;
+  const r = record as { id?: unknown; status?: unknown; runtime?: unknown; marks?: unknown } | null;
+  if (typeof r !== "object" || r === null || typeof r.marks !== "object" || r.marks === null) {
+    return unknown(`the record for run ${runId} has no marks object.`);
+  }
+  if (r.id !== runId) return unknown(`the record fetched for run ${runId} is for run ${JSON.stringify(r.id)}.`);
+  const marks = Object.entries(r.marks as Record<string, unknown>);
+  const bad = marks.find(([, v]) => typeof v !== "number" || !Number.isFinite(v));
+  if (bad) return unknown(`the record for run ${runId} has a mark that isn't a number: ${bad[0]} = ${JSON.stringify(bad[1])}.`);
+  const at = new Map(marks as [string, number][]);
+
+  const row = (label: string, value: number, note?: string) =>
+    `    ${label.padEnd(26)}${String(ms(value)).padStart(6)} ms${note ? `   (${note})` : ""}`;
+  const known = Object.keys(SERVER_MARKS).filter((name) => at.has(name));
+  // Marks Caliper has no label for are shown under their own name, in the order they happened.
+  const other = [...at].filter(([name]) => !(name in SERVER_MARKS)).sort((a, b) => a[1] - b[1]).map(([name]) => name);
+  const waits = SERVER_WAITS.filter((w) => at.has(w.from) && at.has(w.to));
+  return [
+    `Inside the server (from 1 marked run) — ms after the request arrived${typeof r.status === "number" ? `, status ${r.status}` : ""}`,
+    ...(at.size === 0 ? ["    (no marks recorded)"] : []),
+    ...known.map((name) => row(SERVER_MARKS[name]!, at.get(name)!, name === "firstChunk" ? "at the server, not the browser" : undefined)),
+    ...other.map((name) => row(name, at.get(name)!)),
+    ...(waits.length ? ["  spans", ...waits.map((w) => row(w.label, at.get(w.to)! - at.get(w.from)!, w.note))] : []),
+    ...(r.runtime === "workers" ? ["    Workers time waits only — computation between steps isn't measured."] : []),
+  ].join("\n");
+}
+
 // The marked visit (--server-timings): one extra run on a fresh page whose first request after
 // the click that matches the key gets x-caliper-run + x-caliper-token, and nothing else is
-// touched. Only when every run identified its AI request and the key's origin is exactly the
-// named one; the token never goes anywhere else, and is never printed. Returns the line to print.
+// touched. Only when every run identified its AI request, the key's origin is exactly the named
+// one and the wrapper accepts the token (pre-check); the token never goes anywhere else, and is
+// never printed. After a stamped run, fetches its record. Returns the lines to print.
 async function markedVisit(
   context: BrowserContext,
   options: MeasureOptions,
@@ -548,6 +616,19 @@ async function markedVisit(
   if (typeof key === "string") return unknown(key);
   if (key.origin !== origin) return unknown(`AI request goes to ${key.origin}, not ${origin}; token not sent.`);
   const oneRun = loaded.length === 1 ? " (key from 1 run — changing path parts can't be detected)" : "";
+
+  // Token pre-check, for an id that can't exist: 400 means the wrapper is there and took the token.
+  const precheckUrl = `${origin}/__caliper/timings/${PRECHECK_ID}`;
+  let pre: globalThis.Response;
+  try {
+    pre = await askWrapper(origin, token, PRECHECK_ID, options.timeout);
+  } catch (err) {
+    return unknown(`token pre-check couldn't reach ${precheckUrl}: ${fetchError(err)}; no marked visit.`);
+  }
+  await pre.body?.cancel();
+  if (pre.status === 401) return unknown("server rejected the token (wrong, expired or rotated); no marked visit.");
+  if (pre.status === 404) return unknown(`no Caliper wrapper at ${origin} (or CALIPER_TOKEN not set on the server); no marked visit.`);
+  if (pre.status !== 400) return unknown(`token pre-check got HTTP ${pre.status} from ${precheckUrl}; no marked visit.`);
 
   const runId = randomUUID();
   const matched: Request[] = [];
@@ -586,7 +667,26 @@ async function markedVisit(
   if (picked.raw !== stamped) {
     return unknown(`the marked visit's AI request was ${picked.method} ${picked.url}, not the stamped ${stamped.method()} ${stamped.url()}${oneRun}`);
   }
-  return `Server timings — marked visit sent x-caliper-run ${runId} on ${stamped.method()} ${stamped.url()} (matched ${keyText(key)}); timings not fetched yet${oneRun}`;
+  const sent = `Server timings — marked visit sent x-caliper-run ${runId} on ${stamped.method()} ${stamped.url()} (matched ${keyText(key)})${oneRun}`;
+
+  const recordUrl = `${origin}/__caliper/timings/${runId}`;
+  let res: globalThis.Response;
+  try {
+    res = await askWrapper(origin, token, runId, options.timeout);
+  } catch (err) {
+    return [sent, unknown(`fetching ${recordUrl} failed: ${fetchError(err)}.`)].join("\n");
+  }
+  if (res.status !== 200) {
+    await res.body?.cancel();
+    return [sent, unknown(res.status === 404 ? `token OK and wrapper present, but no record for run ${runId}.` : `fetching ${recordUrl} got HTTP ${res.status}.`)].join("\n");
+  }
+  let record: unknown;
+  try {
+    record = await res.json();
+  } catch {
+    return [sent, unknown(`the record for run ${runId} isn't JSON.`)].join("\n");
+  }
+  return [sent, formatServerRecord(record, runId)].join("\n");
 }
 
 // Loads the page, clicks the --step buttons, types --prompt into --input and installs the chat
