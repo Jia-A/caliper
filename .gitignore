@@ -19,6 +19,7 @@ node_modules/
 .DS_Store
 *.pem
 auth.json
+auth-local.json
 
 # debug
 npm-debug.log*
