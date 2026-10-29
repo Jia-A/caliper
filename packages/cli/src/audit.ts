@@ -6,6 +6,7 @@ import type { BrowserContext, Locator, Page, Request, Response } from "playwrigh
 import { launchChromium } from "./browser.js";
 import { combineImageRules, describeRule, imageRule, splitPolicies, type ImageRule } from "./csp.js";
 import { CliError, messageOf, PageLoadError, UnidentifiedRequestError } from "./errors.js";
+import { loadFailureHints } from "./loadhints.js";
 import { renderReport, type ReportReply } from "./report.js";
 import type {
   Breakdown,
@@ -181,7 +182,7 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
           if (!(err instanceof PageLoadError)) throw err;
           failed.push(i);
           console.log(`${runLabel(i)} — page failed to load`);
-          console.log(`    ${err.message}`);
+          for (const line of [err.message, ...loadFailureHints(err.message, url, timeout)]) console.log(`    ${line}`);
           continue;
         }
         // CSP comes from the first run that loaded; no extra page load.
@@ -654,18 +655,23 @@ async function markedVisits(
   unidentified: number[]
 ): Promise<void> {
   const unknown = (reason: string) => console.log(`Server timings ? — ${reason}`);
-  const inconclusive = [
-    ...failed.map((run) => ({ run, why: "page failed to load" })),
-    ...unidentified.map((run) => ({ run, why: "AI request not identified" })),
-  ].sort((a, b) => a.run - b.run);
-  if (inconclusive.length) {
+  // A run whose AI request wasn't identified might have picked another endpoint, so it blocks the
+  // key. Runs that failed to load are left out; the key comes from the runs that loaded.
+  if (unidentified.length) {
+    const inconclusive = [
+      ...failed.map((run) => ({ run, why: "page failed to load" })),
+      ...unidentified.map((run) => ({ run, why: "AI request not identified" })),
+    ].sort((a, b) => a.run - b.run);
     return unknown(`${inconclusive.map((r) => `run ${r.run}: ${r.why}`).join("; ")} — no match key, so no marked visit`);
   }
 
   const key = buildKey(loaded.map(({ run, result }) => ({ run, method: result.pick.request.method, url: new URL(result.pick.request.url) })));
   if (typeof key === "string") return unknown(key);
   if (key.origin !== origin) return unknown(`AI request goes to ${key.origin}, not ${origin}; token not sent.`);
-  const oneRun = loaded.length === 1 ? " (key from 1 run — changing path parts can't be detected)" : "";
+  const keyNote = [
+    failed.length ? ` (key from ${loaded.length} of ${loaded.length + failed.length} runs; ${failed.length === 1 ? "run" : "runs"} ${failed.join(", ")} failed to load)` : "",
+    loaded.length === 1 ? " (key from 1 run — changing path parts can't be detected)" : "",
+  ].join("");
 
   // Token pre-check, for an id that can't exist: 400 means the wrapper is there and took the token.
   const precheckUrl = `${origin}/__caliper/timings/${PRECHECK_ID}`;
@@ -683,10 +689,12 @@ async function markedVisits(
   const succeeded: { visit: number; record: ServerRecord }[] = [];
   for (let visit = 1; visit <= runs; visit++) {
     const label = `marked visit ${visit} of ${runs}`;
-    const got = await markedVisit(context, options, { origin, token }, key, oneRun);
+    const got = await markedVisit(context, options, { origin, token }, key, keyNote);
     if (got.sent) console.log(`Server timings — ${label} sent ${got.sent}`);
-    if (typeof got.result === "string") unknown(`${label}: ${got.result}`);
-    else succeeded.push({ visit, record: got.result });
+    if (typeof got.result === "string") {
+      unknown(`${label}: ${got.result}`);
+      for (const line of got.hints) console.log(`    ${line}`);
+    } else succeeded.push({ visit, record: got.result });
   }
   if (succeeded.length) console.log(formatServerBlock(succeeded, runs));
   else unknown(`0 of ${plural(runs, "marked visit")} succeeded`);
@@ -694,15 +702,15 @@ async function markedVisits(
 
 // One marked visit: stamps the first request after the click that matches the key, then
 // fetches the record for its run id. Returns what was sent (if the visit was valid) and the
-// record, or why there's none.
+// record, or why there's none, with things to check when its page failed to load.
 async function markedVisit(
   context: BrowserContext,
   options: MeasureOptions,
   { origin, token }: { origin: string; token: string },
   key: MatchKey,
-  oneRun: string
-): Promise<{ sent: string | null; result: ServerRecord | string }> {
-  const fail = (reason: string) => ({ sent: null, result: reason });
+  keyNote: string // which runs the key came from, for every line about this visit
+): Promise<{ sent: string | null; result: ServerRecord | string; hints: string[] }> {
+  const fail = (reason: string, hints: string[] = []) => ({ sent: null, result: reason, hints });
   const runId = randomUUID();
   const matched: Request[] = [];
   let armed = false;
@@ -710,6 +718,7 @@ async function markedVisit(
   page.setDefaultTimeout(options.timeout);
   let result: RunResult | null = null;
   let error: string | null = null;
+  let loadFailed = false;
   try {
     // From just before the click to the end of the run; requests during page load aren't routed.
     const beforeTrigger = async () => {
@@ -725,38 +734,40 @@ async function markedVisit(
     result = await measureOnce(page, { ...options, beforeTrigger });
   } catch (err) {
     if (!(err instanceof CliError || err instanceof UnidentifiedRequestError)) throw err;
+    loadFailed = err instanceof PageLoadError;
     error = err instanceof UnidentifiedRequestError ? `AI request not identified: ${err.message}` : messageOf(err).split("\n")[0]!.trim();
   } finally {
     await page.unrouteAll({ behavior: "ignoreErrors" });
     await page.close();
   }
 
+  if (loadFailed) return fail(`page failed to load: ${error}`, loadFailureHints(error!, options.url, options.timeout));
   if (!armed) return fail(`didn't get to the click: ${error}`);
-  if (matched.length === 0) return fail(`no request matched ${keyText(key)}${oneRun}`);
-  if (matched.length > 1) return fail(`${matched.length} requests matched ${keyText(key)}: ${matched.map((r) => r.url()).join(", ")}${oneRun}`);
+  if (matched.length === 0) return fail(`no request matched ${keyText(key)}${keyNote}`);
+  if (matched.length > 1) return fail(`${matched.length} requests matched ${keyText(key)}: ${matched.map((r) => r.url()).join(", ")}${keyNote}`);
   const stamped = matched[0]!;
-  if (!result) return fail(`stamped ${stamped.method()} ${stamped.url()}, then: ${error}${oneRun}`);
+  if (!result) return fail(`stamped ${stamped.method()} ${stamped.url()}, then: ${error}${keyNote}`);
   const picked = result.pick.request;
   if (picked.raw !== stamped) {
-    return fail(`its AI request was ${picked.method} ${picked.url}, not the stamped ${stamped.method()} ${stamped.url()}${oneRun}`);
+    return fail(`its AI request was ${picked.method} ${picked.url}, not the stamped ${stamped.method()} ${stamped.url()}${keyNote}`);
   }
-  const sent = `x-caliper-run ${runId} on ${stamped.method()} ${stamped.url()} (matched ${keyText(key)})${oneRun}`;
+  const sent = `x-caliper-run ${runId} on ${stamped.method()} ${stamped.url()} (matched ${keyText(key)})${keyNote}`;
 
   const recordUrl = `${origin}/__caliper/timings/${runId}`;
   let res: globalThis.Response;
   try {
     res = await askWrapper(origin, token, runId, options.timeout);
   } catch (err) {
-    return { sent, result: `fetching ${recordUrl} failed: ${fetchError(err)}.` };
+    return { sent, result: `fetching ${recordUrl} failed: ${fetchError(err)}.`, hints: [] };
   }
   if (res.status !== 200) {
     await res.body?.cancel();
-    return { sent, result: res.status === 404 ? `token OK and wrapper present, but no record for run ${runId}.` : `fetching ${recordUrl} got HTTP ${res.status}.` };
+    return { sent, result: res.status === 404 ? `token OK and wrapper present, but no record for run ${runId}.` : `fetching ${recordUrl} got HTTP ${res.status}.`, hints: [] };
   }
   try {
-    return { sent, result: parseServerRecord(await res.json(), runId) };
+    return { sent, result: parseServerRecord(await res.json(), runId), hints: [] };
   } catch {
-    return { sent, result: `the record for run ${runId} isn't JSON.` };
+    return { sent, result: `the record for run ${runId} isn't JSON.`, hints: [] };
   }
 }
 

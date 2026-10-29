@@ -15,7 +15,7 @@ Caliper (npm `caliper-ai`) measures AI features in real browsers. CLI lives in `
 ## Tests
 - New behaviour starts with a fixture + a test that FAILS on the current code. Show it failing.
 - A test must be able to fail for the right reason — assert the specific message, not just "it errored".
-- Before any commit: typecheck + test:csp, test:sidecall, test:chat, test:nostore, test:canary, test:selector, test:marked.
+- Before any commit: typecheck + test:csp, test:sidecall, test:chat, test:nostore, test:canary, test:selector, test:marked, test:loadhints.
 
 ## Docs say only what's tested
 - README, --help and CHANGELOG claim only tested behaviour, and list known limits.

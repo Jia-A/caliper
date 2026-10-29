@@ -15,7 +15,9 @@
 // For an icon-only send button (no accessible name; Enter doesn't send):
 //   /icon         the page (streams from /chat/stream)
 // For the marked visit (server timings): a page whose reply URL varies per ?case and per load.
-//   /marked       the page (?case=a…f&id=<test id>; see marked-page.html)
+//   /marked       the page (?case=a…f&id=<test id>; see marked-page.html). ?fail=<loads> (comma-
+//                 separated load numbers) drops the connection for those loads (net::ERR_EMPTY_RESPONSE);
+//                 ?hang=<loads> never answers them (Playwright's navigation timeout).
 //   /marked/…     its requests: …/reply (POST; SSE, or JSON with ?kind=ping), font.woff2, analytics (204).
 //                 Each is recorded with its x-caliper-* headers: server.marked(id).
 // A fake Caliper wrapper, off unless startFixtureServer(port, { caliperToken }) sets its secret
@@ -113,9 +115,15 @@ function caliperRoute(req, res, url, caliper) {
 // /marked: page loads and requests per test id, with the x-caliper-* headers each request carried.
 function markedRoute(req, res, url, loads, seen, caliper) {
   const id = url.searchParams.get("id") ?? "";
+  // No socket reuse: Chromium silently retries a request whose reused socket drops, which would
+  // turn a ?fail load into a success on the next load number.
+  res.setHeader("connection", "close");
   if (url.pathname === "/marked") {
     const load = (loads.get(id) ?? 0) + 1;
     loads.set(id, load);
+    const listed = (name) => (url.searchParams.get(name) ?? "").split(",").includes(String(load));
+    if (listed("fail")) return req.socket.destroy();
+    if (listed("hang")) return;
     res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
     res.end(MARKED_PAGE.replace("__LOAD__", String(load)));
     return;
@@ -213,7 +221,10 @@ export function startFixtureServer(port = 0, { caliperToken = null, caliperStatu
     server.listen(port, "127.0.0.1", () => {
       resolve({
         url: `http://127.0.0.1:${server.address().port}`,
-        close: () => new Promise((done) => server.close(done)),
+        close: () => new Promise((done) => {
+          server.close(done);
+          server.closeAllConnections(); // ?hang loads never answer
+        }),
         // The /marked page loads and requests seen for one test id.
         marked: (id) => ({ loads: loads.get(id) ?? 0, requests: seen.get(id) ?? [] }),
         caliper, // the fake wrapper's records, ids asked for and store lookups

@@ -116,13 +116,14 @@ After the timed runs, Caliper builds a match key from the AI request each run pi
 - **The token only goes to the origin you name.** The key's origin must equal `--server-timings` exactly (scheme, host and port). A subdomain, a longer host or a longer port is not a match. Otherwise Caliper sends nothing and prints `Server timings ? — AI request goes to <origin>, not <named origin>; token not sent.`
 - **Both are needed.** `CALIPER_TOKEN` without `--server-timings` does nothing. `--server-timings` without `CALIPER_TOKEN`, or with anything other than an `http(s)` origin, is an error before any run. So is `--server-runs` outside 1–10, or without `--server-timings`.
 - **Before any run** it prints how many times the audit will trigger the AI feature: `This audit triggers the AI feature up to 5 times for timing (2 timed + 3 marked).` It counts triggers, not requests, because the endpoint isn't known until the runs pick it. One trigger can send more than one request, and the count leaves out `--stop`, `--double` and `--canary`.
-- **No marked visit, with the reason, when:** any run's page failed to load or its AI request wasn't identified; or the runs disagree on method, origin or number of path segments (the line names each run's request).
+- **Runs whose page failed to load are left out of the key**, as long as at least one run loaded. Every line about the marked visits then says so, for example `(key from 2 of 3 runs; run 2 failed to load)`. If only one run loaded, the line also adds `(key from 1 run — changing path parts can't be detected)`. If no run loaded, there's no marked visit (the audit stops at "Inconclusive — page failed to load").
+- **No marked visit, with the reason, when:** any run's AI request wasn't identified; or the runs disagree on method, origin or number of path segments (the line names each run's request).
 - **Token pre-check first, once.** Before the marked visits, Caliper asks `GET <origin>/__caliper/timings/caliper.precheck` with `Authorization: Bearer <token>`. That id is deliberately malformed (`.` isn't allowed in run ids), so the request can never reach a real record. A `400` means the wrapper is there and took the token, and the marked visits go ahead. Otherwise there's no marked visit:
   - `401`: `Server timings ? — server rejected the token (wrong, expired or rotated); no marked visit.`
   - `404`: `Server timings ? — no Caliper wrapper at <origin> (or CALIPER_TOKEN not set on the server); no marked visit.`
   - anything else, or a network error: the line gives the status or the error.
   Redirects are never followed, so the token can't be carried to another origin.
-- **A marked visit fails** (`Server timings ? — marked visit <i> of <n>: …`) when no request matches the key, when 2 or more do (all are listed), when its AI request isn't the stamped one, or when its record can't be read (see below). Each visit is judged on its own. A failed visit is left out of the block below.
+- **A marked visit fails** (`Server timings ? — marked visit <i> of <n>: …`) when its page fails to load (followed by the same [things to check](#known-limits) as a timed run, then `Rerun to try again.`), when no request matches the key, when 2 or more do (all are listed), when its AI request isn't the stamped one, or when its record can't be read (see below). Each visit is judged on its own. A failed visit is left out of the block below.
 - **Each valid visit** prints `Server timings — marked visit <i> of <n> sent x-caliper-run <id> on <request> (matched <key>)`. With `--runs 1` the line adds `(key from 1 run — changing path parts can't be detected)`.
 - **Then it fetches each visit's record** (`GET <origin>/__caliper/timings/<id>`, same bearer) and prints them under the user timings, never mixed into them. The header says how many of the marked visits it's from. With several, there's one column per visit, then min · median · max across the visits that recorded that mark. Spans are worked out inside each visit first, then summarised, never by subtracting one median from another. If no visit succeeds: `Server timings ? — 0 of <n> marked visits succeeded`. This output is from the local test fixture (a fake wrapper whose wait before the query and query length vary per visit), not a real server:
 
@@ -292,11 +293,28 @@ An allowed domain that anyone can make send a request (an image proxy, an open r
 - **A reply that starts after a long gap with nothing open can be missed.** Caliper stops watching once every request has ended and the output has been quiet for `--settle-ms`. A page that renders a placeholder from one request and opens the reply stream only after a longer pause would end the run first. Raise `--settle-ms`, or use `--request`.
 - **`auth.json` holds your session cookies.** Treat it like a password and don't commit it.
 - **A run whose page fails to load doesn't stop the audit.** It's reported as "page failed to load" and left out of the medians, and the summary says how many runs were used. If every run fails, Caliper prints "Inconclusive — page failed to load" and exits.
+- **Each failed load lists things to check, then "Rerun to try again."** The things to check are candidates for that kind of error, not a diagnosis. Three kinds have them so far:
+
+  ```txt
+  run 1 (cold) — page failed to load
+      page.goto: Timeout 4000ms exceeded.
+      things to check: your network connection · whether http://127.0.0.1:8080 is up · --timeout (now 4000 ms)
+      Rerun to try again.
+  ```
+
+  | Error | Things to check | How it's tested |
+  |---|---|---|
+  | `Timeout <n>ms exceeded` (Playwright's, i.e. `--timeout`) | your network connection · whether `<origin>` is up · `--timeout (now <ms>)` | reproduced on a local fixture |
+  | `net::ERR_CONNECTION_REFUSED` | whether `<origin>` is up · the port in the URL | reproduced on a local fixture |
+  | `net::ERR_TIMED_OUT` (Chromium's own network timeout) | your network connection · whether `<origin>` is up | **seen in a real run (Oct 29)**, not reproduced locally: unit-tested with that run's exact error line |
+
+  `--timeout` isn't listed for `net::ERR_TIMED_OUT`, because that timeout is Chromium's, not Caliper's. Any other error (for example `net::ERR_EMPTY_RESPONSE`) prints only `Rerun to try again.` Marked visits print the same lines under their `Server timings ? — marked visit <i> of <n>: page failed to load: …` line. The Stop, double-send and canary checks don't print these lines yet.
 
 ## Development
 
 ```sh
 npm run test:csp     # CSP parser unit tests (Node 22.18+)
+npm run test:loadhints  # things-to-check lookup unit tests, from literal error strings (Node 22.18+)
 npm run test:canary  # builds, then runs the canary check against a local fixture with and without CSP
 npm run test:nostore # builds, then checks streams that end ERR_ABORTED after their full body (click and chat)
 npm run test:chat    # builds, then times a chat page with a "Thinking…" placeholder

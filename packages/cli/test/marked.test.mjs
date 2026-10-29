@@ -35,6 +35,11 @@
 // succeed, the numbers and the summary match the records, and the median span isn't the
 // difference of the medians; (q) one visit's record lacks a mark: "–"; (v) one of three fails: its "?" line, k = 2; (e3) all fail;
 // (m1) n = 1: no median; out-of-range n is an error before any run.
+// Failed page loads: the key comes from the runs that loaded, and the lines say which ones
+// (with the one-run note too when only one loaded); with none loaded, nothing changes. Every
+// "page failed to load" line is followed by things to check for that error type (Playwright's
+// timeout, ERR_CONNECTION_REFUSED), then "Rerun to try again." — only that for any other type.
+// The same lines follow a marked visit's "?" line when its own page fails to load.
 // Run with `npm run test:marked` (builds first).
 
 import { execFile } from "node:child_process";
@@ -92,20 +97,30 @@ const check = (ok, what, out) => {
 // One case: run Caliper on /marked?case=…, then check what's common to every case. By default
 // with the token and --server-timings naming the page's own origin.
 // serverRuns: --server-runs to pass (null: leave it out, so the default applies).
-async function runCase(label, kase, { srv = server, runs = 2, serverRuns = 1, host = srv.url, named = host, env = { CALIPER_TOKEN: TOKEN }, args = [] } = {}) {
+// fail / hang: load numbers whose page load is dropped / never answered. Up to --runs they're
+// timed runs; after that, marked visits.
+async function runCase(label, kase, { srv = server, runs = 2, serverRuns = 1, host = srv.url, named = host, env = { CALIPER_TOKEN: TOKEN }, args = [], fail = [], hang = [] } = {}) {
   const id = `${kase}-${randomBytes(4).toString("hex")}`;
   const visits = named && serverRuns !== null ? ["--server-runs", String(serverRuns)] : [];
   const flags = ["--runs", String(runs), ...(named ? ["--server-timings", named, ...visits] : []), ...args];
   const [asked, lookups] = [srv.caliper.asked.length, srv.caliper.lookups];
-  const out = await caliper(`${host}/marked?case=${kase}&id=${id}&runs=${runs}`, flags, env);
+  const broke = [...fail, ...hang].filter((load) => load <= runs).sort((x, y) => x - y);
+  const loadArgs = `${fail.length ? `&fail=${fail.join(",")}` : ""}${hang.length ? `&hang=${hang.join(",")}` : ""}`;
+  const out = await caliper(`${host}/marked?case=${kase}&id=${id}&runs=${runs}${loadArgs}`, flags, env);
   const { loads, requests } = srv.marked(id);
   const stamped = requests.filter((r) => r.run !== null || r.token !== null);
-  check(out.code === 0 && timedRuns(out.stdout) === runs, `(${label}) the ${runs} unmarked run(s) are timed (got ${timedRuns(out.stdout)})`, out);
+  const timed = runs - broke.length;
+  check(out.code === 0 && timedRuns(out.stdout) === timed, `(${label}) ${timed} of the ${runs} unmarked run(s) are timed (got ${timedRuns(out.stdout)})`, out);
   check(!requests.some((r) => r.load <= runs && (r.run !== null || r.token !== null)), `(${label}) no request in the unmarked runs is stamped`, out);
   check(!`${out.stdout}${out.stderr}`.includes(TOKEN), `(${label}) the token is never printed`, out);
   const lines = out.stdout.match(/^Server timings.*$/gm) ?? [];
+  // What the sent and "?" lines end with: which runs the key came from.
+  const keyNote = [
+    broke.length ? ` (key from ${timed} of ${runs} runs; ${broke.length === 1 ? "run" : "runs"} ${broke.join(", ")} failed to load)` : "",
+    timed === 1 ? ONE_RUN : "",
+  ].join("");
   return {
-    label, runs, host, out, loads, requests, stamped, lines, line: lines[0] ?? null,
+    label, runs, host, out, loads, requests, stamped, lines, line: lines[0] ?? null, keyNote,
     asked: srv.caliper.asked.slice(asked), // ids the wrapper was asked for during this case
     lookups: srv.caliper.lookups - lookups, // store lookups during this case
   };
@@ -143,7 +158,7 @@ function checkBlock({ label, out }, record) {
 // The marked visit stamped exactly one request: the reply, with a fresh run id and the token,
 // and the page's own headers left as they were. The printed line names that run id.
 function checkStamped(c, url, key) {
-  const { label, runs, host, out, loads, stamped, line, lookups } = c;
+  const { label, runs, host, out, loads, stamped, line, lookups, keyNote } = c;
   checkPrecheck(c);
   check(loads === runs + 1, `(${label}) one marked visit after the runs (page loads: ${loads})`, out);
   check(stamped.length === 1, `(${label}) exactly one request stamped (got ${stamped.length})`, out);
@@ -152,7 +167,7 @@ function checkStamped(c, url, key) {
     `(${label}) the stamped request is the marked visit's reply (got ${s ? `${s.method} ${s.url}` : "none"})`, out);
   check(!!s && s.token === TOKEN && new RegExp(`^${UUID}$`).test(s.run ?? ""), `(${label}) it carries x-caliper-token and a fresh x-caliper-run id`, out);
   check(!!s && s.contentType === "application/json", `(${label}) its own content-type header is untouched (got ${s?.contentType})`, out);
-  const suffix = runs === 1 ? esc(ONE_RUN) : "";
+  const suffix = esc(keyNote);
   const want = new RegExp(`^Server timings — marked visit 1 of 1 sent x-caliper-run (${UUID}) on POST ${esc(host)}\\S+ \\(matched ${esc(key)}\\)${suffix}$`);
   const m = line?.match(want);
   check(!!m && m[1] === s?.run, `(${label}) prints the stamped request, its key and run id (got: ${line ?? "nothing"})`, out);
@@ -224,6 +239,31 @@ function checkVisits(c, n, ok) {
   checkRow("database wait", records.map((r) => span(r, "postgresStart", "postgresEnd")));
   checkRow("model: sent → first chunk", records.map((r) => span(r, "modelCallSent", "firstChunk")));
   if (k === 1) check(!/median/.test(text.slice(text.indexOf("Inside the server"))), `(${label}) the word "median" isn't in the block with 1 visit`, out);
+}
+
+// The lines under "run <i> — page failed to load": the error, then what to check.
+function failedRunLines(stdout, run) {
+  const lines = stdout.split("\n");
+  const at = lines.findIndex((l) => new RegExp(`^run ${run}( \\(cold\\))? — page failed to load$`).test(l));
+  if (at === -1) return null;
+  const end = lines.findIndex((l, i) => i > at && !l.startsWith("    "));
+  return lines.slice(at + 1, end === -1 ? undefined : end);
+}
+
+// The indented lines right after the first stdout line matching `re`.
+function linesAfter(stdout, re) {
+  const lines = stdout.split("\n");
+  const at = lines.findIndex((l) => re.test(l));
+  if (at === -1) return null;
+  const end = lines.findIndex((l, i) => i > at && !l.startsWith("    "));
+  return [lines[at], ...lines.slice(at + 1, end === -1 ? undefined : end)];
+}
+
+// A dropped connection (net::ERR_EMPTY_RESPONSE) has no candidates: just the rerun line.
+function checkDropped({ label, out }, run) {
+  const got = failedRunLines(out.stdout, run);
+  check(!!got && got.length === 2 && /^    page\.goto: net::ERR_EMPTY_RESPONSE at /.test(got[0]) && got[1] === "    Rerun to try again.",
+    `(${label}) run ${run}: the error, then only "Rerun to try again." (got: ${got?.join(" | ") ?? "no failed-load line"})`, out);
 }
 
 try {
@@ -360,6 +400,53 @@ try {
   const noToken = await caliper(`${origin}/marked?case=a&id=notoken`, ["--runs", "1", "--server-timings", origin], {});
   check(noToken.code !== 0 && noToken.stderr.includes("--server-timings needs CALIPER_TOKEN set in the environment.") && timedRuns(noToken.stdout) === 0,
     "--server-timings without CALIPER_TOKEN is an error before any run", noToken);
+
+  // (f1) Run 2 of 3 fails to load: the key comes from runs 1 and 3, and the visit goes ahead.
+  const f1 = await runCase("f1, 1 of 3 failed", "a", { runs: 3, fail: [2] });
+  checkStamped(f1, /^\/marked\/reply\?/, `POST ${origin}/marked/reply`);
+  checkDropped(f1, 2);
+
+  // (f2) Runs 1 and 3 fail: the key comes from run 2 alone, with the one-run note too.
+  const f2 = await runCase("f2, 2 of 3 failed", "a", { runs: 3, fail: [1, 3] });
+  checkStamped(f2, /^\/marked\/reply\?/, `POST ${origin}/marked/reply`);
+
+  // (f3) Every run fails to load: as before, no marked visit and no server line.
+  const f3 = await runCase("f3, all failed", "a", { runs: 2, fail: [1, 2] });
+  checkNoVisit(f3);
+  check(f3.out.stdout.split("\n").includes("Inconclusive — page failed to load") && f3.line === null,
+    `(f3) "Inconclusive — page failed to load", no server timings line (got: ${f3.line ?? "nothing"})`, f3.out);
+  for (const run of [1, 2]) checkDropped(f3, run);
+
+  // (t) Run 1 times out: things to check for a timeout, then the rerun line; run 2 makes the key.
+  const t = await runCase("t, run 1 timed out", "a", { runs: 2, hang: [1], args: ["--timeout", "4000"] });
+  checkStamped(t, /^\/marked\/reply\?/, `POST ${origin}/marked/reply`);
+  const tLines = failedRunLines(t.out.stdout, 1);
+  const tWant = ["    page.goto: Timeout 4000ms exceeded.", `    things to check: your network connection · whether ${origin} is up · --timeout (now 4000 ms)`, "    Rerun to try again."];
+  check(JSON.stringify(tLines) === JSON.stringify(tWant), `(t) run 1: the timeout, things to check, rerun (got: ${tLines?.join(" | ") ?? "no failed-load line"})`, t.out);
+
+  // (r) Nothing listening on the port: things to check for a refused connection.
+  const closed = await startFixtureServer();
+  await closed.close();
+  const r = await caliper(`${closed.url}/marked?case=a&id=refused`, ["--runs", "1"], {});
+  const rLines = failedRunLines(r.stdout, 1);
+  const rWant = [`    page.goto: net::ERR_CONNECTION_REFUSED at ${closed.url}/marked?case=a&id=refused`, `    things to check: whether ${closed.url} is up · the port in the URL`, "    Rerun to try again."];
+  check(JSON.stringify(rLines) === JSON.stringify(rWant), `(r) connection refused: things to check, rerun (got: ${rLines?.join(" | ") ?? "no failed-load line"})`, r);
+
+  // (fv) Marked visit 2 of 3 fails to load (dropped): its "?" line, then only the rerun line.
+  const fv = await runCase("fv, visit 2 load dropped", "a", { runs: 2, serverRuns: 3, fail: [4] });
+  checkVisits(fv, 3, [1, 3]);
+  const fvLines = linesAfter(fv.out.stdout, /^Server timings \? — marked visit 2 of 3:/);
+  check(!!fvLines && fvLines.length === 2 && /^Server timings \? — marked visit 2 of 3: page failed to load: page\.goto: net::ERR_EMPTY_RESPONSE at \S+$/.test(fvLines[0]) &&
+    fvLines[1] === "    Rerun to try again.", `(fv) visit 2: page failed to load, then only the rerun line (got: ${fvLines?.join(" | ") ?? "nothing"})`, fv.out);
+
+  // (tv) The only marked visit times out: things to check for a timeout, then the rerun line.
+  const tv = await runCase("tv, visit load timed out", "a", { runs: 2, serverRuns: 1, hang: [3], args: ["--timeout", "4000"] });
+  const tvLines = linesAfter(tv.out.stdout, /^Server timings \? — marked visit 1 of 1:/);
+  const tvWant = ["Server timings ? — marked visit 1 of 1: page failed to load: page.goto: Timeout 4000ms exceeded.",
+    `    things to check: your network connection · whether ${origin} is up · --timeout (now 4000 ms)`, "    Rerun to try again."];
+  check(JSON.stringify(tvLines) === JSON.stringify(tvWant), `(tv) visit 1: page failed to load, things to check, rerun (got: ${tvLines?.join(" | ") ?? "nothing"})`, tv.out);
+  check(tv.lines.at(-1) === "Server timings ? — 0 of 1 marked visit succeeded" && tv.stamped.length === 0,
+    `(tv) nothing stamped, 0 of 1 succeeded (got: ${tv.lines.join(" | ")})`, tv.out);
 
   // (m) Default --server-runs: 3 marked visits, all succeed.
   const m = await runCase("m, 3 visits by default", "m", { serverRuns: null });
