@@ -46,6 +46,7 @@
     "typecheck": "tsc --noEmit",
     "test:csp": "node --test test/csp.test.ts",
     "test:loadhints": "node --test test/loadhints.test.ts",
+    "test:serverblock": "node --test test/serverblock.test.ts",
     "test:canary": "npm run -s build >/dev/null && node test/canary.test.mjs",
     "prepublishOnly": "npm run typecheck && npm run build",
     "test:nostore": "npm run -s build >/dev/null && node test/nostore.test.mjs",

@@ -104,7 +104,7 @@ caliper audit https://your-app.example.com/chat --input "#msg" --prompt "hello" 
 
 ### Marked visit (`--server-timings`)
 
-Server-side timings from marked runs, read from a Caliper wrapper on your server (for example Quill's `/__caliper/timings/:id`). They're printed in the terminal only, not in the HTML report yet.
+Server-side timings from marked runs, read from a Caliper wrapper on your server: [`caliper-timings`](../timings/README.md), or anything that implements its [protocol](../timings/SPEC.md). They're printed in the terminal only, not in the HTML report yet.
 
 ```sh
 CALIPER_TOKEN=… caliper audit http://localhost:5173/post/1 --measure "^generate$" --output textarea \
@@ -130,33 +130,66 @@ After the timed runs, Caliper builds a match key from the AI request each run pi
   ```txt
   Inside the server (from 3 of 3 marked runs) — ms after the request arrived, status 200
       marked visit                   1     2     3
-      database query started         1    31    11   min 1 · median 11 · max 31 ms
-      database query done           42    42    82   min 42 · median 42 · max 82 ms
-      model call sent               42    42    82   min 42 · median 42 · max 82 ms
-      model: first chunk           344   343   382   min 343 · median 344 · max 382 ms   (at the server, not the browser)
+      postgresStart                  1    31    10   min 1 · median 10 · max 31 ms
+      postgresEnd                   42    42    81   min 42 · median 42 · max 81 ms
+      model call sent               42    42    81   min 42 · median 42 · max 81 ms
+      model: first chunk           343   344   382   min 343 · median 344 · max 382 ms   (at the server, not the browser)
     spans
-      database wait                 41    11    71   min 11 · median 41 · max 71 ms   (query start → done)
-      model: sent → first chunk    302   301   300   min 300 · median 301 · max 302 ms
+      postgres                      41    11    71   min 11 · median 41 · max 71 ms   (postgresStart → postgresEnd)
+      model: sent → first chunk    301   302   301   min 301 · median 301 · max 302 ms
   ```
 
-  With one successful visit (for example `--server-runs 1`) there's no column row and no min · median · max, only the values. A mark or span that a successful visit didn't record shows `–` in its column, and min · median · max cover only the visits that recorded it (none with fewer than two). This one is from a fixture record with `"runtime": "workers"`:
+  With one successful visit (for example `--server-runs 1`) there's no column row and no min · median · max, only the values. A mark or span that a successful visit didn't record shows `–` in its column, and min · median · max cover only the visits that recorded it (none with fewer than two).
+
+  **Marks and spans follow the [protocol](../timings/SPEC.md#marks).** Every recorded mark is shown under its own name, in the order the marks happened. The exceptions are `modelCallSent` and `firstChunk`, which are reserved and labelled. Spans:
+  - each `<name>Start` / `<name>End` pair the app recorded is a span called `<name>`;
+  - `modelCallSent` → `firstChunk` is "model: sent → first chunk".
+
+  When a pair is missing one of its marks, or its End is before its Start, there's no span, and a line says why. Caliper never makes a span between unrelated marks. This one is from a fixture record with app-chosen names, made up for the test, that also reports one problem:
 
   ```txt
   Inside the server (from 1 of 1 marked run) — ms after the request arrived, status 200
-      database query started         0 ms
-      database query done           41 ms
-      model call sent               41 ms
-      model: first chunk           342 ms   (at the server, not the browser)
+      dbStart                        1 ms
+      dbEnd                         42 ms
+      vectorSearchStart             42 ms
+      vectorSearchEnd               58 ms
+      cacheStart                    58 ms
+      warmupEnd                     58 ms
+      lockEnd                       58 ms
+      lockStart                     64 ms
+      model call sent               64 ms
+      model: first chunk           365 ms   (at the server, not the browser)
     spans
-      database wait                 41 ms   (query start → done)
+      db                            41 ms   (dbStart → dbEnd)
+      vectorSearch                  16 ms   (vectorSearchStart → vectorSearchEnd)
       model: sent → first chunk    301 ms
-      Workers time waits only — computation between steps isn't measured.
+      no cache span: cacheEnd wasn't recorded
+      no warmup span: warmupStart wasn't recorded
+      no lock span: lockEnd (58 ms) is before lockStart (64 ms)
+    problems reported by the server
+      mark name "db-start" rejected — use a letter, then up to 63 letters, digits or _ (e.g. dbStart)
   ```
 
-  The last line appears only when the record says `"runtime": "workers"`. Without that field, or with any other value, there's no note: Caliper doesn't guess where the server ran. Each mark is shown as the server recorded it, in ms after the request reached the route. A mark that isn't in the record isn't shown, and a span is shown only when both of its marks are there. There's no span between the query and the model call: that's computation, which the Workers clock doesn't measure. Marks without a known label are shown under their own name. A `404` prints `Server timings ? — token OK and wrapper present, but no record for run <id>.`; any other status, a record for another run id, or a mark that isn't a number prints `?` with the reason, and that visit is left out.
+  And this one from a fixture record with Quill's names and `"runtime": "workers"`:
+
+  ```txt
+  Inside the server (from 1 of 1 marked run) — ms after the request arrived, status 200
+      postgresStart                  2 ms
+      postgresEnd                   43 ms
+      model call sent               43 ms
+      model: first chunk           344 ms   (at the server, not the browser)
+    spans
+      postgres                      41 ms   (postgresStart → postgresEnd)
+      model: sent → first chunk    301 ms
+      Workers time waits only — a span with only computation inside (no I/O) can read 0 ms.
+  ```
+
+  With several visits there's one "no span" line per pair. It says how many visits had no span and which ones when not all, then the reason once if it's the same in each, otherwise each visit's values or reason (`no lock span in 2 of 2 visits: lockEnd is before lockStart (visit 1: lockEnd 58 ms, lockStart 63 ms · visit 2: lockEnd 59 ms, lockStart 64 ms)`).
+
+  **Problems the server reports.** A record's `problems` (for example a mark name the wrapper skipped) are printed last, under "problems reported by the server". Each distinct one is printed once, with the visits that reported it when there are several (`(2 of 3 visits: 1, 3)`). They're printed as the server wrote them, with control characters escaped and anything past 200 characters cut. A `problems` that isn't a list of strings makes that visit's record unusable, with the reason. The Workers note appears only when the record says `"runtime": "workers"`. Without that field, or with any other value, there's no note: Caliper doesn't guess where the server ran. Each mark is shown as the server recorded it, in ms after the request reached the route. A mark that isn't in the record isn't shown. A `404` prints `Server timings ? — token OK and wrapper present, but no record for run <id>.`; any other status, a record for another run id, or a mark that isn't a number prints `?` with the reason, and that visit is left out.
 - **Their timing isn't reported.** Marked visits aren't timed runs and are left out of the medians, because they run with request interception on, which Playwright documents as turning off the HTTP cache.
 - **Requests made during page load are never stamped or counted.** Interception starts just before the click and ends with the run.
-- **Tested** against local fixtures only (including a fake wrapper that answers like Quill's, in the same order), in click runs and chat-style runs, with and without `--request`. Several visits are tested in click runs: all succeed, one of three fails, all fail, one visit, and one visit's record missing a mark. It hasn't been tested on a real server, on a cross-origin API behind a CORS preflight, or together with `--stop`, `--double` or `--canary`. The result isn't in the HTML report yet.
+- **Tested** against local fixtures only (including a fake wrapper that answers like Quill's, in the same order), in click runs and chat-style runs, with and without `--request`. Several visits are tested in click runs: all succeed, one of three fails, all fail, one visit, and one visit's record missing a mark. Span pairing is tested with Quill's `postgresStart`/`postgresEnd` (shown as `postgres`), with app-chosen pairs, and with a Start without its End, an End without its Start, and a reversed pair. It hasn't been tested on a real server, on a cross-origin API behind a CORS preflight, or together with `--stop`, `--double` or `--canary`. The result isn't in the HTML report yet.
 
 ## What gets measured
 
@@ -315,6 +348,7 @@ An allowed domain that anyone can make send a request (an image proxy, an open r
 ```sh
 npm run test:csp     # CSP parser unit tests (Node 22.18+)
 npm run test:loadhints  # things-to-check lookup unit tests, from literal error strings (Node 22.18+)
+npm run test:serverblock  # "Inside the server" block unit tests on fixed records: spans, no-span lines, problems (Node 22.18+)
 npm run test:canary  # builds, then runs the canary check against a local fixture with and without CSP
 npm run test:nostore # builds, then checks streams that end ERR_ABORTED after their full body (click and chat)
 npm run test:chat    # builds, then times a chat page with a "Thinking…" placeholder

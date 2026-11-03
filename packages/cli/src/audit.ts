@@ -7,6 +7,7 @@ import { launchChromium } from "./browser.js";
 import { combineImageRules, describeRule, imageRule, splitPolicies, type ImageRule } from "./csp.js";
 import { CliError, messageOf, PageLoadError, UnidentifiedRequestError } from "./errors.js";
 import { loadFailureHints } from "./loadhints.js";
+import { formatServerBlock, parseServerRecord, plural, type ServerRecord } from "./serverblock.js";
 import { renderReport, type ReportReply } from "./report.js";
 import type {
   Breakdown,
@@ -542,20 +543,6 @@ function buildKey(picks: { run: number; method: string; url: URL }[]): MatchKey 
 // a wrapper that checks the bearer first answers 401 or, with the token right, 400.
 const PRECHECK_ID = "caliper.precheck";
 
-// Labels for the marks a Caliper wrapper records (Quill's TimingStore), in the order they happen.
-const SERVER_MARKS: Record<string, string> = {
-  postgresStart: "database query started",
-  postgresEnd: "database query done",
-  modelCallSent: "model call sent",
-  firstChunk: "model: first chunk",
-};
-// Waits between two recorded marks, shown only when both are there. The step between the query
-// and the model call is computation, which the Workers clock doesn't measure, so it isn't one.
-const SERVER_WAITS = [
-  { label: "database wait", from: "postgresStart", to: "postgresEnd", note: "query start → done" },
-  { label: "model: sent → first chunk", from: "modelCallSent", to: "firstChunk" },
-];
-
 // GET <origin>/__caliper/timings/<id> with the token as bearer. Redirects aren't followed, so the
 // token can't be carried anywhere else.
 function askWrapper(origin: string, token: string, id: string, timeout: number): Promise<globalThis.Response> {
@@ -570,74 +557,6 @@ function askWrapper(origin: string, token: string, id: string, timeout: number):
 function fetchError(err: unknown): string {
   const cause = (err as { cause?: { code?: string; message?: string } }).cause;
   return cause?.code ?? cause?.message ?? messageOf(err);
-}
-
-/** One run's record from the wrapper: its marks (ms after the request reached the route). */
-interface ServerRecord {
-  status: number | null;
-  runtime: unknown;
-  at: Map<string, number>;
-}
-
-// The wrapper's record for one run, or why it can't be used: not the expected shape, another
-// run's record, or a mark that isn't a number.
-function parseServerRecord(record: unknown, runId: string): ServerRecord | string {
-  const r = record as { id?: unknown; status?: unknown; runtime?: unknown; marks?: unknown } | null;
-  if (typeof r !== "object" || r === null || typeof r.marks !== "object" || r.marks === null) {
-    return `the record for run ${runId} has no marks object.`;
-  }
-  if (r.id !== runId) return `the record fetched for run ${runId} is for run ${JSON.stringify(r.id)}.`;
-  const marks = Object.entries(r.marks as Record<string, unknown>);
-  const bad = marks.find(([, v]) => typeof v !== "number" || !Number.isFinite(v));
-  if (bad) return `the record for run ${runId} has a mark that isn't a number: ${bad[0]} = ${JSON.stringify(bad[1])}.`;
-  return { status: typeof r.status === "number" ? r.status : null, runtime: r.runtime, at: new Map(marks as [string, number][]) };
-}
-
-const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
-
-// The "Inside the server" block from the k visits that succeeded out of n: every recorded mark
-// as recorded, then the waits, each computed inside a visit from its own two marks. With one
-// visit, its values; with more, one column per visit ("–" where it didn't record that mark or
-// span), then min · median · max over the visits that did (only with two or more). Medians of
-// marks are never subtracted from each other. The Workers note when a record says runtime
-// "workers"; Caliper doesn't guess the server's runtime.
-function formatServerBlock(visits: { visit: number; record: ServerRecord }[], n: number): string {
-  const k = visits.length;
-  const statuses = visits.map((v) => v.record.status);
-  const status =
-    statuses.every((x) => x === null) ? ""
-    : statuses.every((x) => x === statuses[0]) ? `, status ${statuses[0]}`
-    : `, status per visit: ${statuses.map((x) => x ?? "?").join(", ")}`;
-
-  const row = (label: string, values: (number | null)[], note?: string) => {
-    const tail = note ? `   (${note})` : "";
-    if (k === 1) return `    ${label.padEnd(26)}${String(ms(values[0]!)).padStart(6)} ms${tail}`;
-    const cells = values.map((v) => (v === null ? "–" : String(ms(v))).padStart(6)).join("");
-    const got = values.filter((v): v is number => v !== null);
-    const stats = got.length > 1 ? `   min ${ms(Math.min(...got))} · median ${median(got)} · max ${ms(Math.max(...got))}` : "";
-    return `    ${label.padEnd(26)}${cells}${stats} ms${tail}`;
-  };
-  const markValues = (name: string) => visits.map((v) => v.record.at.get(name) ?? null);
-  const recorded = new Set(visits.flatMap((v) => [...v.record.at.keys()]));
-  const known = Object.keys(SERVER_MARKS).filter((name) => recorded.has(name));
-  // Marks Caliper has no label for are shown under their own name, in the order they happened
-  // (by their median across visits).
-  const middle = (name: string) => median(markValues(name).filter((v): v is number => v !== null))!;
-  const other = [...recorded].filter((name) => !(name in SERVER_MARKS)).sort((a, b) => middle(a) - middle(b));
-  const waits = SERVER_WAITS.map((w) => ({
-    ...w,
-    values: visits.map(({ record: { at } }) => (at.has(w.from) && at.has(w.to) ? at.get(w.to)! - at.get(w.from)! : null)),
-  })).filter((w) => w.values.some((v) => v !== null));
-
-  return [
-    `Inside the server (from ${k} of ${plural(n, "marked run")}) — ms after the request arrived${status}`,
-    ...(k > 1 ? [`    ${"marked visit".padEnd(26)}${visits.map((v) => String(v.visit).padStart(6)).join("")}`] : []),
-    ...(recorded.size === 0 ? ["    (no marks recorded)"] : []),
-    ...known.map((name) => row(SERVER_MARKS[name]!, markValues(name), name === "firstChunk" ? "at the server, not the browser" : undefined)),
-    ...other.map((name) => row(name, markValues(name))),
-    ...(waits.length ? ["  spans", ...waits.map((w) => row(w.label, w.values, w.note))] : []),
-    ...(visits.some((v) => v.record.runtime === "workers") ? ["    Workers time waits only — computation between steps isn't measured."] : []),
-  ].join("\n");
 }
 
 // The marked visits (--server-timings): --server-runs extra runs, each on a fresh page whose

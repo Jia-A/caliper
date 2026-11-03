@@ -22,8 +22,10 @@
 // Step 2, against the fixture server's fake wrapper (it checks in the same order as Quill's):
 // before the marked visit a token pre-check asks for a malformed id, so it can never reach a
 // record: 400 goes ahead, 401 / 404 / anything else skip the visit with the reason. After a
-// stamped run Caliper fetches the record and prints each recorded mark, two waits when both of
-// their marks are there, and the Workers note only when the record says runtime "workers";
+// stamped run Caliper fetches the record and prints each recorded mark in the order they
+// happened, a span per <name>Start / <name>End pair when both are there in that order (else a
+// line saying why: case s), "model: sent → first chunk", and the Workers note only when the
+// record says runtime "workers"; Quill's postgresStart/postgresEnd show as "postgres";
 // nothing that wasn't recorded (partial record),
 // and "?" for a missing record. The user-timing summary never includes these numbers.
 // Several marked visits (--server-runs <n>, default 3, 1–10): before any run one line says how
@@ -46,7 +48,7 @@ import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { startFixtureServer } from "./fixtures/server.mjs";
+import { GENERIC_PROBLEM, startFixtureServer } from "./fixtures/server.mjs";
 
 const execFileAsync = promisify(execFile);
 const cli = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
@@ -55,8 +57,12 @@ const TOKEN = `caliper-test-${randomBytes(8).toString("hex")}`;
 const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const ONE_RUN = " (key from 1 run — changing path parts can't be detected)";
 const RUN_ID = /^[A-Za-z0-9_-]{1,64}$/; // the fake wrapper's (and Quill's) valid run ids
-const LABELS = { postgresStart: "database query started", postgresEnd: "database query done", modelCallSent: "model call sent", firstChunk: "model: first chunk" };
-const NOTE = "    Workers time waits only — computation between steps isn't measured.";
+// SPEC v1: modelCallSent and firstChunk are reserved and labelled; every other mark is shown
+// under its own name, and each <name>Start / <name>End pair is a span called <name>.
+const RESERVED = { modelCallSent: "model call sent", firstChunk: "model: first chunk" };
+const markLabel = (name) => RESERVED[name] ?? name;
+const PAIR = /^([A-Za-z][A-Za-z0-9_]*)(Start|End)$/;
+const NOTE = "    Workers time waits only — a span with only computation inside (no I/O) can read 0 ms.";
 
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const timedRuns = (stdout) => (stdout.match(/^run \d.*\s\d+ ms$/gm) ?? []).length;
@@ -66,6 +72,17 @@ const median = (values) => {
   const mid = Math.floor(s.length / 2);
   return Math.round(s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2);
 };
+
+// The span names in these records: every <name> with a <name>Start or <name>End mark.
+const spanNames = (records) => [...new Set(records.flatMap((r) => Object.keys(r.marks).map((k) => PAIR.exec(k)?.[1]).filter(Boolean)))];
+// One record's <name> span, or why there isn't one (the CLI's wording).
+function spanOf(record, name) {
+  const [s, e] = [record.marks[`${name}Start`], record.marks[`${name}End`]];
+  if (s === undefined) return { why: `${name}Start wasn't recorded` };
+  if (e === undefined) return { why: `${name}End wasn't recorded` };
+  if (e < s) return { why: `${name}End (${e} ms) is before ${name}Start (${s} ms)` };
+  return { value: e - s };
+}
 
 // Runs the CLI; never throws. Returns { code, stdout, stderr }.
 async function caliper(url, args, env) {
@@ -136,20 +153,31 @@ function checkBlock({ label, out }, record) {
   const text = out.stdout;
   const header = `Inside the server (from 1 of 1 marked run) — ms after the request arrived, status ${record.status}`;
   check(text.split("\n").includes(header), `(${label}) prints the block header (want: ${header})`, out);
-  for (const [name, wording] of Object.entries(LABELS)) {
-    const v = record.marks[name];
-    const line = new RegExp(`^    ${esc(wording)}\\s+(\\d+) ms(   \\(at the server, not the browser\\))?$`, "m").exec(text);
-    if (v === undefined) check(!line, `(${label}) no "${wording}" line: ${name} wasn't recorded`, out);
-    else check(!!line && Number(line[1]) === v, `(${label}) "${wording}" is the recorded ${v} ms (got ${line?.[1] ?? "nothing"})`, out);
+  const lines = text.split("\n");
+  const at = (re) => lines.findIndex((l) => re.test(l));
+  // Every recorded mark, as recorded, in the order the marks happened (record order on ties).
+  const order = Object.entries(record.marks).sort(([, a], [, b]) => a - b);
+  for (const [name, v] of order) {
+    const line = new RegExp(`^    ${esc(markLabel(name))}\\s+(\\d+) ms(   \\(at the server, not the browser\\))?$`, "m").exec(text);
+    check(!!line && Number(line[1]) === v, `(${label}) "${markLabel(name)}" is the recorded ${v} ms (got ${line?.[1] ?? "nothing"})`, out);
   }
-  const span = (wording, from, to) => {
-    const m = record.marks;
-    const line = new RegExp(`^    ${esc(wording)}\\s+(\\d+) ms`, "m").exec(text);
-    if (m[from] === undefined || m[to] === undefined) check(!line, `(${label}) no "${wording}": ${m[from] === undefined ? from : to} wasn't recorded`, out);
-    else check(!!line && Number(line[1]) === m[to] - m[from], `(${label}) "${wording}" is ${to} − ${from} = ${m[to] - m[from]} ms (got ${line?.[1] ?? "nothing"})`, out);
-  };
-  span("database wait", "postgresStart", "postgresEnd");
-  span("model: sent → first chunk", "modelCallSent", "firstChunk");
+  const rows = order.map(([name]) => at(new RegExp(`^    ${esc(markLabel(name))}\\s+\\d+ ms`)));
+  check(rows.every((r, i) => r !== -1 && (i === 0 || r > rows[i - 1])), `(${label}) marks are printed in the order they happened (${order.map(([n]) => n).join(", ")})`, out);
+  for (const [name, wording] of Object.entries(RESERVED)) {
+    if (record.marks[name] === undefined) check(at(new RegExp(`^    ${esc(wording)}\\s`)) === -1, `(${label}) no "${wording}" line: ${name} wasn't recorded`, out);
+  }
+  // Each <name>Start / <name>End pair: a span row, or a line saying why there's none.
+  for (const name of spanNames([record])) {
+    const got = spanOf(record, name);
+    const row = new RegExp(`^    ${esc(name)}\\s+(\\d+) ms   \\(${name}Start → ${name}End\\)$`, "m").exec(text);
+    const why = `    no ${name} span: ${got.why}`;
+    if (got.value !== undefined) check(!!row && Number(row[1]) === got.value, `(${label}) span "${name}" is ${name}End − ${name}Start = ${got.value} ms (got ${row?.[1] ?? "nothing"})`, out);
+    else check(!row && lines.includes(why), `(${label}) no "${name}" span, and the block says why (want: ${why.trim()})`, out);
+  }
+  const m = record.marks;
+  const model = /^    model: sent → first chunk\s+(\d+) ms$/m.exec(text);
+  if (m.modelCallSent === undefined || m.firstChunk === undefined) check(!model, `(${label}) no "model: sent → first chunk": ${m.modelCallSent === undefined ? "modelCallSent" : "firstChunk"} wasn't recorded`, out);
+  else check(!!model && Number(model[1]) === m.firstChunk - m.modelCallSent, `(${label}) "model: sent → first chunk" is firstChunk − modelCallSent = ${m.firstChunk - m.modelCallSent} ms (got ${model?.[1] ?? "nothing"})`, out);
   check(!/^    \S.*(done|end) → model/m.test(text), `(${label}) no span for the computation between the query and the model call`, out);
   if (record.runtime === "workers") check(text.split("\n").includes(NOTE), `(${label}) the Workers note is under the block (runtime "workers")`, out);
   else check(!text.includes(NOTE.trim()), `(${label}) no Workers note: the record's runtime is ${JSON.stringify(record.runtime ?? null)}`, out);
@@ -234,10 +262,14 @@ function checkVisits(c, n, ok) {
       check(JSON.stringify(row?.stats) === JSON.stringify(stats), `(${label}) "${wording}" is min ${stats.min} · median ${stats.median} · max ${stats.max} (got ${JSON.stringify(row?.stats ?? null)})`, out);
     }
   };
-  for (const [name, wording] of Object.entries(LABELS)) checkRow(wording, records.map((r) => r.marks[name] ?? null));
-  const span = (r, from, to) => (r.marks[from] === undefined || r.marks[to] === undefined ? null : r.marks[to] - r.marks[from]);
-  checkRow("database wait", records.map((r) => span(r, "postgresStart", "postgresEnd")));
-  checkRow("model: sent → first chunk", records.map((r) => span(r, "modelCallSent", "firstChunk")));
+  for (const name of new Set(records.flatMap((r) => Object.keys(r.marks)))) checkRow(markLabel(name), records.map((r) => r.marks[name] ?? null));
+  for (const name of spanNames(records)) {
+    const values = records.map((r) => spanOf(r, name).value ?? null);
+    if (values.some((x) => x !== null)) checkRow(name, values);
+    else check(!statsRow(text, name), `(${label}) no "${name}" span row: no visit has both marks in order`, out);
+  }
+  const model = (r) => (r.marks.modelCallSent === undefined || r.marks.firstChunk === undefined ? null : r.marks.firstChunk - r.marks.modelCallSent);
+  checkRow("model: sent → first chunk", records.map(model));
   if (k === 1) check(!/median/.test(text.slice(text.indexOf("Inside the server"))), `(${label}) the word "median" isn't in the block with 1 visit`, out);
 }
 
@@ -360,6 +392,37 @@ try {
   const o = await runCase("o, runtime node", "o");
   checkStamped(o, /^\/marked\/reply\?/, `POST ${origin}/marked/reply`);
 
+  // Quill's record today (postgresStart/postgresEnd) still shows, as the span "postgres".
+  check(/^    postgres +\d+ ms   \(postgresStart → postgresEnd\)$/m.test(o.out.stdout) && !/database (wait|query)/.test(o.out.stdout),
+    `(o) Quill's postgresStart/postgresEnd show as the span "postgres"`, o.out);
+
+  // (s) App-chosen names: every <name>Start / <name>End pair is a span; a Start without its
+  // End, an End without its Start, or an End before its Start is no span, with the reason.
+  const s = await runCase("s, app-chosen span names", "s");
+  checkStamped(s, /^\/marked\/reply\?/, `POST ${origin}/marked/reply`);
+  const sRecord = server.caliper.records.get(s.stamped[0]?.run);
+  check(JSON.stringify(Object.keys(sRecord?.marks ?? {})) === JSON.stringify(["dbStart", "dbEnd", "vectorSearchStart", "vectorSearchEnd", "cacheStart", "warmupEnd", "lockEnd", "lockStart", "modelCallSent", "firstChunk"]),
+    `(s) the fixture recorded the generic marks (got ${Object.keys(sRecord?.marks ?? {}).join(", ")})`, s.out);
+  check(!/^    postgres/m.test(s.out.stdout), "(s) no postgres span when the record has none", s.out);
+  const sLines = s.out.stdout.split("\n");
+  const sAt = sLines.indexOf("  problems reported by the server");
+  check(sAt !== -1 && sLines[sAt + 1] === `    ${GENERIC_PROBLEM}`, `(s) prints the problem the record reports, under its heading`, s.out);
+  // (s2) Two visits: the spans per visit, and one "no span" line per broken pair, for both
+  // visits: the reason once when it's the same, else each visit's values.
+  const s2 = await runCase("s2, app-chosen names, 2 visits", "s", { serverRuns: 2 });
+  checkVisits(s2, 2, [1, 2]);
+  const s2Lines = s2.out.stdout.split("\n");
+  const s2Records = s2.stamped.map((st) => server.caliper.records.get(st.run));
+  if (s2Records.length === 2 && s2Records.every(Boolean)) {
+    for (const name of ["cache", "warmup", "lock"]) {
+      const [a, b] = s2Records.map((r) => spanOf(r, name).why);
+      const values = s2Records.map((r, i) => `visit ${i + 1}: ${name}End ${r.marks[`${name}End`]} ms, ${name}Start ${r.marks[`${name}Start`]} ms`).join(" · ");
+      const want = `    no ${name} span in 2 of 2 visits: ${a === b ? a : `${name}End is before ${name}Start (${values})`}`;
+      check(s2Lines.includes(want) && s2Lines.filter((l) => l.startsWith(`    no ${name} span`)).length === 1, `(s2) one line for ${name}: ${want.trim()}`, s2.out);
+    }
+  } else check(false, `(s2) the fake wrapper recorded both visits`, s2.out);
+  check(s2Lines.includes(`    ${GENERIC_PROBLEM}   (2 of 2 visits)`), `(s2) the problem is printed once, for both visits`, s2.out);
+
   // Token OK and wrapper there, but nothing recorded for the run.
   const n = await runCase("n, no record", "n");
   checkPrecheck(n);
@@ -460,9 +523,9 @@ try {
   const starts = mRecords.map((r) => r.marks.postgresStart);
   const ends = mRecords.map((r) => r.marks.postgresEnd);
   const spans = mRecords.map((r) => r.marks.postgresEnd - r.marks.postgresStart);
-  const dbRow = statsRow(m.out.stdout, "database wait");
+  const dbRow = statsRow(m.out.stdout, "postgres");
   check(median(spans) !== median(ends) - median(starts), `(m) the fixture tells the two apart (median span ${median(spans)}, difference of medians ${median(ends) - median(starts)})`, m.out);
-  check(dbRow?.median === median(spans), `(m) "database wait" median is the median of the per-visit spans, ${median(spans)} (got ${dbRow?.median ?? "nothing"})`, m.out);
+  check(dbRow?.median === median(spans), `(m) "postgres" median is the median of the per-visit spans, ${median(spans)} (got ${dbRow?.median ?? "nothing"})`, m.out);
 
   // (v) One of three visits fails: its own "?" line, and it's left out of the block.
   const v = await runCase("v, visit 2 of 3 fails", "v", { serverRuns: 3 });

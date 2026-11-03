@@ -1,0 +1,52 @@
+{
+  "name": "caliper-timings",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Server side of Caliper's server timings: records when a marked request reaches each step, for caliper-ai to read back.",
+  "keywords": [
+    "caliper",
+    "ai",
+    "llm",
+    "performance",
+    "latency",
+    "server-timing"
+  ],
+  "author": "Jiya Agrawal",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Jia-A/caliper.git",
+    "directory": "packages/timings"
+  },
+  "homepage": "https://github.com/Jia-A/caliper#readme",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./node": {
+      "types": "./dist/node.d.ts",
+      "default": "./dist/node.js"
+    }
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "SPEC.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --test-timeout=20000 test/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "typescript": "^7.0.2"
+  }
+}

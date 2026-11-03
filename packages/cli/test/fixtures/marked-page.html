@@ -26,7 +26,9 @@
        m  marks vary per load:    /marked/reply, with the wait before the query and the query's
                                   length set by LOAD % 3 (pre 0/30/10 ms, query 40/10/70 ms), so
                                   the median span differs from the difference of the medians
-       q  one record partial:     /marked/reply, recorded without firstChunk on load --runs + 2 only
+       s  app-chosen names:       /marked/reply, recorded with dbStart/dbEnd, vectorSearchStart/End
+                                  and three marks that pair with nothing valid (?generic=1)
+       q  one record partial:    /marked/reply, recorded without firstChunk on load --runs + 2 only
        v  one visit fails:        /marked/reply, but /marked/other/reply on load --runs + 2 (the
                                   second marked visit), so that visit matches nothing
      #msg is there for chat-style runs (--input/--prompt); the page doesn't read it. -->
@@ -72,6 +74,7 @@
     if (kase === "n") extra = "&norecord=1"; // the server records nothing
     if (kase === "w") extra = "&runtime=workers"; // the record says it ran on Workers
     if (kase === "o") extra = "&runtime=node"; // the record names another runtime
+    if (kase === "s") extra = "&generic=1"; // the record uses app-chosen Start/End names
     if (kase === "m") extra = `&pre=${[0, 30, 10][LOAD % 3]}&db=${[40, 10, 70][LOAD % 3]}`;
     if (kase === "q" && LOAD === runs + 2) extra = "&partial=1";
     if (kase === "v" && LOAD === runs + 2) path = "/marked/other/reply";

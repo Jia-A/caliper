@@ -30,6 +30,10 @@
 //   firstChunk. ?partial=1 leaves out firstChunk; ?norecord=1 records nothing; ?runtime=<name>
 //   adds runtime: <name> (left out otherwise, as in Quill's record today); ?pre=<ms> waits
 //   before postgresStart and ?db=<ms> sets the stand-in query's length (default 40).
+//   ?generic=1 records app-chosen names instead (SPEC v1): dbStart/dbEnd around the query,
+//   vectorSearchStart/End around 15 ms, then cacheStart with no End, warmupEnd with no Start,
+//   and lockEnd 5 ms before lockStart (reversed), then modelCallSent and firstChunk, and one
+//   problem (GENERIC_PROBLEM) as a wrapper reports a mark name it skipped.
 // Run on its own with `node test/fixtures/server.mjs [port]`, or import startFixtureServer().
 
 import { readFileSync } from "node:fs";
@@ -97,6 +101,7 @@ const VARIANTS = {
 
 const RUN_ID = /^[A-Za-z0-9_-]{1,64}$/; // Quill's isValidRunId
 const DB_MS = 40; // the stand-in database query before every /marked reply
+export const GENERIC_PROBLEM = 'mark name "db-start" rejected — use a letter, then up to 63 letters, digits or _ (e.g. dbStart)';
 
 // The fake wrapper's timings endpoint, checking in the same order as Quill's.
 function caliperRoute(req, res, url, caliper) {
@@ -152,11 +157,23 @@ function markedRoute(req, res, url, loads, seen, caliper) {
     const mark = (name) => (record.marks[name] = Date.now() - start);
     const pre = Number(url.searchParams.get("pre") ?? 0);
     const db = Number(url.searchParams.get("db") ?? DB_MS);
+    const generic = url.searchParams.has("generic");
     sleep(pre).then(() => {
-      mark("postgresStart");
+      mark(generic ? "dbStart" : "postgresStart");
       return sleep(db);
-    }).then(() => {
-      mark("postgresEnd");
+    }).then(async () => {
+      mark(generic ? "dbEnd" : "postgresEnd");
+      if (generic) {
+        mark("vectorSearchStart");
+        await sleep(15);
+        mark("vectorSearchEnd");
+        mark("cacheStart");
+        mark("warmupEnd");
+        mark("lockEnd");
+        await sleep(5);
+        mark("lockStart");
+        record.problems = [GENERIC_PROBLEM];
+      }
       mark("modelCallSent");
       record.status = 200;
       streamReply(res, "no-cache", () => {
