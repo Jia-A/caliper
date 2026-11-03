@@ -6,12 +6,17 @@
 //                            after the headers, the rest CHUNK_GAP_MS apart
 //   GET  /__example/stamps   this server's own count of /api/generate requests and the
 //                            x-caliper-run id each one carried (the token is never kept or shown)
+//   GET  /__caliper/timings/:id   caliper-timings' endpoint; 404 like any unknown route when
+//                            CALIPER_TOKEN is unset
 // Each /api/generate request also prints one line. Listens on 127.0.0.1 only.
-// Not wired to caliper-timings yet.
-// Run with `node examples/node-memory/server.mjs` (PORT=8790 by default).
+// Marked /api/generate requests record dbStart/dbEnd around the database wait, modelCallSent
+// just before the headers, and firstChunk at the first write (caliper-timings' res.write hook).
+// Run with `CALIPER_TOKEN=… node examples/node-memory/server.mjs` (PORT=8790 by default).
 
 import { createServer } from "node:http";
 import { setTimeout as sleep } from "node:timers/promises";
+// The adapter's source, by path: caliper-timings is private and not installed here.
+import { createTimings, MemoryStore } from "../../packages/timings/src/node.ts";
 
 const HOST = "127.0.0.1";
 const DB_MS = 300;
@@ -24,6 +29,8 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) {
   console.error(`PORT must be a whole number from 1 to 65535, got "${process.env.PORT}".`);
   process.exit(1);
 }
+
+const timings = createTimings({ token: process.env.CALIPER_TOKEN, store: new MemoryStore() });
 
 const PAGE = `<!doctype html>
 <html lang="en">
@@ -73,8 +80,13 @@ function count(req) {
 }
 
 async function generate(req, res) {
+  const run = await timings.start(req, res); // null unless this request is marked
+  count(req);
   req.resume(); // the body isn't used
+  run?.mark("dbStart");
   await sleep(DB_MS); // stand-in database
+  run?.mark("dbEnd");
+  run?.mark("modelCallSent");
   res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
   res.flushHeaders();
   for (let i = 1; i <= CHUNKS; i++) {
@@ -85,7 +97,8 @@ async function generate(req, res) {
   res.end();
 }
 
-const server = createServer((req, res) => {
+const server = createServer(async (req, res) => {
+  if (await timings.handle(req, res)) return;
   let path;
   try {
     path = new URL(req.url ?? "/", "http://localhost").pathname;
@@ -96,7 +109,6 @@ const server = createServer((req, res) => {
   if (req.method === "GET" && path === "/") {
     res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }).end(PAGE);
   } else if (req.method === "POST" && path === "/api/generate") {
-    count(req);
     void generate(req, res);
   } else if (req.method === "GET" && path === "/__example/stamps") {
     res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" }).end(JSON.stringify(stamps));
@@ -105,7 +117,9 @@ const server = createServer((req, res) => {
   }
 });
 
-server.listen(port, HOST, () => console.log(`node-memory example on http://${HOST}:${port}/`));
+server.listen(port, HOST, () =>
+  console.log(`node-memory example on http://${HOST}:${port}/ (server timings ${process.env.CALIPER_TOKEN ? "on" : "off: CALIPER_TOKEN unset"})`),
+);
 
 process.on("SIGINT", () => {
   console.log(`stamps: ${JSON.stringify(stamps)}`);
