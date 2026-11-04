@@ -12,3 +12,4 @@
 - **`caliper-timings/node`:** `createTimings({ token, store })`, with `handle(req, res)` for the timings endpoint and `start(req, res)` for a route.
 - **`SPEC.md`:** the protocol, v1, with the rule that an implementation never changes the app's response or errors, and the `problems` field.
 - **`"private": true`** until publishing is decided.
+- **Measured cost** in SPEC.md and the README: on `examples/node-memory`, marked requests median 1.2 ms slower before the first byte (20 pairs), unmarked requests median 0.0 ms against the pre-wiring server (20 pairs). Cause not measured.

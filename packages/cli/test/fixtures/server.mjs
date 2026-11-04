@@ -197,9 +197,11 @@ export function startFixtureServer(port = 0, { caliperToken = null, caliperStatu
   const loads = new Map(); // /marked page loads per test id
   const seen = new Map(); // /marked/… requests per test id
   const caliper = { token: caliperToken, status: caliperStatus, records: new Map(), asked: [], lookups: 0 };
+  const cookies = []; // every request's method, path and cookie header (null when none)
   const server = createServer((req, res) => {
     const url = new URL(req.url, "http://localhost");
     const path = url.pathname;
+    cookies.push({ method: req.method, path, cookie: req.headers.cookie ?? null });
     if (path === "/marked" || path.startsWith("/marked/")) {
       markedRoute(req, res, url, loads, seen, caliper);
       return;
@@ -245,6 +247,7 @@ export function startFixtureServer(port = 0, { caliperToken = null, caliperStatu
         // The /marked page loads and requests seen for one test id.
         marked: (id) => ({ loads: loads.get(id) ?? 0, requests: seen.get(id) ?? [] }),
         caliper, // the fake wrapper's records, ids asked for and store lookups
+        cookies, // which session cookies each request carried
       });
     });
   });

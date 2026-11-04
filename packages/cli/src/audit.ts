@@ -76,7 +76,7 @@ export interface AuditOptions {
   steps: string[];
   runs: number;
   headed: boolean;
-  auth: string;
+  auth?: string; // --auth; undefined: no saved session
   timeout: number;
   settleMs: number;
   request: string | undefined;
@@ -117,8 +117,9 @@ interface MeasureOptions {
 }
 
 export async function audit({ url, measure, output, steps, runs, headed, auth, timeout, settleMs, request, report, stop, double, canary, canaryInput, csp, chat, serverTimings }: AuditOptions): Promise<void> {
-  const authPath = resolve(auth);
-  if (!existsSync(authPath)) {
+  // --auth is optional: without it there's no saved session, never an implicit ./auth.json.
+  const authPath = auth === undefined ? undefined : resolve(auth);
+  if (authPath && !existsSync(authPath)) {
     throw new CliError(
       `No saved session at ${authPath}.\nRun: caliper login <url> --auth ${auth}`
     );
@@ -151,7 +152,8 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
   const browser = await launchChromium({ headless: !headed });
 
   try {
-    const context = await browser.newContext({ storageState: authPath });
+    if (!authPath) console.log("No --auth given: running without a saved session.");
+    const context = await browser.newContext(authPath ? { storageState: authPath } : {});
     const startedAt = new Date();
     const loaded: LoadedRun[] = [];
     const failed: number[] = []; // run numbers whose page failed to load
@@ -593,17 +595,20 @@ async function markedVisits(
   ].join("");
 
   // Token pre-check, for an id that can't exist: 400 means the wrapper is there and took the token.
+  // One "pre-check:" line either way, naming the status it got.
   const precheckUrl = `${origin}/__caliper/timings/${PRECHECK_ID}`;
   let pre: globalThis.Response;
   try {
     pre = await askWrapper(origin, token, PRECHECK_ID, options.timeout);
   } catch (err) {
-    return unknown(`token pre-check couldn't reach ${precheckUrl}: ${fetchError(err)}; no marked visit.`);
+    return unknown(`pre-check: couldn't reach ${precheckUrl}: ${fetchError(err)}; no marked visit.`);
   }
   await pre.body?.cancel();
-  if (pre.status === 401) return unknown("server rejected the token (wrong, expired or rotated); no marked visit.");
-  if (pre.status === 404) return unknown(`no Caliper wrapper at ${origin} (or CALIPER_TOKEN not set on the server); no marked visit.`);
-  if (pre.status !== 400) return unknown(`token pre-check got HTTP ${pre.status} from ${precheckUrl}; no marked visit.`);
+  const on = `on ${PRECHECK_ID}`;
+  if (pre.status === 401) return unknown(`pre-check: token rejected (401 ${on}): wrong, expired or rotated; no marked visit.`);
+  if (pre.status === 404) return unknown(`pre-check: feature off (404 ${on}): no Caliper wrapper at ${origin}, or CALIPER_TOKEN not set on the server; no marked visit.`);
+  if (pre.status !== 400) return unknown(`pre-check: got HTTP ${pre.status} ${on} from ${precheckUrl}; no marked visit.`);
+  console.log(`Server timings — pre-check: feature on, token accepted (400 ${on})`);
 
   const succeeded: { visit: number; record: ServerRecord }[] = [];
   for (let visit = 1; visit <= runs; visit++) {

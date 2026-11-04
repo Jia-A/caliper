@@ -21,10 +21,11 @@ caliper login https://your-app.example.com
 
 A browser window opens. Log in by hand, then click **Resume** in the Playwright Inspector. The session (cookies and local storage) is saved to `auth.json` in the current directory.
 
-Then audit:
+Then audit with that session (`--auth`; without it there's no saved session):
 
 ```sh
 caliper audit https://your-app.example.com/blog/your-post-id \
+  --auth auth.json \
   --step "share on socials" \
   --measure "^(re)?generate$" \
   --output textarea \
@@ -69,7 +70,7 @@ report: /path/to/caliper-report.html
 | `--step <text>` | none | A button to click before measuring. Repeat the flag for several, clicked in order. |
 | `--runs <n>` | `3` | Number of runs. |
 | `--headed` | off | Show the browser window. Useful for debugging a flow. |
-| `--auth <path>` | `auth.json` | Session saved by `caliper login`. |
+| `--auth <path>` | none | Session saved by `caliper login`. A path with no file is an error before any run. Without `--auth` there's no saved session (an `auth.json` in the current directory is not loaded), and Caliper prints `No --auth given: running without a saved session.` |
 | `--timeout <ms>` | `60000` | Limit for page loads, finding buttons, the output changing, and the AI request finishing. |
 | `--request <regex>` | auto | Use the first request whose URL matches (case-insensitive) instead of auto-detecting it. |
 | `--report [path]` | off | Write an HTML report. A bare `--report` writes `caliper-report.html` in the current directory. |
@@ -118,10 +119,12 @@ After the timed runs, Caliper builds a match key from the AI request each run pi
 - **Before any run** it prints how many times the audit will trigger the AI feature: `This audit triggers the AI feature up to 5 times for timing (2 timed + 3 marked).` It counts triggers, not requests, because the endpoint isn't known until the runs pick it. One trigger can send more than one request, and the count leaves out `--stop`, `--double` and `--canary`.
 - **Runs whose page failed to load are left out of the key**, as long as at least one run loaded. Every line about the marked visits then says so, for example `(key from 2 of 3 runs; run 2 failed to load)`. If only one run loaded, the line also adds `(key from 1 run — changing path parts can't be detected)`. If no run loaded, there's no marked visit (the audit stops at "Inconclusive — page failed to load").
 - **No marked visit, with the reason, when:** any run's AI request wasn't identified; or the runs disagree on method, origin or number of path segments (the line names each run's request).
-- **Token pre-check first, once.** Before the marked visits, Caliper asks `GET <origin>/__caliper/timings/caliper.precheck` with `Authorization: Bearer <token>`. That id is deliberately malformed (`.` isn't allowed in run ids), so the request can never reach a real record. A `400` means the wrapper is there and took the token, and the marked visits go ahead. Otherwise there's no marked visit:
-  - `401`: `Server timings ? — server rejected the token (wrong, expired or rotated); no marked visit.`
-  - `404`: `Server timings ? — no Caliper wrapper at <origin> (or CALIPER_TOKEN not set on the server); no marked visit.`
-  - anything else, or a network error: the line gives the status or the error.
+- **Token pre-check first, once.** Before the marked visits, Caliper asks `GET <origin>/__caliper/timings/caliper.precheck` with `Authorization: Bearer <token>`. That id is deliberately malformed (`.` isn't allowed in run ids), so the request can never reach a real record. One line says what it got:
+  - `400`: `Server timings — pre-check: feature on, token accepted (400 on caliper.precheck)`, and the marked visits go ahead.
+  - `401`: `Server timings ? — pre-check: token rejected (401 on caliper.precheck): wrong, expired or rotated; no marked visit.`
+  - `404`: `Server timings ? — pre-check: feature off (404 on caliper.precheck): no Caliper wrapper at <origin>, or CALIPER_TOKEN not set on the server; no marked visit.`
+  - anything else: `Server timings ? — pre-check: got HTTP <status> on caliper.precheck from <url>; no marked visit.`
+  - a network error: `Server timings ? — pre-check: couldn't reach <url>: <error>; no marked visit.` (not covered by a test yet)
   Redirects are never followed, so the token can't be carried to another origin.
 - **A marked visit fails** (`Server timings ? — marked visit <i> of <n>: …`) when its page fails to load (followed by the same [things to check](#known-limits) as a timed run, then `Rerun to try again.`), when no request matches the key, when 2 or more do (all are listed), when its AI request isn't the stamped one, or when its record can't be read (see below). Each visit is judged on its own. A failed visit is left out of the block below.
 - **Each valid visit** prints `Server timings — marked visit <i> of <n> sent x-caliper-run <id> on <request> (matched <key>)`. With `--runs 1` the line adds `(key from 1 run — changing path parts can't be detected)`.
@@ -244,6 +247,7 @@ Beyond timing, Caliper can check how the feature behaves. Each check except CSP 
 
 ```sh
 caliper audit https://your-app.example.com/blog/your-post-id \
+  --auth auth.json \
   --step "share on socials" \
   --measure "^(re)?generate$" \
   --output textarea \

@@ -11,7 +11,7 @@ const USAGE = `Usage:
   caliper audit <url> (--measure <text> | --measure-selector <css>) --output <selector>
   caliper audit <url> --input <selector> --prompt <text> --output <selector>
       [--measure <text> | --measure-selector <css>]
-      [--step <text>]... [--runs 3] [--headed] [--auth auth.json] [--timeout 60000]
+      [--step <text>]... [--runs 3] [--headed] [--auth <path>] [--timeout 60000]
       [--request <regex>] [--report [path]] [--settle-ms 2000] [--stop <text>] [--double]
       [--canary] [--canary-input <selector>] [--csp] [--server-timings <origin> [--server-runs 3]]
       Measure time from clicking the --measure button to first painted output,
@@ -19,6 +19,8 @@ const USAGE = `Usage:
       URL matches --request). --report writes an HTML timeline
       (default: ${DEFAULT_REPORT}). The answer counts as done at its last change
       once the output has been unchanged for --settle-ms.
+      --auth loads a session saved by caliper login; without it there's no saved
+      session (an auth.json in the current directory isn't loaded).
       --stop adds one extra run that clicks the Stop button mid-stream and checks
       that the output stops and the browser aborts the AI request.
       --double adds one extra run that clicks the --measure button again mid-stream
@@ -88,7 +90,7 @@ const COMMANDS = {
       step: { type: "string", multiple: true, default: [] },
       runs: { type: "string", default: "3" },
       headed: { type: "boolean", default: false },
-      auth: { type: "string", default: "auth.json" },
+      auth: { type: "string" },
       timeout: { type: "string", default: "60000" },
       "settle-ms": { type: "string", default: "2000" },
       request: { type: "string" },

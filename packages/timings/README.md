@@ -71,6 +71,15 @@ The core works in any runtime with Web Streams and `crypto.subtle`. It exports:
 
 There's no framework adapter other than Node yet.
 
+## Measured cost
+
+The rule covers status, headers, bytes and errors, not time. This is what the reference implementation (`caliper-timings/node`) measured in time, on [`examples/node-memory`](../../examples/node-memory/): a single-process `node:http` app on 127.0.0.1, Node 22.22, one macOS machine. The client is `examples/node-memory/measure.mjs`, timing on its own clock from sending the request to the first body chunk arriving, one request at a time, each on a new connection.
+
+- **Marked requests: about 1.2 ms slower before the first byte.** 20 marked and 20 unmarked requests to the same server, alternating, compared in pairs: the marked one was later by median 1.2 ms (min 0.1, max 4.1). The difference is already there when the headers arrive (paired median 1.4 ms); between headers and first chunk it's 0.1 ms. What causes it hasn't been measured.
+- **Unmarked requests: no difference measured.** 20 unmarked requests to the wired server (`CALIPER_TOKEN` set) alternated with 20 to the same app before it was wired: paired difference median 0.0 ms (min −2.3, max 5.4).
+
+That is one app, one machine and 20 pairs each. Other runtimes, frameworks, stores and loads haven't been measured.
+
 ## Tested
 
 `npm test` runs Node 22.18+ directly on the TypeScript source. It covers:

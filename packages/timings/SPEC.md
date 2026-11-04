@@ -12,6 +12,15 @@ Every failure inside the implementation is caught there and never reaches the ap
 
 A failure on Caliper's own read of the timings endpoint answers that request with 500. The app's requests are unaffected.
 
+### Measured cost
+
+The rule covers status, headers, bytes and errors, not time. This is what the reference implementation (`caliper-timings/node`) measured in time, on [`examples/node-memory`](../../examples/node-memory/): a single-process `node:http` app on 127.0.0.1, Node 22.22, one macOS machine. The client is `examples/node-memory/measure.mjs`, timing on its own clock from sending the request to the first body chunk arriving, one request at a time, each on a new connection.
+
+- **Marked requests: about 1.2 ms slower before the first byte.** 20 marked and 20 unmarked requests to the same server, alternating, compared in pairs: the marked one was later by median 1.2 ms (min 0.1, max 4.1). The difference is already there when the headers arrive (paired median 1.4 ms); between headers and first chunk it's 0.1 ms. What causes it hasn't been measured.
+- **Unmarked requests: no difference measured.** 20 unmarked requests to the wired server (`CALIPER_TOKEN` set) alternated with 20 to the same app before it was wired: paired difference median 0.0 ms (min −2.3, max 5.4).
+
+That is one app, one machine and 20 pairs each. Other runtimes, frameworks, stores and loads haven't been measured.
+
 ## Secret
 
 The server has a secret, `CALIPER_TOKEN`. Without one (unset or empty), the feature doesn't exist: nothing is recorded, and the endpoint below answers like any unknown route (404).

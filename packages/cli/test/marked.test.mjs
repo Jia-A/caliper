@@ -21,7 +21,8 @@
 // runs are never stamped, and the token is never printed.
 // Step 2, against the fixture server's fake wrapper (it checks in the same order as Quill's):
 // before the marked visit a token pre-check asks for a malformed id, so it can never reach a
-// record: 400 goes ahead, 401 / 404 / anything else skip the visit with the reason. After a
+// record: 400 goes ahead, 401 / 404 / anything else skip the visit with the reason. Either way
+// one "pre-check:" line says what it got (400: "feature on, token accepted"). After a
 // stamped run Caliper fetches the record and prints each recorded mark in the order they
 // happened, a span per <name>Start / <name>End pair when both are there in that order (else a
 // line saying why: case s), "model: sent → first chunk", and the Workers note only when the
@@ -62,6 +63,8 @@ const RUN_ID = /^[A-Za-z0-9_-]{1,64}$/; // the fake wrapper's (and Quill's) vali
 const RESERVED = { modelCallSent: "model call sent", firstChunk: "model: first chunk" };
 const markLabel = (name) => RESERVED[name] ?? name;
 const PAIR = /^([A-Za-z][A-Za-z0-9_]*)(Start|End)$/;
+const PRECHECK_LINE = /^Server timings (\? )?— pre-check: /;
+const PRECHECK_OK = "Server timings — pre-check: feature on, token accepted (400 on caliper.precheck)";
 const NOTE = "    Workers time waits only — a span with only computation inside (no I/O) can read 0 ms.";
 
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -130,14 +133,16 @@ async function runCase(label, kase, { srv = server, runs = 2, serverRuns = 1, ho
   check(out.code === 0 && timedRuns(out.stdout) === timed, `(${label}) ${timed} of the ${runs} unmarked run(s) are timed (got ${timedRuns(out.stdout)})`, out);
   check(!requests.some((r) => r.load <= runs && (r.run !== null || r.token !== null)), `(${label}) no request in the unmarked runs is stamped`, out);
   check(!`${out.stdout}${out.stderr}`.includes(TOKEN), `(${label}) the token is never printed`, out);
-  const lines = out.stdout.match(/^Server timings.*$/gm) ?? [];
+  const all = out.stdout.match(/^Server timings.*$/gm) ?? [];
+  const precheck = all.filter((l) => PRECHECK_LINE.test(l)); // the pre-check's own line(s)
+  const lines = all.filter((l) => !PRECHECK_LINE.test(l));
   // What the sent and "?" lines end with: which runs the key came from.
   const keyNote = [
     broke.length ? ` (key from ${timed} of ${runs} runs; ${broke.length === 1 ? "run" : "runs"} ${broke.join(", ")} failed to load)` : "",
     timed === 1 ? ONE_RUN : "",
   ].join("");
   return {
-    label, runs, host, out, loads, requests, stamped, lines, line: lines[0] ?? null, keyNote,
+    label, runs, host, out, loads, requests, stamped, lines, line: lines[0] ?? null, precheck, keyNote,
     asked: srv.caliper.asked.slice(asked), // ids the wrapper was asked for during this case
     lookups: srv.caliper.lookups - lookups, // store lookups during this case
   };
@@ -146,6 +151,11 @@ async function runCase(label, kase, { srv = server, runs = 2, serverRuns = 1, ho
 // The pre-check asked first, for an id the wrapper rejects before any store lookup.
 function checkPrecheck({ label, out, asked }) {
   check(asked.length > 0 && !RUN_ID.test(asked[0]), `(${label}) the token pre-check asks for a malformed id (asked: ${asked.join(", ") || "nothing"})`, out);
+}
+
+// The pre-check printed exactly one line: `want` (default: it got 400 and went ahead).
+function checkPrecheckLine({ label, out, precheck }, want = PRECHECK_OK) {
+  check(precheck.length === 1 && precheck[0] === want, `(${label}) prints the pre-check result once: ${want} (got: ${precheck.join(" | ") || "nothing"})`, out);
 }
 
 // The "Inside the server" block: the record's marks, as recorded, and only those.
@@ -188,6 +198,7 @@ function checkBlock({ label, out }, record) {
 function checkStamped(c, url, key) {
   const { label, runs, host, out, loads, stamped, line, lookups, keyNote } = c;
   checkPrecheck(c);
+  checkPrecheckLine(c);
   check(loads === runs + 1, `(${label}) one marked visit after the runs (page loads: ${loads})`, out);
   check(stamped.length === 1, `(${label}) exactly one request stamped (got ${stamped.length})`, out);
   const s = stamped[0];
@@ -206,7 +217,8 @@ function checkStamped(c, url, key) {
 }
 
 // No marked visit at all: the page loaded only for the runs, and nothing was stamped.
-function checkNoVisit({ label, runs, out, loads, stamped, lookups }) {
+function checkNoVisit({ label, runs, out, loads, stamped, lookups, asked, precheck }) {
+  if (asked.length === 0) check(precheck.length === 0, `(${label}) no pre-check, so no pre-check line (got: ${precheck.join(" | ")})`, out);
   check(loads === runs, `(${label}) no marked visit (page loads: ${loads})`, out);
   check(stamped.length === 0, `(${label}) nothing stamped (got ${stamped.length})`, out);
   check(lookups === 0 && !/^Inside the server/m.test(out.stdout), `(${label}) no record fetched or printed (lookups: ${lookups})`, out);
@@ -232,6 +244,7 @@ function checkVisits(c, n, ok) {
   const at = text.split("\n").indexOf(count);
   check(at !== -1 && at < text.indexOf("run 1"), `(${label}) prints "${count}" before any run`, out);
   checkPrecheck(c);
+  checkPrecheckLine(c);
   check(asked.filter((id) => !RUN_ID.test(id)).length === 1, `(${label}) the token pre-check runs once (asked: ${asked.join(", ")})`, out);
   check(loads === runs + n, `(${label}) ${n} marked visit(s) after the runs (page loads: ${loads})`, out);
   check(stamped.length === k && stamped.every((s) => s.token === TOKEN && new RegExp(`^${UUID}$`).test(s.run ?? "")) && new Set(stamped.map((s) => s.run)).size === k,
@@ -426,6 +439,7 @@ try {
   // Token OK and wrapper there, but nothing recorded for the run.
   const n = await runCase("n, no record", "n");
   checkPrecheck(n);
+  checkPrecheckLine(n);
   const nRun = n.stamped[0]?.run;
   check(n.stamped.length === 1 && n.lookups === 1, `(n) stamped once, looked up once (stamped ${n.stamped.length}, lookups ${n.lookups})`, n.out);
   check(n.lines[1] === `Server timings ? — marked visit 1 of 1: token OK and wrapper present, but no record for run ${nRun}.` &&
@@ -435,17 +449,17 @@ try {
   // Pre-check answers that skip the marked visit.
   const k404 = await runCase("pre-check 404", "a", { srv: noSecret });
   checkNoVisit(k404);
-  check(k404.line === `Server timings ? — no Caliper wrapper at ${noSecret.url} (or CALIPER_TOKEN not set on the server); no marked visit.`,
-    `(pre-check 404) reports no wrapper (got: ${k404.line ?? "nothing"})`, k404.out);
+  checkPrecheckLine(k404, `Server timings ? — pre-check: feature off (404 on caliper.precheck): no Caliper wrapper at ${noSecret.url}, or CALIPER_TOKEN not set on the server; no marked visit.`);
   const k401 = await runCase("pre-check 401", "a", { srv: otherSecret });
   checkNoVisit(k401);
   checkPrecheck(k401);
-  check(k401.line === "Server timings ? — server rejected the token (wrong, expired or rotated); no marked visit.",
-    `(pre-check 401) reports the rejected token (got: ${k401.line ?? "nothing"})`, k401.out);
+  checkPrecheckLine(k401, "Server timings ? — pre-check: token rejected (401 on caliper.precheck): wrong, expired or rotated; no marked visit.");
   const k500 = await runCase("pre-check 500", "a", { srv: broken });
   checkNoVisit(k500);
-  check(k500.line === `Server timings ? — token pre-check got HTTP 500 from ${broken.url}/__caliper/timings/${k500.asked[0]}; no marked visit.`,
-    `(pre-check 500) reports the status (got: ${k500.line ?? "nothing"})`, k500.out);
+  checkPrecheckLine(k500, `Server timings ? — pre-check: got HTTP 500 on caliper.precheck from ${broken.url}/__caliper/timings/${k500.asked[0]}; no marked visit.`);
+  for (const c of [k404, k401, k500]) {
+    check(c.lines.length === 0, `(${c.label}) the pre-check line is the only Server timings line (got: ${c.lines.join(" | ")})`, c.out);
+  }
   for (const c of [k401, k500]) {
     check(c.asked.length === 1, `(${c.label}) only the pre-check reached the wrapper (asked ${c.asked.length})`, c.out);
   }
@@ -541,6 +555,7 @@ try {
   // (e3) All three visits fail.
   const e3 = await runCase("e3, all 3 fail", "e", { serverRuns: 3 });
   checkPrecheck(e3);
+  checkPrecheckLine(e3);
   check(e3.loads === 5 && e3.stamped.length === 0 && e3.lookups === 0, `(e3) 3 visits, nothing stamped or looked up (loads ${e3.loads}, stamped ${e3.stamped.length}, lookups ${e3.lookups})`, e3.out);
   const want3 = [1, 2, 3].map((i) => `Server timings ? — marked visit ${i} of 3: no request matched POST ${origin}/marked/reply`);
   check(JSON.stringify(e3.lines) === JSON.stringify([...want3, "Server timings ? — 0 of 3 marked visits succeeded"]) && !/^Inside the server/m.test(e3.out.stdout),
