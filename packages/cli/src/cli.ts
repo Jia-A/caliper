@@ -43,8 +43,9 @@ const USAGE = `Usage:
       and x-caliper-token headers. Only if that request goes to exactly this origin,
       and only after one token pre-check against its /__caliper/timings endpoint;
       otherwise nothing is sent. Then each visit's server record is fetched and
-      printed with min · median · max across the visits that succeeded (terminal
-      only), apart from the user timings. The token is never printed.
+      printed with min · median · max across the visits that succeeded, apart
+      from the user timings; --report adds the same lines and numbers in their
+      own section. The token is never printed.
       --measure-selector clicks the one element a CSS selector matches instead of a
       button by name, for icon-only buttons with no text or aria-label. It must match
       exactly one element; Caliper prints it before each run. Tested in click runs and

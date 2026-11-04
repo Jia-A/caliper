@@ -25,7 +25,7 @@
 // one "pre-check:" line says what it got (400: "feature on, token accepted"). After a
 // stamped run Caliper fetches the record and prints each recorded mark in the order they
 // happened, a span per <name>Start / <name>End pair when both are there in that order (else a
-// line saying why: case s), "model: sent → first chunk", and the Workers note only when the
+// line saying why: case s), "model call → first bytes sent", and the Workers note only when the
 // record says runtime "workers"; Quill's postgresStart/postgresEnd show as "postgres";
 // nothing that wasn't recorded (partial record),
 // and "?" for a missing record. The user-timing summary never includes these numbers.
@@ -43,10 +43,17 @@
 // "page failed to load" line is followed by things to check for that error type (Playwright's
 // timeout, ERR_CONNECTION_REFUSED), then "Rerun to try again." — only that for any other type.
 // The same lines follow a marked visit's "?" line when its own page fails to load.
+// The HTML report (--report): the same block, with the pre-check and visit lines, in its own
+// section only with --server-timings (h: none without it); (m) every row has the terminal's
+// numbers and the browser tiles stay the timed runs' own; (e3) no visit succeeded: the lines,
+// no table.
 // Run with `npm run test:marked` (builds first).
 
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { GENERIC_PROBLEM, startFixtureServer } from "./fixtures/server.mjs";
@@ -60,7 +67,8 @@ const ONE_RUN = " (key from 1 run — changing path parts can't be detected)";
 const RUN_ID = /^[A-Za-z0-9_-]{1,64}$/; // the fake wrapper's (and Quill's) valid run ids
 // SPEC v1: modelCallSent and firstChunk are reserved and labelled; every other mark is shown
 // under its own name, and each <name>Start / <name>End pair is a span called <name>.
-const RESERVED = { modelCallSent: "model call sent", firstChunk: "model: first chunk" };
+const RESERVED = { modelCallSent: "model call sent", firstChunk: "server: first bytes sent" };
+const MODEL_SPAN = "model call → first bytes sent";
 const markLabel = (name) => RESERVED[name] ?? name;
 const PAIR = /^([A-Za-z][A-Za-z0-9_]*)(Start|End)$/;
 const PRECHECK_LINE = /^Server timings (\? )?— pre-check: /;
@@ -113,6 +121,30 @@ const check = (ok, what, out) => {
     if (out) logs.push(`--- ${what} ---\n${out.stdout}${out.stderr}`);
   }
 };
+
+// --report into a temp dir, one file per case; the report's server section, or null without one.
+const reportDir = mkdtempSync(join(tmpdir(), "caliper-marked-"));
+const reportArgs = (name) => ["--report", join(reportDir, `${name}.html`)];
+const readReport = (name) => {
+  try {
+    return readFileSync(join(reportDir, `${name}.html`), "utf8");
+  } catch {
+    return null;
+  }
+};
+const SERVER_SECTION = '<section aria-labelledby="server-h">';
+const serverPart = (html) => {
+  const at = html?.indexOf(SERVER_SECTION) ?? -1;
+  return at === -1 ? null : html.slice(at, html.indexOf("</section>", at));
+};
+// The server section's table rows: label (without its note) → cell texts.
+function htmlRows(html) {
+  const rows = new Map();
+  for (const [, head, body] of html.matchAll(/<tr><th scope="row">(.*?)<\/th>(.*?)<\/tr>/gs)) {
+    rows.set(head.replace(/<span.*$/s, ""), [...body.matchAll(/<td[^>]*>(.*?)<\/td>/gs)].map((m) => m[1]));
+  }
+  return rows;
+}
 
 // One case: run Caliper on /marked?case=…, then check what's common to every case. By default
 // with the token and --server-timings naming the page's own origin.
@@ -168,7 +200,7 @@ function checkBlock({ label, out }, record) {
   // Every recorded mark, as recorded, in the order the marks happened (record order on ties).
   const order = Object.entries(record.marks).sort(([, a], [, b]) => a - b);
   for (const [name, v] of order) {
-    const line = new RegExp(`^    ${esc(markLabel(name))}\\s+(\\d+) ms(   \\(at the server, not the browser\\))?$`, "m").exec(text);
+    const line = new RegExp(`^    ${esc(markLabel(name))}\\s+(\\d+) ms$`, "m").exec(text);
     check(!!line && Number(line[1]) === v, `(${label}) "${markLabel(name)}" is the recorded ${v} ms (got ${line?.[1] ?? "nothing"})`, out);
   }
   const rows = order.map(([name]) => at(new RegExp(`^    ${esc(markLabel(name))}\\s+\\d+ ms`)));
@@ -185,9 +217,9 @@ function checkBlock({ label, out }, record) {
     else check(!row && lines.includes(why), `(${label}) no "${name}" span, and the block says why (want: ${why.trim()})`, out);
   }
   const m = record.marks;
-  const model = /^    model: sent → first chunk\s+(\d+) ms$/m.exec(text);
-  if (m.modelCallSent === undefined || m.firstChunk === undefined) check(!model, `(${label}) no "model: sent → first chunk": ${m.modelCallSent === undefined ? "modelCallSent" : "firstChunk"} wasn't recorded`, out);
-  else check(!!model && Number(model[1]) === m.firstChunk - m.modelCallSent, `(${label}) "model: sent → first chunk" is firstChunk − modelCallSent = ${m.firstChunk - m.modelCallSent} ms (got ${model?.[1] ?? "nothing"})`, out);
+  const model = new RegExp(`^    ${MODEL_SPAN}\\s+(\\d+) ms$`, "m").exec(text);
+  if (m.modelCallSent === undefined || m.firstChunk === undefined) check(!model, `(${label}) no "${MODEL_SPAN}": ${m.modelCallSent === undefined ? "modelCallSent" : "firstChunk"} wasn't recorded`, out);
+  else check(!!model && Number(model[1]) === m.firstChunk - m.modelCallSent, `(${label}) "${MODEL_SPAN}" is firstChunk − modelCallSent = ${m.firstChunk - m.modelCallSent} ms (got ${model?.[1] ?? "nothing"})`, out);
   check(!/^    \S.*(done|end) → model/m.test(text), `(${label}) no span for the computation between the query and the model call`, out);
   if (record.runtime === "workers") check(text.split("\n").includes(NOTE), `(${label}) the Workers note is under the block (runtime "workers")`, out);
   else check(!text.includes(NOTE.trim()), `(${label}) no Workers note: the record's runtime is ${JSON.stringify(record.runtime ?? null)}`, out);
@@ -282,7 +314,7 @@ function checkVisits(c, n, ok) {
     else check(!statsRow(text, name), `(${label}) no "${name}" span row: no visit has both marks in order`, out);
   }
   const model = (r) => (r.marks.modelCallSent === undefined || r.marks.firstChunk === undefined ? null : r.marks.firstChunk - r.marks.modelCallSent);
-  checkRow("model: sent → first chunk", records.map(model));
+  checkRow(MODEL_SPAN, records.map(model));
   if (k === 1) check(!/median/.test(text.slice(text.indexOf("Inside the server"))), `(${label}) the word "median" isn't in the block with 1 visit`, out);
 }
 
@@ -361,8 +393,10 @@ try {
   check(notPicked.test(g.line ?? ""), `(g) reports the AI request isn't the stamped one, naming both (got: ${g.line ?? "nothing"})`, g.out);
 
   // (h) The token without --server-timings: nothing happens.
-  const h = await runCase("h", "a", { named: null });
+  const h = await runCase("h", "a", { named: null, args: reportArgs("h") });
   checkNoVisit(h);
+  const hHtml = readReport("h");
+  check(!!hHtml && serverPart(hHtml) === null && !hHtml.includes("Inside the server"), "(h) the HTML report has no server section without --server-timings", h.out);
   check(h.line === null, `(h) nothing printed about server timings (got: ${h.line ?? "nothing"})`, h.out);
 
   // (i) --server-timings names another origin: the token isn't sent.
@@ -526,10 +560,27 @@ try {
     `(tv) nothing stamped, 0 of 1 succeeded (got: ${tv.lines.join(" | ")})`, tv.out);
 
   // (m) Default --server-runs: 3 marked visits, all succeed.
-  const m = await runCase("m, 3 visits by default", "m", { serverRuns: null });
+  const m = await runCase("m, 3 visits by default", "m", { serverRuns: null, args: reportArgs("m") });
   checkVisits(m, 3, [1, 2, 3]);
   const mRunMs = [...m.out.stdout.matchAll(/^run \d.*?\s(\d+) ms$/gm)].map((r) => Number(r[1]));
   const mSummary = m.out.stdout.match(/^cold (\d+) ms · median (\d+) ms/m);
+  // The HTML report: the same rows and numbers as the terminal block, and the pre-check line.
+  const mHtml = readReport("m");
+  const mServer = serverPart(mHtml);
+  check(!!mServer && mServer.includes(PRECHECK_OK), "(m) the HTML report has a server section with the pre-check line", m.out);
+  const mBlock = m.out.stdout.slice(m.out.stdout.indexOf("Inside the server"));
+  const mTerminal = [...mBlock.matchAll(/^    (\S.*?) {2,}(?:\d+|–)(?: +(?:\d+|–))*(?:   min \d+ · median \d+ · max \d+)? ms/gm)].map((r) => r[1]);
+  const mRows = htmlRows(mServer ?? "");
+  check(mTerminal.length > 0 && JSON.stringify([...mRows.keys()]) === JSON.stringify(mTerminal), `(m) the HTML rows are the terminal rows, in order (terminal: ${mTerminal.join(", ")}; html: ${[...mRows.keys()].join(", ")})`, m.out);
+  for (const label of mTerminal) {
+    const row = statsRow(mBlock, label);
+    if (!row) continue; // checkVisits already failed on it
+    const want = [...row.values.map((x) => (x === null ? "–" : String(x))), ...(row.stats ? [row.stats.min, row.stats.median, row.stats.max].map(String) : ["", "", ""])];
+    check(JSON.stringify(mRows.get(label)) === JSON.stringify(want), `(m) HTML "${label}" is ${want.join(" ")} like the terminal (got ${mRows.get(label)?.join(" ") ?? "nothing"})`, m.out);
+  }
+  const mTiles = [...(mHtml ?? "").matchAll(/<div class="tile-value">([\d,]+)<small>/g)].map((t) => Number(t[1].replace(/,/g, "")));
+  check(!!mSummary && mTiles[0] === Number(mSummary[1]) && mTiles[1] === Number(mSummary[2]),
+    `(m) the HTML tiles are the timed runs' cold and median (want ${mSummary?.[1]}, ${mSummary?.[2]}; got ${mTiles.join(", ")})`, m.out);
   check(!!mSummary && Number(mSummary[1]) === mRunMs[0] && Number(mSummary[2]) === mRunMs[1],
     `(m) the browser summary is the 2 timed runs only (runs ${mRunMs.join(", ")}; got: ${mSummary?.[0] ?? "nothing"})`, m.out);
   // Spans inside each visit first: with these marks the median span isn't median(end) − median(start).
@@ -550,16 +601,20 @@ try {
   // (q) Visit 2's record has no firstChunk: "–" in its column, the summary over visits 1 and 3.
   const q = await runCase("q, visit 2 partial", "q", { serverRuns: 3 });
   checkVisits(q, 3, [1, 2, 3]);
-  check(/^    model: first chunk +\d+ +– +\d+   min /m.test(q.out.stdout), `(q) "model: first chunk" shows – for visit 2`, q.out);
+  check(/^    server: first bytes sent +\d+ +– +\d+   min /m.test(q.out.stdout), `(q) "server: first bytes sent" shows – for visit 2`, q.out);
 
   // (e3) All three visits fail.
-  const e3 = await runCase("e3, all 3 fail", "e", { serverRuns: 3 });
+  const e3 = await runCase("e3, all 3 fail", "e", { serverRuns: 3, args: reportArgs("e3") });
   checkPrecheck(e3);
   checkPrecheckLine(e3);
   check(e3.loads === 5 && e3.stamped.length === 0 && e3.lookups === 0, `(e3) 3 visits, nothing stamped or looked up (loads ${e3.loads}, stamped ${e3.stamped.length}, lookups ${e3.lookups})`, e3.out);
   const want3 = [1, 2, 3].map((i) => `Server timings ? — marked visit ${i} of 3: no request matched POST ${origin}/marked/reply`);
   check(JSON.stringify(e3.lines) === JSON.stringify([...want3, "Server timings ? — 0 of 3 marked visits succeeded"]) && !/^Inside the server/m.test(e3.out.stdout),
     `(e3) three ? lines, then 0 of 3 succeeded, no block (got: ${e3.lines.join(" | ") || "nothing"})`, e3.out);
+  const e3Server = serverPart(readReport("e3"));
+  const e3Html = (line) => line.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  check(!!e3Server && [PRECHECK_OK, ...want3, "Server timings ? — 0 of 3 marked visits succeeded"].every((l) => e3Server.includes(e3Html(l))) && !e3Server.includes("<table"),
+    "(e3) the HTML server section has the pre-check, the three ? lines and 0 of 3, and no table", e3.out);
 
   // (m1) --server-runs 1: just the values, no median.
   const m1 = await runCase("m1, --server-runs 1", "m", { serverRuns: 1 });
@@ -576,6 +631,7 @@ try {
     "--server-runs without --server-timings is an error before any run", alone);
 } finally {
   await Promise.all([server, noSecret, otherSecret, broken].map((srv) => srv.close()));
+  rmSync(reportDir, { recursive: true, force: true });
 }
 
 if (logs.length) console.log(logs.join("\n").replace(/^/gm, "     | "));

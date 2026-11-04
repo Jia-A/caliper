@@ -7,7 +7,7 @@ import { launchChromium } from "./browser.js";
 import { combineImageRules, describeRule, imageRule, splitPolicies, type ImageRule } from "./csp.js";
 import { CliError, messageOf, PageLoadError, UnidentifiedRequestError } from "./errors.js";
 import { loadFailureHints } from "./loadhints.js";
-import { formatServerBlock, parseServerRecord, plural, type ServerRecord } from "./serverblock.js";
+import { formatServerBlock, parseServerRecord, plural, serverBlock, type ServerRecord, type ServerReport } from "./serverblock.js";
 import { renderReport, type ReportReply } from "./report.js";
 import type {
   Breakdown,
@@ -214,10 +214,11 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
     const streamingReport = describeStreaming(doneSummary);
     console.log(formatDoneSummary(doneSummary, streamingReport));
 
+    let serverReport: ServerReport | null = null;
     if (serverTimings) {
       // Its own fresh page, after the timed runs, which are never stamped.
       const options = { url, measure, output, steps, timeout, settleMs, requestPattern, chat };
-      await markedVisits(context, options, serverTimings, loaded, failed, unidentified);
+      serverReport = await markedVisits(context, options, serverTimings, loaded, failed, unidentified);
     }
 
     let stopReport: StopReport | null = null;
@@ -307,6 +308,7 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
         csp: cspReport,
         streaming: streamingReport,
         checks: entries,
+        server: serverReport,
       });
       writeFileSync(reportPath, html);
       console.log(`report: ${reportPath}`);
@@ -567,6 +569,7 @@ function fetchError(err: unknown): string {
 // the key's origin is exactly the named one and the wrapper accepts the token (one pre-check);
 // the token never goes anywhere else, and is never printed. Each visit prints its own line, and
 // "?" with the reason when it fails; the visits that got a record are summarised together.
+// Returns what it printed, for the HTML report.
 async function markedVisits(
   context: BrowserContext,
   options: MeasureOptions,
@@ -574,8 +577,16 @@ async function markedVisits(
   loaded: LoadedRun[],
   failed: number[],
   unidentified: number[]
-): Promise<void> {
-  const unknown = (reason: string) => console.log(`Server timings ? — ${reason}`);
+): Promise<ServerReport> {
+  const lines: string[] = [];
+  const say = (line: string) => {
+    console.log(line);
+    lines.push(line);
+  };
+  const unknown = (reason: string) => {
+    say(`Server timings ? — ${reason}`);
+    return { lines, block: null };
+  };
   // A run whose AI request wasn't identified might have picked another endpoint, so it blocks the
   // key. Runs that failed to load are left out; the key comes from the runs that loaded.
   if (unidentified.length) {
@@ -608,20 +619,22 @@ async function markedVisits(
   if (pre.status === 401) return unknown(`pre-check: token rejected (401 ${on}): wrong, expired or rotated; no marked visit.`);
   if (pre.status === 404) return unknown(`pre-check: feature off (404 ${on}): no Caliper wrapper at ${origin}, or CALIPER_TOKEN not set on the server; no marked visit.`);
   if (pre.status !== 400) return unknown(`pre-check: got HTTP ${pre.status} ${on} from ${precheckUrl}; no marked visit.`);
-  console.log(`Server timings — pre-check: feature on, token accepted (400 ${on})`);
+  say(`Server timings — pre-check: feature on, token accepted (400 ${on})`);
 
   const succeeded: { visit: number; record: ServerRecord }[] = [];
   for (let visit = 1; visit <= runs; visit++) {
     const label = `marked visit ${visit} of ${runs}`;
     const got = await markedVisit(context, options, { origin, token }, key, keyNote);
-    if (got.sent) console.log(`Server timings — ${label} sent ${got.sent}`);
+    if (got.sent) say(`Server timings — ${label} sent ${got.sent}`);
     if (typeof got.result === "string") {
       unknown(`${label}: ${got.result}`);
-      for (const line of got.hints) console.log(`    ${line}`);
+      for (const line of got.hints) say(`    ${line}`);
     } else succeeded.push({ visit, record: got.result });
   }
-  if (succeeded.length) console.log(formatServerBlock(succeeded, runs));
-  else unknown(`0 of ${plural(runs, "marked visit")} succeeded`);
+  if (!succeeded.length) return unknown(`0 of ${plural(runs, "marked visit")} succeeded`);
+  const block = serverBlock(succeeded, runs);
+  console.log(formatServerBlock(block));
+  return { lines, block };
 }
 
 // One marked visit: stamps the first request after the click that matches the key, then
@@ -1681,6 +1694,9 @@ function formatRun(i: number, ms: number): string {
   return `${runLabel(i).padEnd(12)}  ${String(ms).padStart(5)} ms`;
 }
 
+// Label column of a run's rows; fits "browser: response headers received".
+const LABEL_WIDTH = 36;
+
 // A streaming span shorter than this means the answer arrived in one go.
 const STREAMS_MIN_MS = 250;
 
@@ -1690,10 +1706,10 @@ const startLabel = ({ chat }: RunResult) => (chat ? "send" : "click");
 function formatDone(result: RunResult): string {
   const { timing, done } = result;
   const start = startLabel(result);
-  const row = (label: string, value: number) => `    ${label.padEnd(26)}${String(ms(value)).padStart(6)} ms`;
+  const row = (label: string, value: number) => `    ${label.padEnd(LABEL_WIDTH)}${String(ms(value)).padStart(6)} ms`;
   const lines = [row(`${start} → first word`, timing.firstPaintAt - timing.clickAt)];
   if (!done.settled) {
-    lines.push(`    ${`${start} → done`.padEnd(26)}did not settle within ${DONE_CAP_MS / 1000}s of first word`);
+    lines.push(`    ${`${start} → done`.padEnd(LABEL_WIDTH)}did not settle within ${DONE_CAP_MS / 1000}s of first word`);
     return lines.join("\n");
   }
   const span = done.doneAt - timing.firstPaintAt;
@@ -1711,7 +1727,7 @@ function formatReply({ timing, reply, chat }: RunResult): string | null {
   const after = (t: number) => `+${ms(t - timing.clickAt)} ms`;
   return [
     ...(chat
-      ? [`    ${"send → first body byte".padEnd(26)}${reply.firstByteAt === null ? "     ?" : String(ms(reply.firstByteAt - timing.clickAt)).padStart(6)} ms`]
+      ? [`    ${"send → first body byte".padEnd(LABEL_WIDTH)}${reply.firstByteAt === null ? "     ?" : String(ms(reply.firstByteAt - timing.clickAt)).padStart(6)} ms`]
       : []),
     reply.preReply.length ? `    pre-reply changes (not timed):` : `    pre-reply changes (not timed): none`,
     ...reply.preReply.map((c) => `        ${after(c.at).padStart(9)}  ${c.text ? JSON.stringify(c.text) : "(empty)"}`),
@@ -1759,7 +1775,7 @@ function breakdown(result: RunResult): Breakdown {
   const toFirstByte = span(r.start, r.firstByte);
   segments.push({
     key: "ttfb",
-    label: "request → first byte",
+    label: "browser: response headers received",
     ms: toFirstByte === null ? null : toFirstByte - r.connectionSetup,
   });
   if (r.end !== null && r.end <= firstPaintAt) {
@@ -2265,7 +2281,7 @@ function formatNetwork(parts: Breakdown, seen: number): string {
 
   const row = ({ key, label, ms: value, note }: Segment) => {
     const suffix = !note ? "" : key === "render" ? `   ← ${note}` : `   (${note})`;
-    return `    ${label.padEnd(26)}${value === null ? "     ?" : String(ms(value)).padStart(6)} ms${suffix}`;
+    return `    ${label.padEnd(LABEL_WIDTH)}${value === null ? "     ?" : String(ms(value)).padStart(6)} ms${suffix}`;
   };
   return [
     `    ${request.method} ${request.url} → ${request.status} ${request.contentType ?? ""}`.trimEnd(),

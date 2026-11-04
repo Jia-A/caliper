@@ -54,11 +54,11 @@ Caliper opens the page, clicks **Share on socials**, then clicks **Generate** or
 run 1 (cold)   7702 ms
     POST https://api.your-app.example.com/v1/social/your-post-id/generate → 200 application/json
     chosen from 3 request(s): +1 starts 5 ms after click, +1 POST with JSON body, +1 longest (7654 ms), +2 last to finish before first paint
-    click → fetch() called         5 ms
-    CORS preflight               109 ms
-    request → first byte        7524 ms
-    first byte → done             21 ms
-    done → first paint            44 ms   ← what Lighthouse can't see
+    click → fetch() called                   5 ms
+    CORS preflight                         109 ms
+    browser: response headers received    7524 ms
+    first byte → done                       21 ms
+    done → first paint                      44 ms   ← what Lighthouse can't see
     clock check: n/a (Resource Timing hides first byte without Timing-Allow-Origin)
 run 2          5746 ms
     ...
@@ -121,7 +121,7 @@ caliper audit https://your-app.example.com/chat --input "#msg" --prompt "hello" 
 
 ### Marked visit (`--server-timings`)
 
-Server-side timings from marked runs, read from a Caliper wrapper on your server: [`caliper-timings`](https://github.com/Jia-A/caliper/tree/main/packages/timings#readme), or anything that implements its [protocol](https://github.com/Jia-A/caliper/blob/main/packages/timings/SPEC.md). They're printed in the terminal only, not in the HTML report yet.
+Server-side timings from marked runs, read from a Caliper wrapper on your server: [`caliper-timings`](https://github.com/Jia-A/caliper/tree/main/packages/timings#readme), or anything that implements its [protocol](https://github.com/Jia-A/caliper/blob/main/packages/timings/SPEC.md). They're printed in the terminal, and with `--report` the HTML report shows the same lines and numbers in its own "Inside the server" section.
 
 ```sh
 CALIPER_TOKEN=… caliper audit http://localhost:5173/post/1 --measure "^generate$" --output textarea \
@@ -148,59 +148,64 @@ After the timed runs, Caliper builds a match key from the AI request each run pi
 
   ```txt
   Inside the server (from 3 of 3 marked runs) — ms after the request arrived, status 200
-      marked visit                   1     2     3
-      postgresStart                  1    31    10   min 1 · median 10 · max 31 ms
-      postgresEnd                   42    42    81   min 42 · median 42 · max 81 ms
-      model call sent               42    42    81   min 42 · median 42 · max 81 ms
-      model: first chunk           343   344   382   min 343 · median 344 · max 382 ms   (at the server, not the browser)
+      marked visit                         1     2     3
+      postgresStart                        1    31    10   min 1 · median 10 · max 31 ms
+      postgresEnd                         42    42    81   min 42 · median 42 · max 81 ms
+      model call sent                     42    42    81   min 42 · median 42 · max 81 ms
+      server: first bytes sent           343   344   382   min 343 · median 344 · max 382 ms
     spans
-      postgres                      41    11    71   min 11 · median 41 · max 71 ms   (postgresStart → postgresEnd)
-      model: sent → first chunk    301   302   301   min 301 · median 301 · max 302 ms
+      postgres                            41    11    71   min 11 · median 41 · max 71 ms   (postgresStart → postgresEnd)
+      model call → first bytes sent      301   302   301   min 301 · median 301 · max 302 ms
+    first bytes sent = the server's first write to the browser. If your app writes anything before the model's reply (a heartbeat, an envelope), this is that write.
   ```
 
   With one successful visit (for example `--server-runs 1`) there's no column row and no min · median · max, only the values. A mark or span that a successful visit didn't record shows `–` in its column, and min · median · max cover only the visits that recorded it (none with fewer than two).
 
   **Marks and spans follow the [protocol](https://github.com/Jia-A/caliper/blob/main/packages/timings/SPEC.md#marks).** Every recorded mark is shown under its own name, in the order the marks happened. The exceptions are `modelCallSent` and `firstChunk`, which are reserved and labelled. Spans:
   - each `<name>Start` / `<name>End` pair the app recorded is a span called `<name>`;
-  - `modelCallSent` → `firstChunk` is "model: sent → first chunk".
+  - `modelCallSent` → `firstChunk` is "model call → first bytes sent".
+
+  `firstChunk` is shown as "server: first bytes sent": the server's first write to the browser, not necessarily the model's first token. If your app writes anything before the model's reply (a heartbeat, an envelope), this is that write. A line under the block says so whenever a visit recorded it.
 
   When a pair is missing one of its marks, or its End is before its Start, there's no span, and a line says why. Caliper never makes a span between unrelated marks. This one is from a fixture record with app-chosen names, made up for the test, that also reports one problem:
 
   ```txt
   Inside the server (from 1 of 1 marked run) — ms after the request arrived, status 200
-      dbStart                        1 ms
-      dbEnd                         42 ms
-      vectorSearchStart             42 ms
-      vectorSearchEnd               58 ms
-      cacheStart                    58 ms
-      warmupEnd                     58 ms
-      lockEnd                       58 ms
-      lockStart                     64 ms
-      model call sent               64 ms
-      model: first chunk           365 ms   (at the server, not the browser)
+      dbStart                              1 ms
+      dbEnd                               42 ms
+      vectorSearchStart                   42 ms
+      vectorSearchEnd                     58 ms
+      cacheStart                          58 ms
+      warmupEnd                           58 ms
+      lockEnd                             58 ms
+      lockStart                           64 ms
+      model call sent                     64 ms
+      server: first bytes sent           365 ms
     spans
-      db                            41 ms   (dbStart → dbEnd)
-      vectorSearch                  16 ms   (vectorSearchStart → vectorSearchEnd)
-      model: sent → first chunk    301 ms
+      db                                  41 ms   (dbStart → dbEnd)
+      vectorSearch                        16 ms   (vectorSearchStart → vectorSearchEnd)
+      model call → first bytes sent      301 ms
       no cache span: cacheEnd wasn't recorded
       no warmup span: warmupStart wasn't recorded
       no lock span: lockEnd (58 ms) is before lockStart (64 ms)
     problems reported by the server
       mark name "db-start" rejected — use a letter, then up to 63 letters, digits or _ (e.g. dbStart)
+    first bytes sent = the server's first write to the browser. If your app writes anything before the model's reply (a heartbeat, an envelope), this is that write.
   ```
 
   And this one from a fixture record with Quill's names and `"runtime": "workers"`:
 
   ```txt
   Inside the server (from 1 of 1 marked run) — ms after the request arrived, status 200
-      postgresStart                  2 ms
-      postgresEnd                   43 ms
-      model call sent               43 ms
-      model: first chunk           344 ms   (at the server, not the browser)
+      postgresStart                        2 ms
+      postgresEnd                         43 ms
+      model call sent                     43 ms
+      server: first bytes sent           344 ms
     spans
-      postgres                      41 ms   (postgresStart → postgresEnd)
-      model: sent → first chunk    301 ms
+      postgres                            41 ms   (postgresStart → postgresEnd)
+      model call → first bytes sent      301 ms
       Workers time waits only — a span with only computation inside (no I/O) can read 0 ms.
+    first bytes sent = the server's first write to the browser. If your app writes anything before the model's reply (a heartbeat, an envelope), this is that write.
   ```
 
   With several visits there's one "no span" line per pair. It says how many visits had no span and which ones when not all, then the reason once if it's the same in each, otherwise each visit's values or reason (`no lock span in 2 of 2 visits: lockEnd is before lockStart (visit 1: lockEnd 58 ms, lockStart 63 ms · visit 2: lockEnd 59 ms, lockStart 64 ms)`).
@@ -208,7 +213,8 @@ After the timed runs, Caliper builds a match key from the AI request each run pi
   **Problems the server reports.** A record's `problems` (for example a mark name the wrapper skipped) are printed last, under "problems reported by the server". Each distinct one is printed once, with the visits that reported it when there are several (`(2 of 3 visits: 1, 3)`). They're printed as the server wrote them, with control characters escaped and anything past 200 characters cut. A `problems` that isn't a list of strings makes that visit's record unusable, with the reason. The Workers note appears only when the record says `"runtime": "workers"`. Without that field, or with any other value, there's no note: Caliper doesn't guess where the server ran. Each mark is shown as the server recorded it, in ms after the request reached the route. A mark that isn't in the record isn't shown. A `404` prints `Server timings ? — token OK and wrapper present, but no record for run <id>.`; any other status, a record for another run id, or a mark that isn't a number prints `?` with the reason, and that visit is left out.
 - **Their timing isn't reported.** Marked visits aren't timed runs and are left out of the medians, because they run with request interception on, which Playwright documents as turning off the HTTP cache.
 - **Requests made during page load are never stamped or counted.** Interception starts just before the click and ends with the run.
-- **Tested** against local fixtures only (including a fake wrapper that answers like Quill's, in the same order), in click runs and chat-style runs, with and without `--request`. Several visits are tested in click runs: all succeed, one of three fails, all fail, one visit, and one visit's record missing a mark. Span pairing is tested with Quill's `postgresStart`/`postgresEnd` (shown as `postgres`), with app-chosen pairs, and with a Start without its End, an End without its Start, and a reversed pair. It hasn't been tested on a real server, on a cross-origin API behind a CORS preflight, or together with `--stop`, `--double` or `--canary`. The result isn't in the HTML report yet.
+- **Tested** against local fixtures only (including a fake wrapper that answers like Quill's, in the same order), in click runs and chat-style runs, with and without `--request`. Several visits are tested in click runs: all succeed, one of three fails, all fail, one visit, and one visit's record missing a mark. Span pairing is tested with Quill's `postgresStart`/`postgresEnd` (shown as `postgres`), with app-chosen pairs, and with a Start without its End, an End without its Start, and a reversed pair. It hasn't been tested on a real server, on a cross-origin API behind a CORS preflight, or together with `--stop`, `--double` or `--canary`.
+- **In the HTML report** (`--report`), only with `--server-timings`: an "Inside the server" section with the pre-check, visit and `?` lines as printed, then the block as a table (one column per visit, then min · median · max), the no-span lines, the Workers and first-bytes notes, and the server's problems. One line says these come from separate runs on the server's clock and are never added to the browser timings. Tested end to end on the fixtures: every row has the terminal's numbers, the browser tiles stay the timed runs' own, and with no visit succeeding there are the lines and no table. Mark names and problems from the server are escaped (unit-tested).
 
 ## What gets measured
 
@@ -236,7 +242,7 @@ Each run's total is split into consecutive segments that add up to it. A segment
 | click → fetch() called | Replaces the line above when there is a CORS preflight: from the click until the app calls `fetch()`. |
 | CORS preflight | For cross-origin requests, the browser's `OPTIONS` request before the real one. Browsers cache the result, so it usually shows up on the first run only. |
 | connection setup | DNS, TCP and TLS for a new connection (marked "new connection"). |
-| request → first byte | From the request being sent until the response headers arrive, minus any connection setup. This is mostly your backend and model. |
+| browser: response headers received | From the request being sent until the response headers arrive, minus any connection setup. This is mostly your backend and model. A streaming server may send its headers before the first real chunk. |
 | first byte → done | From the response headers until the body has fully arrived. |
 | done → first paint | From the response finishing until the output is on screen: parsing, state updates and rendering. Lab tools such as Lighthouse don't capture this part for a click-triggered feature. |
 | first byte → first paint | Replaces the last two lines for streaming responses that are still open at first paint. The note says when the response finished. |
@@ -255,7 +261,7 @@ Caliper types the prompt into `--input`, then sends it by clicking `--measure` o
 - **Placeholders don't count.** The first word is the container's first change at or after the chosen AI request's first body byte, the same rule as the double-send check uses. Changes before that, such as a "Thinking…" bubble or a typing indicator, are printed as pre-reply changes and shown in the report's "Before the reply" table. They are never timed.
 - **Done** is the same settle window as for other runs, applied to the container.
 
-Each run also prints `send → first body byte`: the first chunk of the response body on the wire. The breakdown's `request → first byte` is when the response headers arrived, which for a stream can be earlier. `--stop`, `--double` and `--canary` can't be combined with `--input` yet.
+Each run also prints `send → first body byte`: the first chunk of the response body on the wire. The breakdown's `browser: response headers received` is when the response headers arrived, which for a stream can be earlier. `--stop`, `--double` and `--canary` can't be combined with `--input` yet.
 
 ## Checks
 
@@ -338,7 +344,7 @@ An allowed domain that anyone can make send a request (an image proxy, an open r
 ## Known limits
 
 - **"Cold" means the first run in a fresh browser, not a first-ever visit.** All runs share one browser context. Runs 2 and later reuse connections, the HTTP cache and cached CORS preflights. That is why the median covers runs 2 onward and the cold run is reported on its own.
-- **"First byte" means the response headers arrived.** A streaming server that sends headers immediately shows a tiny "request → first byte" even when the first real chunk comes much later. That wait then shows up in "first byte → first paint".
+- **Headers aren't the first chunk.** A streaming server that sends headers immediately shows a tiny "browser: response headers received" even when the first real chunk comes much later. That wait then shows up in "first byte → first paint", where "first byte" still means the headers arrived.
 - **The clock check needs `Timing-Allow-Origin` on cross-origin APIs.** Without that header the browser hides the detailed timings from Resource Timing, so the check prints `n/a`. The CORS preflight line still works. To enable the check, have your API send `Timing-Allow-Origin: <your page's origin>`.
 - **Headless by default.** In a visible window, Chromium slows down animation frames when the window is hidden, minimized or behind other windows. Caliper's watcher checks the output on every animation frame, so a slowed window would inflate the numbers. Headless runs aren't affected by window focus, and they work on servers and in CI. Use `--headed` to watch a flow, but keep the window visible while it runs.
 - **Chromium only.** Timings come from Chromium's network events.

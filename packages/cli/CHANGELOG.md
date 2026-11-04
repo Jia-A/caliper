@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Server timings in the HTML report.** With `--server-timings` and `--report`, the report has an "Inside the server" section: the pre-check, visit and `?` lines as printed, then the block as a table (one column per visit, then min · median · max), the no-span lines, the Workers and first-bytes notes, and the server's problems. Its numbers are the terminal's; one line says they come from separate runs on the server's clock and are never added to the browser timings. Without `--server-timings` there's no section. Mark names and problems from the server are HTML-escaped. Tested with `npm run test:marked` and `npm run test:serverblock`.
+
+### Changed
+
+- **Plainer labels** (display only; the record's field names and the protocol are unchanged):
+  - "model: first chunk" → "server: first bytes sent". It's the server's first write to the browser, so a line under the server block now says: `first bytes sent = the server's first write to the browser. If your app writes anything before the model's reply (a heartbeat, an envelope), this is that write.` It appears when a visit recorded `firstChunk`. The row's "(at the server, not the browser)" note is gone, since the label says it.
+  - "model: sent → first chunk" → "model call → first bytes sent".
+  - The browser segment "request → first byte" → "browser: response headers received", which is what it measures (Playwright's `responseStart`).
+  - The terminal's label column is wider to fit them: 36 characters in each run's rows, 32 in the server block.
+
 ## 0.4.0 — 2026-11-04
 
 ### Added

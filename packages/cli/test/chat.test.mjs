@@ -69,6 +69,9 @@ try {
     const placeholder = changes.find((c) => c.text === PLACEHOLDER);
     check(!!placeholder && placeholder.at < firstByte, `${name}: "${PLACEHOLDER}" listed as a pre-reply change, before the first byte`);
     check(!changes.some((c) => c.text === PROMPT), `${name}: your own message isn't counted`);
+    // The headers-received segment says what it measures (it used to read "request → first byte").
+    check(msOf(block, "browser: response headers received") !== null && !block.includes("request → first byte"),
+      `${name}: the breakdown has a "browser: response headers received" row`);
   }
 
   let html = "";
@@ -76,6 +79,8 @@ try {
     html = readFileSync(report, "utf8");
   } catch {}
   check(html.includes("Before the reply") && html.includes(`&quot;${PLACEHOLDER}&quot;`), "HTML report lists the pre-reply changes");
+  check(html.includes("browser: response headers received") && !html.includes("request → first byte"), 'HTML report labels the segment "browser: response headers received"');
+  check(!html.includes("Inside the server"), "HTML report has no server section without --server-timings");
 } finally {
   await server.close();
   rmSync(dir, { recursive: true, force: true });

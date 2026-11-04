@@ -1,5 +1,6 @@
 // Self-contained HTML timeline for an audit: inline CSS/JS, no external requests.
 
+import type { ServerReport, ServerRow } from "./serverblock.js";
 import type {
   Breakdown,
   CanaryReport,
@@ -40,6 +41,7 @@ export interface ReportInput {
   csp: CspReport | null; // null without --csp or --canary
   streaming: CheckReport;
   checks: SummaryEntry[]; // every check that ran, in summary order
+  server: ServerReport | null; // null without --server-timings
 }
 
 // The button by name (as the regex it's matched with), or the CSS selector.
@@ -56,14 +58,14 @@ const SEGMENTS: { key: SegmentKey; legend: string }[] = [
   { key: "click", legend: "click → fetch() called / request sent" },
   { key: "preflight", legend: "CORS preflight" },
   { key: "connection", legend: "connection setup" },
-  { key: "ttfb", legend: "request → first byte" },
+  { key: "ttfb", legend: "browser: response headers received" },
   { key: "download", legend: "first byte → done" },
   { key: "render", legend: "done → first paint" },
   { key: "streaming", legend: "first byte → first paint (streaming)" },
   { key: "other", legend: "unattributed" },
 ];
 
-export function renderReport({ url, measure, chat, output, steps, startedAt, summary, runs, failed, unidentified, stop, double, canary, csp, streaming, checks }: ReportInput): string {
+export function renderReport({ url, measure, chat, output, steps, startedAt, summary, runs, failed, unidentified, stop, double, canary, csp, streaming, checks, server }: ReportInput): string {
   const bars: ChartRun[] = runs.map((run) => ({ ...run, bars: barSegments(run) }));
   const scale = Math.max(...runs.map((r) => r.total), 1);
   const ticks = niceTicks(scale);
@@ -147,6 +149,7 @@ export function renderReport({ url, measure, chat, output, steps, startedAt, sum
   </section>
   ${chat || runs.some((r) => r.reply.preReply.length) ? replySection(runs, chat ? "Send" : "Click") : ""}
   ${streamingSection(streaming)}
+  ${server ? serverSection(server) : ""}
   ${stop ? stopSection(stop) : ""}
   ${double ? doubleSection(double) : ""}
   ${canary ? canarySection(canary) : ""}
@@ -311,6 +314,42 @@ function streamingSection({ verdict, fix, checks, notes }: CheckReport): string 
   </section>`;
 }
 
+// The marked visits (--server-timings): the lines the terminal printed, then the same block as a
+// table. Its own section, never part of the browser numbers above.
+export function serverSection({ lines, block }: ServerReport): string {
+  const many = !!block && block.visits.length > 1;
+  const row = ({ label, values, stats, note }: ServerRow) => {
+    const cells = values.map((v) => `<td class="num">${v === null ? "–" : v}</td>`);
+    const summary = !many ? [] : stats ? [stats.min, stats.median, stats.max].map((v) => `<td class="num">${v}</td>`) : [`<td class="num"></td>`, `<td class="num"></td>`, `<td class="num"></td>`];
+    return `<tr><th scope="row">${esc(label)}${note ? `<span class="note muted">${esc(note)}</span>` : ""}</th>${[...cells, ...summary].join("")}</tr>`;
+  };
+  const group = (name: string, rows: ServerRow[]) =>
+    rows.length ? `<tr class="group"><th scope="rowgroup" colspan="${block!.visits.length + (many ? 4 : 1)}">${name}</th></tr>${rows.map(row).join("")}` : "";
+  const notes = block ? [...block.noSpan, block.workers, block.firstBytes].filter((n): n is string => n !== null) : [];
+  return `<section aria-labelledby="server-h">
+    <h2 id="server-h">Inside the server</h2>
+    <div class="stop">
+      <p class="muted">From separate marked runs, on the server's clock. Never added to the browser timings above: different runs, different clocks.</p>
+      <ul class="notes log">${lines.map((l) => `<li>${esc(l)}</li>`).join("")}</ul>
+      ${block ? `<p class="verdict-sm">${esc(block.title)}</p>
+      <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th scope="col"></th>${many ? block.visits.map((v) => `<th scope="col" class="num">visit ${v} (ms)</th>`).join("") + `<th scope="col" class="num">min</th><th scope="col" class="num">median</th><th scope="col" class="num">max</th>` : `<th scope="col" class="num">ms</th>`}
+        </tr></thead>
+        <tbody>
+          ${block.marks.length ? group("Marks", block.marks) : `<tr><td colspan="${block.visits.length + (many ? 4 : 1) + 1}" class="muted">no marks recorded</td></tr>`}
+          ${group("Spans", block.spans)}
+        </tbody>
+      </table>
+      </div>
+      ${notes.length ? `<ul class="notes">${notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}
+      ${block.problems.length ? `<h3>Problems reported by the server</h3>
+      <ul class="notes">${block.problems.map((p) => `<li>${esc(p)}</li>`).join("")}</ul>` : ""}` : ""}
+    </div>
+  </section>`;
+}
+
 const STATUS_MARK: Record<CheckStatus, string> = { pass: "✓", warn: "⚠", fail: "✗", unknown: "?" };
 
 // One line per check that ran, at the top of the report. Same lines as the terminal summary.
@@ -455,6 +494,11 @@ tbody tr:last-child > * { border-bottom: 0; }
 .summary .warn .smark { color: var(--seg-click); }
 .smark { width: 1em; flex: none; text-align: center; font-weight: 700; }
 .mark { white-space: nowrap; }
+.verdict-sm { font-weight: 600; margin: 16px 0 8px; }
+.log { margin: 0; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+.log li { white-space: pre-wrap; }
+.group th { color: var(--ink-2); font-weight: 600; background: var(--page); }
+h3 { font-size: 14px; margin: 16px 0 0; }
 .notes { margin: 12px 0 0; padding-left: 18px; color: var(--ink-2); }
 #tip { position: fixed; z-index: 10; pointer-events: none; max-width: 320px; background: var(--ink); color: var(--surface);
   font-size: 12px; padding: 6px 8px; border-radius: 6px; }
