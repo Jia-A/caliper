@@ -43,6 +43,10 @@
 // "page failed to load" line is followed by things to check for that error type (Playwright's
 // timeout, ERR_CONNECTION_REFUSED), then "Rerun to try again." — only that for any other type.
 // The same lines follow a marked visit's "?" line when its own page fails to load.
+// Where to look (dh: a 150 ms postgres span, so both lists have a hint): the browser list after
+// the browser summary, the server list after the server block, neither naming the other's parts;
+// each evidence median is the median of the numbers printed above it (warm runs' rows, the
+// block's median); the same lists in the HTML report, in separate sections. (h): no server list.
 // The HTML report (--report): the same block, with the pre-check and visit lines, in its own
 // section only with --server-timings (h: none without it); (m) every row has the terminal's
 // numbers and the browser tiles stay the timed runs' own; (e3) no visit succeeded: the lines,
@@ -318,6 +322,29 @@ function checkVisits(c, n, ok) {
   if (k === 1) check(!/median/.test(text.slice(text.indexOf("Inside the server"))), `(${label}) the word "median" isn't in the block with 1 visit`, out);
 }
 
+// A timed run's segment rows: label → ms.
+function runRows(stdout, run) {
+  const lines = stdout.split("\n");
+  const at = lines.findIndex((l) => new RegExp(`^run ${run}( \\(cold\\))? +\\d+ ms$`).test(l));
+  const rows = new Map();
+  for (let i = at + 1; at !== -1 && i < lines.length && lines[i].startsWith("    "); i++) {
+    const m = /^    (\S.*?) {2,} *(-?\d+) ms/.exec(lines[i]);
+    if (m) rows.set(m[1], Number(m[2]));
+  }
+  return rows;
+}
+
+// One "Where to look" list as printed: its title line, the full hint's evidence, its other lines.
+function hintList(stdout, side) {
+  const lines = stdout.split("\n");
+  const at = lines.findIndex((l) => l.startsWith(`Where to look — ${side} (`));
+  if (at === -1) return null;
+  const end = lines.findIndex((l, i) => i > at && !l.startsWith("  "));
+  const body = lines.slice(at + 1, end === -1 ? undefined : end);
+  const m = /^    (.+?): median (\d+) ms, over its (\d+) ms limit in (\d+) of (\d+) (warm runs|marked visits)/.exec(body[0] ?? "");
+  return { at, title: lines[at], body, first: m && { label: m[1], median: Number(m[2]), limit: Number(m[3]), over: Number(m[4]), of: Number(m[5]) } };
+}
+
 // The lines under "run <i> — page failed to load": the error, then what to check.
 function failedRunLines(stdout, run) {
   const lines = stdout.split("\n");
@@ -395,8 +422,43 @@ try {
   // (h) The token without --server-timings: nothing happens.
   const h = await runCase("h", "a", { named: null, args: reportArgs("h") });
   checkNoVisit(h);
+  check(!/^Where to look — server/m.test(h.out.stdout), "(h) no server hints without --server-timings", h.out);
   const hHtml = readReport("h");
   check(!!hHtml && serverPart(hHtml) === null && !hHtml.includes("Inside the server"), "(h) the HTML report has no server section without --server-timings", h.out);
+  check(!!hHtml && !hHtml.includes("Where to look — server"), "(h) the HTML report has no server hints without --server-timings", h.out);
+
+  // (dh) Where to look: a browser hint (headers → first paint) and a server hint (postgres 150 ms).
+  const dh = await runCase("dh, hints", "dh", { runs: 3, serverRuns: 2, args: reportArgs("dh") });
+  const dhOut = dh.out.stdout;
+  const browser = hintList(dhOut, "browser");
+  const serverHints = hintList(dhOut, "server");
+  const lines = dhOut.split("\n");
+  const serverAt = lines.findIndex((l) => l.startsWith("Server timings"));
+  const blockAt = lines.findIndex((l) => l.startsWith("Inside the server"));
+  check(!!browser && browser.title === "Where to look — browser (median of 2 warm runs)" && browser.at > lines.findIndex((l) => /^cold \d+ ms/.test(l)) && browser.at < serverAt,
+    `(dh) the browser list comes after the browser summary, before the server timings (got: ${browser?.title ?? "nothing"})`, dh.out);
+  check(!!serverHints && serverHints.title === "Where to look — server (median of 2 marked visits, on the server's clock; never compared with the browser)" && serverHints.at > blockAt,
+    `(dh) the server list comes after the server block (got: ${serverHints?.title ?? "nothing"})`, dh.out);
+  if (browser?.first) {
+    const values = [2, 3].map((run) => runRows(dhOut, run).get(browser.first.label)).filter((v) => v !== undefined);
+    check(values.length === 2 && browser.first.median === median(values) && browser.first.over === values.filter((v) => v > browser.first.limit).length && browser.first.of === 2,
+      `(dh) browser "${browser.first.label}": median ${browser.first.median}, over in ${browser.first.over} of ${browser.first.of}, from the warm runs' rows ${values.join(", ")}`, dh.out);
+  } else check(false, "(dh) the browser list has a full hint", dh.out);
+  const pg = statsRow(dhOut.slice(dhOut.indexOf("Inside the server")), "postgres");
+  check(!!serverHints?.first && serverHints.first.label === "postgres" && serverHints.first.median === pg?.median && serverHints.first.limit === 100,
+    `(dh) server "postgres": median ${serverHints?.first?.median} ms is the block's median ${pg?.median}, limit 100`, dh.out);
+  check(!!serverHints && serverHints.body.includes("    a step your app named; Caliper can't see inside it."), "(dh) the app-named span gets the generic line", dh.out);
+  check(!!browser && !browser.body.some((l) => /postgres|model call|first bytes sent/.test(l)), "(dh) the browser list names no server part", dh.out);
+  check(!!serverHints && !serverHints.body.some((l) => /browser:|headers →|click →/.test(l)), "(dh) the server list names no browser part", dh.out);
+  const dhHtml = readReport("dh") ?? "";
+  const htmlBrowserAt = dhHtml.indexOf('<section aria-labelledby="hints-browser-h">');
+  const htmlBrowser = htmlBrowserAt === -1 ? "" : dhHtml.slice(htmlBrowserAt, dhHtml.indexOf("</section>", htmlBrowserAt));
+  const dhServer = serverPart(dhHtml) ?? "";
+  const htmlEsc = (t) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  check(!!browser && htmlBrowser.includes(htmlEsc(browser.body[0].trim())) && !htmlBrowser.includes("postgres"),
+    "(dh) the HTML browser hints section has the terminal's evidence line and no server part", dh.out);
+  check(!!serverHints && dhServer.includes("Where to look — server") && dhServer.includes(htmlEsc(serverHints.body[0].trim())),
+    "(dh) the HTML server section has the server hints with the terminal's evidence line", dh.out);
   check(h.line === null, `(h) nothing printed about server timings (got: ${h.line ?? "nothing"})`, h.out);
 
   // (i) --server-timings names another origin: the token isn't sent.

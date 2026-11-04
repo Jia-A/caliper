@@ -46,6 +46,9 @@ const USAGE = `Usage:
       printed with min · median · max across the visits that succeeded, apart
       from the user timings; --report adds the same lines and numbers in their
       own section. The token is never printed.
+      After the timings, "Where to look" lists every segment whose median is over
+      its layer's limit: the browser (warm runs) and the server (marked visits)
+      as separate lists, with things to check for the biggest one.
       --measure-selector clicks the one element a CSS selector matches instead of a
       button by name, for icon-only buttons with no text or aria-label. It must match
       exactly one element; Caliper prints it before each run. Tested in click runs and

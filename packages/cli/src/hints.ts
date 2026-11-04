@@ -1,0 +1,248 @@
+// "Where to look": each segment's median against its layer's limit, with things to check when
+// it's over. Browser and server are separate lists, never compared or merged: they come from
+// different runs on different clocks. No runtime imports, so `node --test` runs it directly
+// (npm run test:hints), like serverblock.ts.
+import type { ServerBlock, ServerRow } from "./serverblock.js";
+import type { Segment, SegmentKey } from "./types.js";
+
+// Same rounding as audit.ts's median(), kept here so this file has no runtime imports.
+function median(values: number[]): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return Math.round(sorted.length % 2 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2);
+}
+
+const CAVEAT = "These limits were written for whole pages or interactions; applying them to one part of the wait is Caliper's reasoning.";
+export const DISCLAIMER = "Caliper sees timings, not your code — these are common causes, not a diagnosis.";
+const APP_SPAN = "a step your app named; Caliper can't see inside it.";
+
+// The limits and where they come from. None was written for one part of a wait (CAVEAT).
+const LIMITS = {
+  input: { ms: 200, basis: `Google's INP "good" threshold is 200 ms or less (click → next paint).` },
+  server: { ms: 600, basis: `Lighthouse's "Reduce server response time" audit fails above 600 ms.` },
+  model: { ms: 450, basis: "MLPerf Inference, interactive scenario: 450 ms time to first token at P99 — a hardware benchmark, not a UX rule." },
+  instant: { ms: 100, basis: "Nielsen / RAIL: under 100 ms feels instant." },
+};
+type Limit = (typeof LIMITS)[keyof typeof LIMITS];
+
+// Per browser segment: its limit and what a slow value could point to. "other" (unattributed)
+// is never hinted: it's the part Caliper couldn't attribute.
+const BROWSER: Partial<Record<SegmentKey, { limit: Limit; checks: string[] }>> = {
+  click: {
+    limit: LIMITS.input,
+    checks: [
+      "your app's own code between the click and fetch(): validation, state updates, building the request",
+      "code loaded only on the first click (a lazy import)",
+      "a busy main thread (long tasks) delaying the click handler",
+    ],
+  },
+  preflight: {
+    limit: LIMITS.instant,
+    checks: [
+      "a cross-origin API, so the browser sends an OPTIONS request first",
+      "no Access-Control-Max-Age on the preflight response, so it isn't cached between requests",
+      "a custom header or content type that makes the request need a preflight",
+    ],
+  },
+  connection: {
+    limit: LIMITS.instant,
+    checks: [
+      "a new connection on a warm run: keep-alive off, or connections closed between requests",
+      "DNS, TCP or TLS to a distant server",
+      "no preconnect to the API's origin",
+    ],
+  },
+  ttfb: {
+    limit: LIMITS.server,
+    checks: [
+      "server work before the headers are sent: auth, data lookups, building the prompt",
+      "the server waiting for the model before it sends headers",
+      "queueing or a cold start on the server",
+      "network distance to the server",
+    ],
+  },
+  download: {
+    limit: LIMITS.instant,
+    checks: [
+      "a reply that isn't streamed, so the whole answer arrives at once",
+      "a large response body",
+      "a slow network",
+    ],
+  },
+  render: {
+    limit: LIMITS.instant,
+    checks: [
+      "parsing or formatting the response (JSON, markdown) before showing it",
+      "rendering after the data arrives (framework updates, layout)",
+      "a busy main thread",
+    ],
+  },
+  streaming: {
+    limit: LIMITS.instant,
+    checks: [
+      "headers sent before the first real chunk, so the wait for the reply shows up here",
+      "the client buffering chunks before showing them",
+      "a proxy or compression buffering the stream",
+      "parsing or rendering each chunk",
+    ],
+  },
+};
+
+// Server spans. An app-named span is the app's own step: the same text whatever its name.
+const SERVER: Record<"span" | "model", { limit: Limit; about?: string; checks: string[] }> = {
+  span: {
+    limit: LIMITS.instant,
+    about: APP_SPAN,
+    checks: [
+      "waiting inside this step: network calls, other services, locks",
+      "work that runs on every request but could be cached or done earlier",
+      "steps running one after another that could run at the same time",
+    ],
+  },
+  model: {
+    limit: LIMITS.model,
+    checks: [
+      "the model provider's time to first token, or queueing at the provider",
+      "a long prompt or a large context",
+      "the app waiting for more than the first token before its first write",
+      "network distance to the model provider",
+    ],
+  },
+};
+
+/** One segment over its limit, with the evidence. Times are ms, rounded. */
+export interface Hint {
+  label: string;
+  median: number;
+  limit: number;
+  basis: string; // where the limit comes from, ending with CAVEAT
+  over: number; // runs (or visits) over the limit
+  of: number; // runs (or visits) where it was measured
+  measuredNote: string; // " (measured in k of n)" when not in every run, else ""
+  unit: "warm runs" | "marked visits";
+  share: number | null; // % of that side's total: the median of each run's own share
+  shareOf: string; // what share is of, or why there's none
+  about?: string; // the app-named span line
+  checks: string[];
+  evidence: string; // the full hint's first line
+  short: string; // the hint as one line, after the first
+}
+type Measured = Omit<Hint, "evidence" | "short">;
+
+/** One side's hints, biggest median first, or why there are none. */
+export interface HintList {
+  side: "browser" | "server";
+  scope: string; // which runs the medians cover
+  hints: Hint[];
+  none: string | null; // set when hints is empty
+  disclaimer: string;
+}
+
+const list = (side: HintList["side"], scope: string, measured: Measured[], none = "Every part is within its limit."): HintList => {
+  const hints = measured.sort((a, b) => b.median - a.median).map((h) => ({ ...h, evidence: evidence(h), short: shortLine(h) }));
+  return { side, scope, hints, none: hints.length ? null : none, disclaimer: DISCLAIMER };
+};
+
+/** Browser hints from the warm runs (2..N) that were measured: each segment's median over them. */
+export function browserHints(warm: { total: number; segments: Segment[] }[]): HintList {
+  const scope = warm.length === 1 ? "1 warm run" : `median of ${warm.length} warm runs`;
+  if (warm.length === 0) {
+    return list("browser", scope, [], "No warm run was measured (runs 2 and later), so there's no median to compare. Use --runs 2 or more.");
+  }
+  const hints: Measured[] = [];
+  for (const [key, layer] of Object.entries(BROWSER) as [SegmentKey, (typeof BROWSER)[SegmentKey] & {}][]) {
+    // Each run's value and its share of that run's total; runs where it's unknown or absent are left out.
+    const got = warm.flatMap(({ total, segments }) => {
+      const s = (segments as Segment[]).find((seg) => seg.key === key);
+      return s && s.ms !== null ? [{ ms: s.ms, share: total > 0 ? (s.ms / total) * 100 : null }] : [];
+    });
+    const m = median(got.map((g) => g.ms));
+    if (m === null || m <= layer.limit.ms) continue;
+    const label = warm.flatMap((r) => (r.segments as Segment[]).filter((s) => s.key === key))[0]!.label;
+    const shares = got.flatMap((g) => (g.share === null ? [] : [g.share]));
+    hints.push({
+      label,
+      median: m,
+      limit: layer.limit.ms,
+      basis: `${layer.limit.basis} ${CAVEAT}`,
+      over: got.filter((g) => g.ms > layer.limit.ms).length,
+      of: got.length,
+      measuredNote: got.length < warm.length ? ` (measured in ${got.length} of ${warm.length})` : "",
+      unit: "warm runs",
+      share: median(shares),
+      shareOf: "the browser total",
+      checks: layer.checks,
+    });
+  }
+  return list("browser", scope, hints);
+}
+
+// The row's median over the visits that recorded it: the table's median, or its only value.
+const rowMedian = (row: ServerRow) => row.stats?.median ?? row.values.find((v) => v !== null)!;
+
+/** Server hints from the block's spans: app-named spans and model call → first bytes sent. */
+export function serverHints(block: ServerBlock): HintList {
+  const k = block.visits.length;
+  const firstBytes = block.marks.find((r) => r.kind === "mark" && r.name === "firstChunk");
+  const hints: Measured[] = [];
+  for (const row of block.spans) {
+    if (row.kind === "mark") continue;
+    const layer = SERVER[row.kind];
+    const m = rowMedian(row);
+    if (m <= layer.limit.ms) continue;
+    const got = row.values.filter((v): v is number => v !== null);
+    // Each visit's own share of its time to first bytes sent, then the median.
+    const shares = firstBytes
+      ? row.values.flatMap((v, i) => (v === null || !firstBytes.values[i] ? [] : [(v / firstBytes.values[i]!) * 100]))
+      : [];
+    const share = median(shares);
+    hints.push({
+      label: row.label,
+      median: m,
+      limit: layer.limit.ms,
+      basis: `${layer.limit.basis} ${CAVEAT}`,
+      over: got.filter((v) => v > layer.limit.ms).length,
+      of: got.length,
+      measuredNote: got.length < k ? ` (measured in ${got.length} of ${k})` : "",
+      unit: "marked visits",
+      share,
+      shareOf: share !== null ? "the time to server: first bytes sent" : "server: first bytes sent wasn't recorded, so no share",
+      ...(layer.about && { about: layer.about }),
+      checks: layer.checks,
+    });
+  }
+  const scope = `${k === 1 ? "1 marked visit" : `median of ${k} marked visits`}, on the server's clock; never compared with the browser`;
+  return list("server", scope, hints);
+}
+
+// "median" only when there's more than one value, like the server block.
+const value = (h: Measured) => (h.of === 1 ? `${h.median} ms` : `median ${h.median} ms`);
+
+// The full hint's evidence line.
+function evidence(h: Measured): string {
+  const share = h.share === null ? h.shareOf : `${h.share}% of ${h.shareOf}`;
+  return `${h.label}: ${value(h)}, over its ${h.limit} ms limit in ${h.over} of ${h.of} ${h.unit}${h.measuredNote}; ${share}`;
+}
+
+// A hint after the first, in one line.
+function shortLine(h: Measured): string {
+  return `${h.label}: ${value(h)} (limit ${h.limit} ms), over in ${h.over} of ${h.of} ${h.unit}${h.measuredNote}${h.about ? ` — ${h.about}` : ""}`;
+}
+
+/** The list as the terminal prints it: the first hint in full, the rest one line each. */
+export function formatHints({ side, scope, hints, none }: HintList): string {
+  const lines = [`Where to look — ${side} (${scope})`];
+  if (none) return [...lines, `    ${none}`].join("\n");
+  const [first, ...rest] = hints;
+  lines.push(
+    `    ${first!.evidence}`,
+    ...(first!.about ? [`    ${first!.about}`] : []),
+    `    Limit: ${first!.basis}`,
+    "    Things to check:",
+    ...first!.checks.map((c) => `      - could be ${c}`),
+    `    ${DISCLAIMER}`,
+  );
+  if (rest.length) lines.push("  also over their limits:", ...rest.map((h) => `    ${h.short}`));
+  return lines.join("\n");
+}

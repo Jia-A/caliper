@@ -1,5 +1,6 @@
 // Self-contained HTML timeline for an audit: inline CSS/JS, no external requests.
 
+import type { HintList } from "./hints.js";
 import type { ServerReport, ServerRow } from "./serverblock.js";
 import type {
   Breakdown,
@@ -42,6 +43,7 @@ export interface ReportInput {
   streaming: CheckReport;
   checks: SummaryEntry[]; // every check that ran, in summary order
   server: ServerReport | null; // null without --server-timings
+  hints: { browser: HintList | null; server: HintList | null }; // browser: null with no run measured; server: null without a server block
 }
 
 // The button by name (as the regex it's matched with), or the CSS selector.
@@ -59,13 +61,13 @@ const SEGMENTS: { key: SegmentKey; legend: string }[] = [
   { key: "preflight", legend: "CORS preflight" },
   { key: "connection", legend: "connection setup" },
   { key: "ttfb", legend: "browser: response headers received" },
-  { key: "download", legend: "first byte → done" },
+  { key: "download", legend: "headers → done" },
   { key: "render", legend: "done → first paint" },
-  { key: "streaming", legend: "first byte → first paint (streaming)" },
+  { key: "streaming", legend: "headers → first paint (streaming)" },
   { key: "other", legend: "unattributed" },
 ];
 
-export function renderReport({ url, measure, chat, output, steps, startedAt, summary, runs, failed, unidentified, stop, double, canary, csp, streaming, checks, server }: ReportInput): string {
+export function renderReport({ url, measure, chat, output, steps, startedAt, summary, runs, failed, unidentified, stop, double, canary, csp, streaming, checks, server, hints }: ReportInput): string {
   const bars: ChartRun[] = runs.map((run) => ({ ...run, bars: barSegments(run) }));
   const scale = Math.max(...runs.map((r) => r.total), 1);
   const ticks = niceTicks(scale);
@@ -147,9 +149,10 @@ export function renderReport({ url, measure, chat, output, steps, startedAt, sum
     </table>
     </div>
   </section>
+  ${hints.browser ? hintsSection(hints.browser) : ""}
   ${chat || runs.some((r) => r.reply.preReply.length) ? replySection(runs, chat ? "Send" : "Click") : ""}
   ${streamingSection(streaming)}
-  ${server ? serverSection(server) : ""}
+  ${server ? serverSection(server, hints.server) : ""}
   ${stop ? stopSection(stop) : ""}
   ${double ? doubleSection(double) : ""}
   ${canary ? canarySection(canary) : ""}
@@ -314,9 +317,10 @@ function streamingSection({ verdict, fix, checks, notes }: CheckReport): string 
   </section>`;
 }
 
-// The marked visits (--server-timings): the lines the terminal printed, then the same block as a
-// table. Its own section, never part of the browser numbers above.
-export function serverSection({ lines, block }: ServerReport): string {
+// The marked visits (--server-timings): the same block as the terminal, as a table, then the lines
+// the terminal printed in a collapsed "Run details" (open when no visit succeeded, since they say
+// why). Its own section, never part of the browser numbers above.
+export function serverSection({ lines, block }: ServerReport, hints: HintList | null = null): string {
   const many = !!block && block.visits.length > 1;
   const row = ({ label, values, stats, note }: ServerRow) => {
     const cells = values.map((v) => `<td class="num">${v === null ? "–" : v}</td>`);
@@ -330,7 +334,6 @@ export function serverSection({ lines, block }: ServerReport): string {
     <h2 id="server-h">Inside the server</h2>
     <div class="stop">
       <p class="muted">From separate marked runs, on the server's clock. Never added to the browser timings above: different runs, different clocks.</p>
-      <ul class="notes log">${lines.map((l) => `<li>${esc(l)}</li>`).join("")}</ul>
       ${block ? `<p class="verdict-sm">${esc(block.title)}</p>
       <div class="table-wrap">
       <table>
@@ -346,8 +349,35 @@ export function serverSection({ lines, block }: ServerReport): string {
       ${notes.length ? `<ul class="notes">${notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}
       ${block.problems.length ? `<h3>Problems reported by the server</h3>
       <ul class="notes">${block.problems.map((p) => `<li>${esc(p)}</li>`).join("")}</ul>` : ""}` : ""}
+      ${hints ? `<h3>Where to look — server</h3>${hintsBody(hints)}` : ""}
+      <details${block ? "" : " open"}><summary>Run details</summary>
+      <ul class="notes log">${lines.map((l) => `<li>${esc(l)}</li>`).join("")}</ul>
+      </details>
     </div>
   </section>`;
+}
+
+// Browser hints: their own section, never next to the server's (different runs, different clocks).
+function hintsSection(list: HintList): string {
+  return `<section aria-labelledby="hints-browser-h">
+    <h2 id="hints-browser-h">Where to look — browser</h2>
+    <div class="stop">${hintsBody(list)}</div>
+  </section>`;
+}
+
+// The first hint in full (evidence, basis, things to check, disclaimer), the rest one line each.
+function hintsBody({ scope, hints, none, disclaimer }: HintList): string {
+  const head = `<p class="muted">${esc(scope[0]!.toUpperCase() + scope.slice(1))}.</p>`;
+  if (none) return `${head}<p>${esc(none)}</p>`;
+  const [first, ...rest] = hints;
+  return `${head}
+      <p class="verdict-sm">${esc(first!.evidence)}</p>
+      ${first!.about ? `<p>${esc(first!.about)}</p>` : ""}
+      <p class="muted">Limit: ${esc(first!.basis)}</p>
+      <p>Things to check:</p>
+      <ul class="notes">${first!.checks.map((c) => `<li>could be ${esc(c)}</li>`).join("")}</ul>
+      <p class="muted">${esc(disclaimer)}</p>
+      ${rest.length ? `<h3>Also over their limits</h3><ul class="notes">${rest.map((h) => `<li>${esc(h.short)}</li>`).join("")}</ul>` : ""}`;
 }
 
 const STATUS_MARK: Record<CheckStatus, string> = { pass: "✓", warn: "⚠", fail: "✗", unknown: "?" };
@@ -499,6 +529,8 @@ tbody tr:last-child > * { border-bottom: 0; }
 .log li { white-space: pre-wrap; }
 .group th { color: var(--ink-2); font-weight: 600; background: var(--page); }
 h3 { font-size: 14px; margin: 16px 0 0; }
+details { margin-top: 12px; }
+summary { cursor: pointer; color: var(--ink-2); }
 .notes { margin: 12px 0 0; padding-left: 18px; color: var(--ink-2); }
 #tip { position: fixed; z-index: 10; pointer-events: none; max-width: 320px; background: var(--ink); color: var(--surface);
   font-size: 12px; padding: 6px 8px; border-radius: 6px; }

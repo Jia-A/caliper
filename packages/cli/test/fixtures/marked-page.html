@@ -75,6 +75,7 @@
     if (kase === "w") extra = "&runtime=workers"; // the record says it ran on Workers
     if (kase === "o") extra = "&runtime=node"; // the record names another runtime
     if (kase === "s") extra = "&generic=1"; // the record uses app-chosen Start/End names
+    if (kase === "dh") extra = "&db=150"; // a 150 ms app span: over its 100 ms limit
     if (kase === "m") extra = `&pre=${[0, 30, 10][LOAD % 3]}&db=${[40, 10, 70][LOAD % 3]}`;
     if (kase === "q" && LOAD === runs + 2) extra = "&partial=1";
     if (kase === "v" && LOAD === runs + 2) path = "/marked/other/reply";

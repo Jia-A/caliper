@@ -57,7 +57,7 @@ run 1 (cold)   7702 ms
     click → fetch() called                   5 ms
     CORS preflight                         109 ms
     browser: response headers received    7524 ms
-    first byte → done                       21 ms
+    headers → done                          21 ms
     done → first paint                      44 ms   ← what Lighthouse can't see
     clock check: n/a (Resource Timing hides first byte without Timing-Allow-Origin)
 run 2          5746 ms
@@ -214,7 +214,7 @@ After the timed runs, Caliper builds a match key from the AI request each run pi
 - **Their timing isn't reported.** Marked visits aren't timed runs and are left out of the medians, because they run with request interception on, which Playwright documents as turning off the HTTP cache.
 - **Requests made during page load are never stamped or counted.** Interception starts just before the click and ends with the run.
 - **Tested** against local fixtures only (including a fake wrapper that answers like Quill's, in the same order), in click runs and chat-style runs, with and without `--request`. Several visits are tested in click runs: all succeed, one of three fails, all fail, one visit, and one visit's record missing a mark. Span pairing is tested with Quill's `postgresStart`/`postgresEnd` (shown as `postgres`), with app-chosen pairs, and with a Start without its End, an End without its Start, and a reversed pair. It hasn't been tested on a real server, on a cross-origin API behind a CORS preflight, or together with `--stop`, `--double` or `--canary`.
-- **In the HTML report** (`--report`), only with `--server-timings`: an "Inside the server" section with the pre-check, visit and `?` lines as printed, then the block as a table (one column per visit, then min · median · max), the no-span lines, the Workers and first-bytes notes, and the server's problems. One line says these come from separate runs on the server's clock and are never added to the browser timings. Tested end to end on the fixtures: every row has the terminal's numbers, the browser tiles stay the timed runs' own, and with no visit succeeding there are the lines and no table. Mark names and problems from the server are escaped (unit-tested).
+- **In the HTML report** (`--report`), only with `--server-timings`: an "Inside the server" section with the block as a table (one column per visit, then min · median · max), the no-span lines, the Workers and first-bytes notes, the server's problems and the server hints ([Where to look](#where-to-look)). Then come the pre-check, visit and `?` lines as printed, in a collapsed "Run details", which is open when no visit succeeded. One line says these come from separate runs on the server's clock and are never added to the browser timings. Tested end to end on the fixtures: every row has the terminal's numbers, the browser tiles stay the timed runs' own, and with no visit succeeding there are the lines and no table. Mark names and problems from the server are escaped (unit-tested).
 
 ## What gets measured
 
@@ -243,11 +243,35 @@ Each run's total is split into consecutive segments that add up to it. A segment
 | CORS preflight | For cross-origin requests, the browser's `OPTIONS` request before the real one. Browsers cache the result, so it usually shows up on the first run only. |
 | connection setup | DNS, TCP and TLS for a new connection (marked "new connection"). |
 | browser: response headers received | From the request being sent until the response headers arrive, minus any connection setup. This is mostly your backend and model. A streaming server may send its headers before the first real chunk. |
-| first byte → done | From the response headers until the body has fully arrived. |
+| headers → done | From the response headers until the body has fully arrived. |
 | done → first paint | From the response finishing until the output is on screen: parsing, state updates and rendering. Lab tools such as Lighthouse don't capture this part for a click-triggered feature. |
-| first byte → first paint | Replaces the last two lines for streaming responses that are still open at first paint. The note says when the response finished. |
+| headers → first paint | Replaces the last two lines for streaming responses that are still open at first paint. The note says when the response finished. |
 
 The **clock check** line compares the request's first-byte time from Playwright with the page's own Resource Timing entry for the same request. Both should land on the same clock, and they normally agree within a millisecond.
+
+### Where to look
+
+After the timings, Caliper compares each segment's median with a limit for its layer (see [Why these limits?](#why-these-limits)) and lists every segment that's over. There are two separate lists, and they're never compared or merged, because they come from different runs on different clocks:
+
+- **Browser:** the median of each segment over the warm runs (runs 2 and later), like the Median tile. A segment that only shows up on the cold run, such as a first CORS preflight, isn't hinted. With `--runs 1` there's no warm run, and the list says so.
+- **Server** (only with `--server-timings`): the median of each span in the "Inside the server" block, the same number as its table. The span between `modelCallSent` and `firstChunk` has its own limit. Every app-named span uses the general one, with the same text whatever its name: "a step your app named; Caliper can't see inside it."
+
+Within each list, the biggest median comes first and gets the full hint. That's the evidence (median, limit, in how many runs it was over, and its share of that side's total), the limit's basis, 2 to 4 things to check worded as possibilities, and "Caliper sees timings, not your code — these are common causes, not a diagnosis." Every other segment over its limit gets one line. The browser share is each run's own share of its total, then the median. The server share is of the time to "server: first bytes sent", and when that wasn't recorded, the hint says there's no share. "unattributed" is never hinted. With one value, the hint says "300 ms" rather than "median 300 ms".
+
+The browser list follows the browser summary in the terminal. The server list follows the "Inside the server" block. In the HTML report, the browser list is a "Where to look — browser" section, and the server list sits inside the server section.
+
+Tested with `npm run test:hints` (unit) and `npm run test:marked` (end to end on the fixtures). It hasn't been tried on a real app yet.
+
+### Why these limits?
+
+| Layer | Limit | Basis |
+|---|---|---|
+| click → request sent / click → fetch() called | 200 ms | Google's [INP](https://web.dev/inp) "good" threshold is 200 ms or less (click → next paint). |
+| browser: response headers received | 600 ms | Lighthouse's ["Reduce server response time"](https://developer.chrome.com/docs/lighthouse/performance/time-to-first-byte/) audit fails above 600 ms. |
+| model call → first bytes sent (server) | 450 ms | MLPerf Inference (MLCommons), LLM interactive scenario: 450 ms time to first token at the 99th percentile. This is a hardware benchmark, not a UX rule. |
+| everything else: CORS preflight, connection setup, headers → done, done → first paint, headers → first paint, every app-named span | 100 ms | Nielsen's [response-time limits](https://www.nngroup.com/articles/response-times-3-important-limits/) and Google's [RAIL](https://web.dev/articles/rail): under 100 ms feels instant. |
+
+These limits were written for whole pages or interactions; applying them to one part of the wait is Caliper's reasoning. Each hint's basis line says so. A segment exactly at its limit isn't over it.
 
 ### Chat-style pages (`--input`, `--prompt`)
 
@@ -344,7 +368,7 @@ An allowed domain that anyone can make send a request (an image proxy, an open r
 ## Known limits
 
 - **"Cold" means the first run in a fresh browser, not a first-ever visit.** All runs share one browser context. Runs 2 and later reuse connections, the HTTP cache and cached CORS preflights. That is why the median covers runs 2 onward and the cold run is reported on its own.
-- **Headers aren't the first chunk.** A streaming server that sends headers immediately shows a tiny "browser: response headers received" even when the first real chunk comes much later. That wait then shows up in "first byte → first paint", where "first byte" still means the headers arrived.
+- **Headers aren't the first chunk.** A streaming server that sends headers immediately shows a tiny "browser: response headers received" even when the first real chunk comes much later. That wait then shows up in "headers → first paint".
 - **The clock check needs `Timing-Allow-Origin` on cross-origin APIs.** Without that header the browser hides the detailed timings from Resource Timing, so the check prints `n/a`. The CORS preflight line still works. To enable the check, have your API send `Timing-Allow-Origin: <your page's origin>`.
 - **Headless by default.** In a visible window, Chromium slows down animation frames when the window is hidden, minimized or behind other windows. Caliper's watcher checks the output on every animation frame, so a slowed window would inflate the numbers. Headless runs aren't affected by window focus, and they work on servers and in CI. Use `--headed` to watch a flow, but keep the window visible while it runs.
 - **Chromium only.** Timings come from Chromium's network events.

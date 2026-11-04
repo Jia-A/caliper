@@ -90,6 +90,8 @@ export const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" :
 
 /** One row of the block, a mark or a span: each visit's value (null where it wasn't recorded). */
 export interface ServerRow {
+  kind: "mark" | "span" | "model"; // a mark, an app-named span, or model call → first bytes sent
+  name: string; // the mark's or the span's own name ("model" for the model span)
   label: string;
   values: (number | null)[]; // rounded, one per visit
   stats: { min: number; median: number; max: number } | null; // only with two or more values
@@ -129,9 +131,11 @@ export function serverBlock(visits: { visit: number; record: ServerRecord }[], n
     : statuses.every((x) => x === statuses[0]) ? `, status ${statuses[0]}`
     : `, status per visit: ${statuses.map((x) => x ?? "?").join(", ")}`;
 
-  const row = (label: string, values: (number | null)[], note?: string): ServerRow => {
+  const row = (kind: ServerRow["kind"], name: string, label: string, values: (number | null)[], note?: string): ServerRow => {
     const got = values.filter((v): v is number => v !== null);
     return {
+      kind,
+      name,
       label,
       values: values.map((v) => (v === null ? null : ms(v))),
       stats: got.length > 1 ? { min: ms(Math.min(...got)), median: median(got)!, max: ms(Math.max(...got)) } : null,
@@ -145,8 +149,8 @@ export function serverBlock(visits: { visit: number; record: ServerRecord }[], n
   const names = [...new Set(marks.map((mark) => SPAN_MARK.exec(mark)?.[1]).filter((x): x is string => x !== undefined))];
   const pairs = names.map((name) => ({ name, per: visits.map(({ record: { at } }) => spanIn(at, name)) }));
   const spans = [
-    ...pairs.map(({ name, per }) => ({ label: name, from: `${name}Start`, note: `${name}Start → ${name}End`, values: per.map((s) => ("value" in s ? s.value : null)) })),
-    { ...MODEL_SPAN, note: undefined, values: visits.map(({ record: { at } }) => (at.has(MODEL_SPAN.from) && at.has(MODEL_SPAN.to) ? at.get(MODEL_SPAN.to)! - at.get(MODEL_SPAN.from)! : null)) },
+    ...pairs.map(({ name, per }) => ({ kind: "span" as const, name, label: name, from: `${name}Start`, note: `${name}Start → ${name}End`, values: per.map((s) => ("value" in s ? s.value : null)) })),
+    { ...MODEL_SPAN, kind: "model" as const, name: "model", note: undefined, values: visits.map(({ record: { at } }) => (at.has(MODEL_SPAN.from) && at.has(MODEL_SPAN.to) ? at.get(MODEL_SPAN.to)! - at.get(MODEL_SPAN.from)! : null)) },
   ].filter((s) => s.values.some((v) => v !== null)).sort((a, b) => middle(a.from) - middle(b.from));
   // Each distinct problem once, in the order first reported, with the visits that reported it.
   const problems = [...new Set(visits.flatMap((v) => v.record.problems))].map((p) => {
@@ -158,8 +162,8 @@ export function serverBlock(visits: { visit: number; record: ServerRecord }[], n
   return {
     title: `Inside the server (from ${k} of ${plural(n, "marked run")}) — ms after the request arrived${status}`,
     visits: visits.map((v) => v.visit),
-    marks: marks.map((name) => row(RESERVED_MARKS[name] ?? name, markValues(name))),
-    spans: spans.map((s) => row(s.label, s.values, s.note)),
+    marks: marks.map((name) => row("mark", name, RESERVED_MARKS[name] ?? name, markValues(name))),
+    spans: spans.map((s) => row(s.kind, s.name, s.label, s.values, s.note)),
     noSpan: pairs.flatMap(({ name, per }) => noSpanLine(name, per, visits)),
     workers: visits.some((v) => v.record.runtime === "workers") ? WORKERS_NOTE : null,
     firstBytes: visits.some((v) => v.record.at.has("firstChunk")) ? FIRST_BYTES_NOTE : null,

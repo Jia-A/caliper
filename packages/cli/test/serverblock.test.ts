@@ -189,11 +189,21 @@ test("HTML: the pre-check and visit lines, broken pairs, Workers note, problems 
   ]) assert.ok(html.includes(want), `has: ${want}\n${html}`);
 });
 
-test("HTML: with no visit succeeding, the lines are shown and there's no table", () => {
+test("HTML: with no visit succeeding, the lines are shown open and there's no table", () => {
   const lines = [PRECHECK, "Server timings ? — 0 of 3 marked visits succeeded"];
   const html = serverSection({ lines, block: null });
   assert.ok(html.includes("Server timings ? — 0 of 3 marked visits succeeded"), html);
+  assert.ok(html.includes("<details open><summary>Run details</summary>"), html);
   assert.ok(!html.includes("<table"), html);
+});
+
+test("HTML: the table comes first; the pre-check and visit lines are in a collapsed Run details", () => {
+  const sent = "Server timings — marked visit 1 of 1 sent x-caliper-run abc on POST http://x/reply (matched POST http://x/reply)";
+  const html = serverSection(report(visits({ marks: { dbStart: 1, dbEnd: 301 } }), 1, [PRECHECK, sent]));
+  const details = html.indexOf("<details><summary>Run details</summary>");
+  assert.ok(details !== -1, html);
+  assert.ok(html.indexOf("<table") < details, "table before Run details");
+  for (const line of [PRECHECK, sent]) assert.ok(html.indexOf(line) > details, `inside Run details: ${line}`);
 });
 
 test("HTML: mark names and problems from the server are escaped", () => {
@@ -210,6 +220,7 @@ function input(server: ServerReport | null): ReportInput {
     runs: [{ run: 1, total: 500, request: null, segments: [], clock: null, reply: { firstByte: null, preReply: [] } }],
     failed: [], unidentified: [], stop: null, double: null, canary: null, csp: null,
     streaming: { status: "unknown", verdict: "Inconclusive", checks: [], notes: [] }, checks: [], server,
+    hints: { browser: null, server: null },
   };
 }
 

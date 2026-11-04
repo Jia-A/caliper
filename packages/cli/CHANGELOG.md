@@ -4,6 +4,8 @@
 
 ### Added
 
+- **Where to look.** Each segment's median is compared with a limit for its layer: 200 ms for click → request sent, 600 ms for headers received, 450 ms for model call → first bytes sent, and 100 ms for everything else, including every app-named span. Every segment over its limit is listed, in two separate lists that are never compared: browser (warm runs) and server (marked visits). The biggest comes first with evidence (median, limit, over in k of n, share of that side's total), its basis, things to check and "Caliper sees timings, not your code — these are common causes, not a diagnosis." The rest get one line each. App-named spans get the same generic text whatever their name, and "unattributed" is never hinted. Shown in the terminal and the HTML report. README: "Why these limits?". Tested with `npm run test:hints` and `npm run test:marked`.
+
 - **Server timings in the HTML report.** With `--server-timings` and `--report`, the report has an "Inside the server" section: the pre-check, visit and `?` lines as printed, then the block as a table (one column per visit, then min · median · max), the no-span lines, the Workers and first-bytes notes, and the server's problems. Its numbers are the terminal's; one line says they come from separate runs on the server's clock and are never added to the browser timings. Without `--server-timings` there's no section. Mark names and problems from the server are HTML-escaped. Tested with `npm run test:marked` and `npm run test:serverblock`.
 
 ### Changed
@@ -12,7 +14,9 @@
   - "model: first chunk" → "server: first bytes sent". It's the server's first write to the browser, so a line under the server block now says: `first bytes sent = the server's first write to the browser. If your app writes anything before the model's reply (a heartbeat, an envelope), this is that write.` It appears when a visit recorded `firstChunk`. The row's "(at the server, not the browser)" note is gone, since the label says it.
   - "model: sent → first chunk" → "model call → first bytes sent".
   - The browser segment "request → first byte" → "browser: response headers received", which is what it measures (Playwright's `responseStart`).
+  - "first byte → done" → "headers → done", and "first byte → first paint" → "headers → first paint": they start when the headers arrive.
   - The terminal's label column is wider to fit them: 36 characters in each run's rows, 32 in the server block.
+- **HTML server section:** the table comes first. The pre-check and visit lines are in a collapsed "Run details", which is open when no visit succeeded, since then those lines are the only explanation. The terminal is unchanged.
 
 ## 0.4.0 — 2026-11-04
 

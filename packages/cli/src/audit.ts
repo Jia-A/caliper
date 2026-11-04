@@ -7,6 +7,7 @@ import { launchChromium } from "./browser.js";
 import { combineImageRules, describeRule, imageRule, splitPolicies, type ImageRule } from "./csp.js";
 import { CliError, messageOf, PageLoadError, UnidentifiedRequestError } from "./errors.js";
 import { loadFailureHints } from "./loadhints.js";
+import { browserHints, formatHints, serverHints, type HintList } from "./hints.js";
 import { formatServerBlock, parseServerRecord, plural, serverBlock, type ServerRecord, type ServerReport } from "./serverblock.js";
 import { renderReport, type ReportReply } from "./report.js";
 import type {
@@ -213,6 +214,11 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
     const doneSummary = summarizeDone(loaded.filter((r) => r.run > 1).map((r) => r.result), unidentified.filter((n) => n > 1).length);
     const streamingReport = describeStreaming(doneSummary);
     console.log(formatDoneSummary(doneSummary, streamingReport));
+    // Medians of the warm runs that were measured, like the summary; none with no run measured.
+    const browserList: HintList | null = loaded.length
+      ? browserHints(loaded.filter((r) => r.run > 1).map(({ result, parts }) => ({ total: result.ms, segments: parts.segments })))
+      : null;
+    if (browserList) console.log(formatHints(browserList));
 
     let serverReport: ServerReport | null = null;
     if (serverTimings) {
@@ -220,6 +226,9 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
       const options = { url, measure, output, steps, timeout, settleMs, requestPattern, chat };
       serverReport = await markedVisits(context, options, serverTimings, loaded, failed, unidentified);
     }
+    // From the server block only: never compared with the browser list.
+    const serverList: HintList | null = serverReport?.block ? serverHints(serverReport.block) : null;
+    if (serverList) console.log(formatHints(serverList));
 
     let stopReport: StopReport | null = null;
     if (stopPattern) {
@@ -309,6 +318,7 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
         streaming: streamingReport,
         checks: entries,
         server: serverReport,
+        hints: { browser: browserList, server: serverList },
       });
       writeFileSync(reportPath, html);
       console.log(`report: ${reportPath}`);
@@ -1779,7 +1789,7 @@ function breakdown(result: RunResult): Breakdown {
     ms: toFirstByte === null ? null : toFirstByte - r.connectionSetup,
   });
   if (r.end !== null && r.end <= firstPaintAt) {
-    segments.push({ key: "download", label: "first byte → done", ms: span(r.firstByte, r.end), note: abortNote(r) ?? undefined });
+    segments.push({ key: "download", label: "headers → done", ms: span(r.firstByte, r.end), note: abortNote(r) ?? undefined });
     segments.push({
       key: "render",
       label: "done → first paint",
@@ -1791,7 +1801,7 @@ function breakdown(result: RunResult): Breakdown {
       r.firstByte === null ? "no response by first paint"
       : r.end === null ? (r.failure ? `ended ${r.failure}` : "still streaming at first paint")
       : [`done ${ms(r.end - firstPaintAt)} ms after paint`, abortNote(r)].filter(Boolean).join("; ");
-    segments.push({ key: "streaming", label: "first byte → first paint", ms: span(r.firstByte, firstPaintAt), note });
+    segments.push({ key: "streaming", label: "headers → first paint", ms: span(r.firstByte, firstPaintAt), note });
   }
 
   let clock: string;
