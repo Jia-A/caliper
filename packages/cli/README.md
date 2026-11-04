@@ -44,8 +44,7 @@ caliper audit https://your-app.example.com/blog/your-post-id \
   --auth auth.json \
   --step "share on socials" \
   --measure "^(re)?generate$" \
-  --output textarea \
-  --report
+  --output textarea
 ```
 
 Caliper opens the page, clicks **Share on socials**, then clicks **Generate** or **Regenerate**. It times how long it takes until the `textarea` first shows new content, and repeats this three times:
@@ -63,10 +62,24 @@ run 1 (cold)   7702 ms
 run 2          5746 ms
     ...
 cold 7702 ms · median 6080 ms · worst 7702 ms
-report: /path/to/caliper-report.html
+...
+report: wrote /path/to/caliper-report.html
 ```
 
-`--report` also writes a self-contained HTML timeline with one stacked bar per run and the same data as tables. It works offline.
+### The HTML report
+
+Every audit that finishes writes `caliper-report.html` in the current directory. The last terminal line says where, and whether it `wrote` a new file or `overwrote` one. `--report <path>` writes it elsewhere, and `--no-report` turns it off (passing both is an error). When the audit ends early, the last line says why there's no report: `no report written: every run failed to load`, or `no report written: the audit stopped on the error below`. The report is one self-contained file and works offline. From top to bottom:
+
+1. **Verdict.** Two plain sentences, only from measured numbers: `People waited a median of <X> ms for the first word (<n> warm runs).`, then one line per side. For example, `In the browser: <top hint> — <R>× its limit, in <k> of <n> warm runs.` and, with `--server-timings`, `Inside the server: <top hint> — <R>× its limit, in <k> of <n> marked visits.` A side with no hint says `nothing over its limit.` The two sides are never merged or compared. The terminal prints the same lines under `verdict`, after the summary.
+2. **One bar per side.**
+   - **Browser:** the warm run nearest the median total, its segments in order. With an odd number of warm runs, that's the median run.
+   - **Server:** the marked visit nearest the median "server: first bytes sent", its spans from arrival to first bytes sent. Spans that overlap or nest go on separate rows, never stacked.
+   Each segment shows its name and ms. A segment over its limit is drawn in a warning colour with a hatch and labelled "over". A key under the bar repeats every segment in words (`… — 311 ms — over its 100 ms limit`). Time no segment explains is drawn as "unattributed" and is never "over".
+3. **Where to look.** The hints for that side ([Where to look](#where-to-look)), right under its bar.
+4. **Checks.** The summary block and each check's section (streaming, Stop, double-send, canary, CSP).
+5. **Details**, collapsed: the cold, median and worst tiles, the timeline per run, the Data table (one row per segment, one column per run, so it fits a narrow screen and scrolls inside its own box if it doesn't), request matching with the clock check, "Before the reply", and the server marks table with its run details.
+
+It follows the system's light or dark theme, and the layout works down to phone width. Tested with `npm run test:hints` (unit), and with `npm run test:marked` and `npm run test:auth` (end to end).
 
 ## Commands and flags
 
@@ -89,7 +102,8 @@ report: /path/to/caliper-report.html
 | `--auth <path>` | none | Session saved by `caliper login`. A path with no file is an error before any run. Without `--auth` there's no saved session (an `auth.json` in the current directory is not loaded), and Caliper prints `No --auth given: running without a saved session.` |
 | `--timeout <ms>` | `60000` | Limit for page loads, finding buttons, the output changing, and the AI request finishing. |
 | `--request <regex>` | auto | Use the first request whose URL matches (case-insensitive) instead of auto-detecting it. |
-| `--report [path]` | off | Write an HTML report. A bare `--report` writes `caliper-report.html` in the current directory. |
+| `--report <path>` | `caliper-report.html` | Where to write the HTML report. It's written in the current directory unless you give a path. A bare `--report` uses the default. |
+| `--no-report` | off | Don't write the HTML report. |
 | `--settle-ms <ms>` | `2000` | The answer counts as done at its last change once the output has been unchanged this long. |
 | `--stop <text>` | off | Run the [Stop check](#stop---stop) with the button whose name matches. |
 | `--double` | off | Run the [double-send check](#double-send---double). |
@@ -131,7 +145,7 @@ caliper audit https://your-app.example.com/chat --input "#msg" --prompt "hello" 
 
 ### Marked visit (`--server-timings`)
 
-Server-side timings from marked runs, read from a Caliper wrapper on your server: [`caliper-timings`](https://github.com/Jia-A/caliper/tree/main/packages/timings#readme), or anything that implements its [protocol](https://github.com/Jia-A/caliper/blob/main/packages/timings/SPEC.md). They're printed in the terminal, and with `--report` the HTML report shows the same lines and numbers in its own "Inside the server" section.
+Server-side timings from marked runs, read from a Caliper wrapper on your server: [`caliper-timings`](https://github.com/Jia-A/caliper/tree/main/packages/timings#readme), or anything that implements its [protocol](https://github.com/Jia-A/caliper/blob/main/packages/timings/SPEC.md). They're printed in the terminal, and the HTML report shows the same numbers: the server's bar and hints near the top, and the full table under Details.
 
 ```sh
 CALIPER_TOKEN=… caliper audit http://localhost:5173/post/1 --measure "^generate$" --output textarea \
@@ -224,7 +238,7 @@ After the timed runs, Caliper builds a match key from the AI request each run pi
 - **Their timing isn't reported.** Marked visits aren't timed runs and are left out of the medians, because they run with request interception on, which Playwright documents as turning off the HTTP cache.
 - **Requests made during page load are never stamped or counted.** Interception starts just before the click and ends with the run.
 - **Tested** against local fixtures only (including a fake wrapper that answers like Quill's, in the same order), in click runs and chat-style runs, with and without `--request`. Several visits are tested in click runs: all succeed, one of three fails, all fail, one visit, and one visit's record missing a mark. Span pairing is tested with Quill's `postgresStart`/`postgresEnd` (shown as `postgres`), with app-chosen pairs, and with a Start without its End, an End without its Start, and a reversed pair. It hasn't been tested on a real server, on a cross-origin API behind a CORS preflight, or together with `--stop`, `--double` or `--canary`.
-- **In the HTML report** (`--report`), only with `--server-timings`: an "Inside the server" section with the block as a table (one column per visit, then min · median · max), the no-span lines, the Workers and first-bytes notes, the server's problems and the server hints ([Where to look](#where-to-look)). Then come the pre-check, visit and `?` lines as printed, in a collapsed "Run details", which is open when no visit succeeded. One line says these come from separate runs on the server's clock and are never added to the browser timings. Tested end to end on the fixtures: every row has the terminal's numbers, the browser tiles stay the timed runs' own, and with no visit succeeding there are the lines and no table. Mark names and problems from the server are escaped (unit-tested).
+- **In the HTML report**, only with `--server-timings`: near the top, an "Inside the server" section with the server's bar and hints ([Where to look](#where-to-look)), and one line saying these come from separate runs on the server's clock and are never added to the browser timings. Under Details: the block as a table (one column per visit, then min · median · max), the no-span lines, the Workers and first-bytes notes, and the server's problems. Then come the pre-check, visit and `?` lines as printed, in "Run details", which is open when no visit succeeded. Tested end to end on the fixtures: every row has the terminal's numbers, the browser tiles stay the timed runs' own, and with no visit succeeding there are the lines and no table. Mark names and problems from the server are escaped (unit-tested).
 
 ## What gets measured
 
@@ -277,7 +291,7 @@ Within each list, the segment furthest over its own limit (median ÷ limit) come
 | headers → first paint, headers → done | [Streams API (MDN)](https://developer.mozilla.org/en-US/docs/Web/API/Streams_API) |
 | done → first paint | [Optimize INP](https://web.dev/articles/optimize-inp) | The browser share is each run's own share of its total, then the median. The server share is of the time to "server: first bytes sent", and when that wasn't recorded, the hint says there's no share. "unattributed" is never hinted. With one value, the hint says "300 ms" rather than "median 300 ms".
 
-The browser list follows the browser summary in the terminal. The server list follows the "Inside the server" block. In the HTML report, the browser list is a "Where to look — browser" section, and the server list sits inside the server section.
+The browser list follows the browser summary in the terminal. The server list follows the "Inside the server" block. In the HTML report, each list sits under its side's bar, in that side's own section.
 
 Tested with `npm run test:hints` (unit) and `npm run test:marked` (end to end on the fixtures). It hasn't been tried on a real app yet.
 
@@ -316,10 +330,10 @@ caliper audit https://your-app.example.com/blog/your-post-id \
   --step "share on socials" \
   --measure "^(re)?generate$" \
   --output textarea \
-  --stop "^stop$" --double --canary --report
+  --stop "^stop$" --double --canary
 ```
 
-Every check ends in a verdict marked ✓ (pass), ⚠ (warning), ✗ (fail) or ? (inconclusive). Failing and warning verdicts come with a `Fix:` line based on what was measured. The terminal ends with a summary block, one line per check, and the HTML report shows the same block at the top.
+Every check ends in a verdict marked ✓ (pass), ⚠ (warning), ✗ (fail) or ? (inconclusive). Failing and warning verdicts come with a `Fix:` line based on what was measured. The terminal ends with a summary block, one line per check, then the verdict. The HTML report shows the same block as its Checks section, after the verdict and the two sides.
 
 ### Streaming (always on)
 

@@ -221,6 +221,8 @@ function input(server: ServerReport | null): ReportInput {
     failed: [], unidentified: [], stop: null, double: null, canary: null, csp: null,
     streaming: { status: "unknown", verdict: "Inconclusive", checks: [], notes: [] }, checks: [], server,
     hints: { browser: null, server: null },
+    verdict: ["People waited a median of 500 ms for the first word (1 warm run)."],
+    bars: { browser: null, server: null },
   };
 }
 
@@ -230,7 +232,13 @@ test("HTML report: the server section only with --server-timings, and the browse
   const v = visits({ marks: { modelCallSent: 100, firstChunk: 9000 } });
   const withServer = renderReport(input(report(v, 1, [PRECHECK])));
   assert.ok(withServer.includes("Inside the server"));
-  const browserPart = (html: string) => html.slice(0, html.indexOf('<section aria-labelledby="streaming-h">'));
-  assert.equal(browserPart(withServer), browserPart(without), "tiles, timeline and tables are the same with and without server numbers");
+  // Everything but the two server sections (the top one and the marks table in the details), and
+  // the details summary that names them.
+  const cut = (html: string, id: string) => {
+    const at = html.indexOf(`<section aria-labelledby="${id}">`);
+    return at === -1 ? html : html.slice(0, at) + html.slice(html.indexOf("</section>", at) + "</section>".length);
+  };
+  const browserPart = (html: string) => cut(cut(html, "server-top-h"), "server-h").replace(", server marks</summary>", "</summary>").replace(/\n\s*\n/g, "\n");
+  assert.equal(browserPart(withServer), browserPart(without), "verdict, tiles, timeline and tables are the same with and without server numbers");
   assert.ok(!browserPart(withServer).includes("9000") && !browserPart(withServer).includes("8900"), "no server number in the browser part");
 });

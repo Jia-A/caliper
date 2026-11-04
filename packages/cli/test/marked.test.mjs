@@ -47,6 +47,9 @@
 // the browser summary, the server list after the server block, neither naming the other's parts;
 // each evidence median is the median of the numbers printed above it (warm runs' rows, the
 // block's median); the same lists in the HTML report, in separate sections. (h): no server list.
+// The verdict (dh): under the summary in the terminal and at the top of the report, from the
+// printed numbers: the browser median wait, then each side's top hint with how many times its
+// limit; each side's bar with the over-limit segment labelled "over". (h): no server line or bar.
 // The HTML report (--report): the same block, with the pre-check and visit lines, in its own
 // section only with --server-timings (h: none without it); (m) every row has the terminal's
 // numbers and the browser tiles stay the timed runs' own; (e3) no visit succeeded: the lines,
@@ -101,7 +104,7 @@ function spanOf(record, name) {
 
 // Runs the CLI; never throws. Returns { code, stdout, stderr }.
 async function caliper(url, args, env) {
-  const all = [cli, "audit", url, "--measure", "^generate$", "--output", "#out", "--settle-ms", "500", "--timeout", "15000", "--auth", auth, ...args];
+  const all = [cli, "audit", url, "--measure", "^generate$", "--output", "#out", "--settle-ms", "500", "--timeout", "15000", "--auth", auth, ...args, ...(args.includes("--report") ? [] : ["--no-report"])];
   try {
     const { stdout, stderr } = await execFileAsync(process.execPath, all, { timeout: 120_000, env: { ...process.env, CALIPER_TOKEN: "", ...env } });
     return { code: 0, stdout, stderr };
@@ -319,7 +322,9 @@ function checkVisits(c, n, ok) {
   }
   const model = (r) => (r.marks.modelCallSent === undefined || r.marks.firstChunk === undefined ? null : r.marks.firstChunk - r.marks.modelCallSent);
   checkRow(MODEL_SPAN, records.map(model));
-  if (k === 1) check(!/median/.test(text.slice(text.indexOf("Inside the server"))), `(${label}) the word "median" isn't in the block with 1 visit`, out);
+  const blockLines = text.slice(text.indexOf("Inside the server")).split("\n");
+  const blockEnd = blockLines.findIndex((l, i) => i > 0 && !l.startsWith(" "));
+  if (k === 1) check(!/median/.test(blockLines.slice(0, blockEnd === -1 ? undefined : blockEnd).join("\n")), `(${label}) the word "median" isn't in the block with 1 visit`, out);
 }
 
 // A timed run's segment rows: label → ms.
@@ -426,6 +431,8 @@ try {
   const hHtml = readReport("h");
   check(!!hHtml && serverPart(hHtml) === null && !hHtml.includes("Inside the server"), "(h) the HTML report has no server section without --server-timings", h.out);
   check(!!hHtml && !hHtml.includes("Where to look — server"), "(h) the HTML report has no server hints without --server-timings", h.out);
+  check(/^    In the browser: /m.test(h.out.stdout) && !/^    Inside the server: /m.test(h.out.stdout), "(h) the terminal verdict has no server line", h.out);
+  check(!!hHtml && !hHtml.includes("server-top-h") && !hHtml.includes("Inside the server"), "(h) the HTML report has no server verdict line or bar", h.out);
 
   // (dh) Where to look: a browser hint (headers → first paint) and a server hint (postgres 150 ms).
   const dh = await runCase("dh, hints", "dh", { runs: 3, serverRuns: 2, args: reportArgs("dh") });
@@ -451,14 +458,34 @@ try {
   check(!!browser && !browser.body.some((l) => /postgres|model call|first bytes sent/.test(l)), "(dh) the browser list names no server part", dh.out);
   check(!!serverHints && !serverHints.body.some((l) => /browser:|headers →|click →/.test(l)), "(dh) the server list names no browser part", dh.out);
   const dhHtml = readReport("dh") ?? "";
-  const htmlBrowserAt = dhHtml.indexOf('<section aria-labelledby="hints-browser-h">');
+  const htmlBrowserAt = dhHtml.indexOf('<section aria-labelledby="browser-h">');
   const htmlBrowser = htmlBrowserAt === -1 ? "" : dhHtml.slice(htmlBrowserAt, dhHtml.indexOf("</section>", htmlBrowserAt));
-  const dhServer = serverPart(dhHtml) ?? "";
+  const topAt = dhHtml.indexOf('<section aria-labelledby="server-top-h">');
+  const dhServer = topAt === -1 ? "" : dhHtml.slice(topAt, dhHtml.indexOf("</section>", topAt));
   const htmlEsc = (t) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   check(!!browser && htmlBrowser.includes(htmlEsc(browser.body[0].trim())) && !htmlBrowser.includes("postgres"),
     "(dh) the HTML browser hints section has the terminal's evidence line and no server part", dh.out);
   check(!!serverHints && dhServer.includes("Where to look — server") && dhServer.includes(htmlEsc(serverHints.body[0].trim())),
     "(dh) the HTML server section has the server hints with the terminal's evidence line", dh.out);
+  // The verdict, from the numbers printed above it.
+  const dhMedian = /^cold \d+ ms · median (\d+) ms/m.exec(dhOut)?.[1];
+  const ratioOf = (list) => /— ([\d.]+×) its/.exec(list?.body[0] ?? "")?.[1];
+  const verdictWant = [
+    `People waited a median of ${dhMedian} ms for the first word (2 warm runs).`,
+    `In the browser: ${browser?.first?.label} — ${ratioOf(browser)} its limit, in ${browser?.first?.over} of ${browser?.first?.of} warm runs.`,
+    `Inside the server: postgres — ${ratioOf(serverHints)} its limit, in ${serverHints?.first?.over} of ${serverHints?.first?.of} marked visits.`,
+  ];
+  const vAt = lines.indexOf("verdict");
+  check(vAt > lines.indexOf("summary") && JSON.stringify(lines.slice(vAt + 1, vAt + 4)) === JSON.stringify(verdictWant.map((l) => `    ${l}`)) && /^report: (wrote|overwrote) /.test(lines[vAt + 4] ?? ""),
+    `(dh) the terminal verdict under the summary, from the printed numbers, then the report line (want: ${verdictWant.join(" | ")}; got: ${lines.slice(vAt + 1, vAt + 4).join(" | ")})`, dh.out);
+  const vSection = dhHtml.slice(dhHtml.indexOf('aria-labelledby="verdict-h"'), dhHtml.indexOf('aria-labelledby="browser-h"'));
+  check(verdictWant.every((l) => vSection.includes(htmlEsc(l))), "(dh) the HTML verdict has the same three lines, before the browser section", dh.out);
+  check(/<div class="bseg over"[^>]*><span class="bname">headers → first paint<\/span> <span class="bms">\d+ ms<\/span> <span class="tag-over">over<\/span>/.test(htmlBrowser),
+    "(dh) the browser bar labels headers → first paint \"over\"", dh.out);
+  check(/<div class="bseg over"[^>]*><span class="bname">postgres<\/span> <span class="bms">\d+ ms<\/span> <span class="tag-over">over<\/span>/.test(dhServer)
+    && /<div class="bseg ok"[^>]*><span class="bname">model call → first bytes sent<\/span>/.test(dhServer),
+    "(dh) the server bar: postgres over, model call → first bytes sent within its limit", dh.out);
+  check(/<details class="more">/.test(dhHtml) && !/<details class="more" open/.test(dhHtml), "(dh) the details are collapsed", dh.out);
   check(h.line === null, `(h) nothing printed about server timings (got: ${h.line ?? "nothing"})`, h.out);
 
   // (i) --server-timings names another origin: the token isn't sent.

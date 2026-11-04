@@ -26,7 +26,7 @@ const msOf = (block, label) => {
 // Runs the CLI; never throws. Returns { code, stdout, stderr }.
 async function caliper(args) {
   try {
-    const { stdout, stderr } = await execFileAsync(process.execPath, [cli, "audit", ...args, "--auth", auth], { timeout: 120_000 });
+    const { stdout, stderr } = await execFileAsync(process.execPath, [cli, "audit", ...args, "--auth", auth, ...(args.includes("--report") ? [] : ["--no-report"])], { timeout: 120_000 });
     return { code: 0, stdout, stderr };
   } catch (err) {
     return { code: err.code ?? 1, stdout: err.stdout ?? "", stderr: err.stderr ?? err.message };

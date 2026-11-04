@@ -4,6 +4,15 @@
 
 ### Added
 
+- **The HTML report is on by default.** Every audit that finishes writes `caliper-report.html` in the current directory. The last line is `report: wrote <path>` or `report: overwrote <path>`. Use `--report <path>` for another path and `--no-report` for none (both together is an error). An early exit ends with `no report written: every run failed to load` or `no report written: the audit stopped on the error below`. Tested with `npm run test:auth`.
+- **Report restructured**, top to bottom:
+  - the verdict: the median wait for the first word, then each side's top hint with how many times its limit, or "nothing over its limit";
+  - one bar per side: the browser's warm run nearest the median, and the server's marked visit nearest the median, with overlapping spans on separate rows. Over-limit segments are drawn in a warning colour and labelled "over";
+  - where to look, under each bar;
+  - the checks;
+  - a collapsed Details with the tiles, the per-run timeline, the Data table, request matching and clock check, and the server marks table.
+  The terminal prints the same verdict lines under the summary. Tested with `npm run test:hints` and `npm run test:marked`.
+
 - **Things to check when a `--step` or `--measure` button doesn't appear.** The error stays the same and is followed by:
   - the visible buttons' accessible names at the timeout (at most 15, trimmed, deduped), then `None matched /<pattern>/i.`;
   - with `--auth`, a line when a cookie in that file for the audited site has expired, with its date and the `caliper login` command (nothing about login otherwise);
@@ -22,6 +31,7 @@
   - "first byte → done" → "headers → done", and "first byte → first paint" → "headers → first paint": they start when the headers arrive.
   - The clock check now reads `response headers within <n> ms of Resource Timing`, or `n/a (Resource Timing hides the response headers time without Timing-Allow-Origin)`.
   - The terminal's label column is wider to fit them: 36 characters in each run's rows, 32 in the server block.
+- **Data table** in the report: one row per segment and one column per run, so it fits a narrow screen. Its headers wrap, and it scrolls inside its own box rather than being cut off. Request matching and the clock check are now a list per run.
 - **HTML server section:** the table comes first. The pre-check and visit lines are in a collapsed "Run details", which is open when no visit succeeded, since then those lines are the only explanation. The terminal is unchanged.
 
 ## 0.4.0 — 2026-11-04

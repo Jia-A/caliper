@@ -12,13 +12,15 @@ const USAGE = `Usage:
   caliper audit <url> --input <selector> --prompt <text> --output <selector>
       [--measure <text> | --measure-selector <css>]
       [--step <text>]... [--runs 3] [--headed] [--auth <path>] [--timeout 60000]
-      [--request <regex>] [--report [path]] [--settle-ms 2000] [--stop <text>] [--double]
+      [--request <regex>] [--report <path> | --no-report] [--settle-ms 2000] [--stop <text>] [--double]
       [--canary] [--canary-input <selector>] [--csp] [--server-timings <origin> [--server-runs 3]]
       Measure time from clicking the --measure button to first painted output,
       and break it down using the AI request (auto-detected, or the first whose
-      URL matches --request). --report writes an HTML timeline
-      (default: ${DEFAULT_REPORT}). The answer counts as done at its last change
-      once the output has been unchanged for --settle-ms.
+      URL matches --request). Every completed audit writes an HTML report to
+      ${DEFAULT_REPORT} in the current directory (--report <path> for another
+      path, --no-report for none); the last line says where, or why there's none.
+      The answer counts as done at its last change once the output has been
+      unchanged for --settle-ms.
       --auth loads a session saved by caliper login; without it there's no saved
       session (an auth.json in the current directory isn't loaded).
       --stop adds one extra run that clicks the Stop button mid-stream and checks
@@ -99,6 +101,7 @@ const COMMANDS = {
       "settle-ms": { type: "string", default: "2000" },
       request: { type: "string" },
       report: { type: "string" },
+      "no-report": { type: "boolean", default: false },
       stop: { type: "string" },
       double: { type: "boolean", default: false },
       canary: { type: "boolean", default: false },
@@ -118,6 +121,7 @@ const COMMANDS = {
         throw new CliError("audit: --measure <text> or --measure-selector <css> (or --input <selector>) is required.");
       }
       if (!values.output) throw new CliError("audit: --output <selector> is required.");
+      if (values["no-report"] && values.report !== undefined) throw new CliError("audit: pass --report <path> or --no-report, not both.");
       if (values.input && values.prompt === undefined) throw new CliError("audit: --input needs --prompt <text>.");
       if (values.prompt !== undefined && !values.input) throw new CliError("audit: --prompt needs --input <selector>.");
       if (values.input) {
@@ -147,7 +151,7 @@ const COMMANDS = {
         timeout: positiveInt(values.timeout, "--timeout"),
         settleMs: positiveInt(values["settle-ms"], "--settle-ms"),
         request: values.request,
-        report: values.report,
+        report: values["no-report"] ? undefined : (values.report ?? DEFAULT_REPORT),
         stop: values.stop,
         double: values.double,
         canary: values.canary,

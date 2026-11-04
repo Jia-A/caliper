@@ -139,8 +139,9 @@ export interface Hint {
   links: string[]; // Learn more; none for server spans
   evidence: string; // the full hint's first line
   short: string; // the hint as one line, after the first
+  ratio: string; // how far over its limit, e.g. "5.3×"
 }
-type Measured = Omit<Hint, "evidence" | "short">;
+type Measured = Omit<Hint, "evidence" | "short" | "ratio">;
 
 /** One side's hints, biggest median first, or why there are none. */
 export interface HintList {
@@ -148,6 +149,7 @@ export interface HintList {
   scope: string; // which runs the medians cover
   hints: Hint[];
   none: string | null; // set when hints is empty
+  within: boolean; // measured, and nothing over its limit
   disclaimer: string;
 }
 
@@ -156,9 +158,11 @@ export interface HintList {
 const rank = (a: Measured, b: Measured) =>
   b.median / b.limit - a.median / a.limit || b.over / b.of - a.over / a.of || b.median - a.median;
 
-const list = (side: HintList["side"], scope: string, measured: Measured[], none = "Every part is within its limit."): HintList => {
-  const hints = measured.sort(rank).map((h) => ({ ...h, evidence: evidence(h), short: shortLine(h) }));
-  return { side, scope, hints, none: hints.length ? null : none, disclaimer: DISCLAIMER };
+const WITHIN = "Every part is within its limit.";
+
+const list = (side: HintList["side"], scope: string, measured: Measured[], none = WITHIN): HintList => {
+  const hints = measured.sort(rank).map((h) => ({ ...h, evidence: evidence(h), short: shortLine(h), ratio: times(h) }));
+  return { side, scope, hints, none: hints.length ? null : none, within: !hints.length && none === WITHIN, disclaimer: DISCLAIMER };
 };
 
 /** Browser hints from the warm runs (2..N) that were measured: each segment's median over them. */
@@ -169,10 +173,11 @@ export function browserHints(warm: { total: number; segments: Segment[] }[]): Hi
   }
   const hints: Measured[] = [];
   for (const [key, layer] of Object.entries(BROWSER) as [SegmentKey, (typeof BROWSER)[SegmentKey] & {}][]) {
-    // Each run's value and its share of that run's total; runs where it's unknown or absent are left out.
+    // Each run's value as the terminal prints it (whole ms), so the median is the median of the
+    // printed numbers, and its share of that run's total; unknown or absent runs are left out.
     const got = warm.flatMap(({ total, segments }) => {
       const s = (segments as Segment[]).find((seg) => seg.key === key);
-      return s && s.ms !== null ? [{ ms: s.ms, share: total > 0 ? (s.ms / total) * 100 : null }] : [];
+      return s && s.ms !== null ? [{ ms: Math.round(s.ms), share: total > 0 ? (s.ms / total) * 100 : null }] : [];
     });
     const m = median(got.map((g) => g.ms));
     if (m === null || m <= layer.limit.ms) continue;
@@ -275,4 +280,116 @@ export function formatHints({ side, scope, hints, none }: HintList): string {
   );
   if (rest.length) lines.push("  also over their limits:", ...rest.map((h) => `    ${h.short}`));
   return lines.join("\n");
+}
+
+// --- The verdict and the bars at the top of the report ---
+
+/**
+ * The verdict: the median wait, then one line per side, from its top hint. The sides are never
+ * merged or compared. server: null without --server-timings; list null when no visit succeeded.
+ */
+export function verdictLines({ median, warm, browser, server }: {
+  median: number | null;
+  warm: number;
+  browser: HintList | null;
+  server: { list: HintList | null } | null;
+}): string[] {
+  const side = (name: string, list: HintList | null, why: string) => {
+    if (!list || (!list.hints.length && !list.within)) return `${name}: no hints (${why}).`;
+    const top = list.hints[0];
+    return top ? `${name}: ${top.label} — ${top.ratio} its limit, in ${top.over} of ${top.of} ${top.unit}.` : `${name}: nothing over its limit.`;
+  };
+  return [
+    median === null
+      ? "No warm run was measured, so there's no median wait. Use --runs 2 or more."
+      : `People waited a median of ${median} ms for the first word (${warm} warm run${warm === 1 ? "" : "s"}).`,
+    side("In the browser", browser, "no warm run was measured"),
+    ...(server ? [side("Inside the server", server.list, "no marked visit succeeded")] : []),
+  ];
+}
+
+/** One drawn segment: where it starts and how long it is (ms), and whether it's over its limit. */
+export interface BarPart {
+  label: string;
+  ms: number;
+  start: number;
+  over: boolean;
+  limit: number | null; // null for unattributed time
+}
+
+/** One side's bar: a lane per row (spans that overlap go on separate rows). */
+export interface Bar {
+  title: string;
+  total: number; // the axis, ms
+  lanes: BarPart[][];
+}
+
+// The index of the value nearest the median of values; the smaller value on a tie.
+function nearestMedian(values: number[]): { at: number; median: number; exact: boolean } {
+  const m = median(values)!;
+  let at = 0;
+  values.forEach((v, i) => {
+    const [d, best] = [Math.abs(v - m), Math.abs(values[at]! - m)];
+    if (d < best || (d === best && v < values[at]!)) at = i;
+  });
+  return { at, median: m, exact: values[at] === m };
+}
+
+const which = (exact: boolean, what: string, m: number) => (exact ? `the median ${what}` : `the ${what} nearest the median (${m} ms)`);
+
+/** The browser bar: the warm run nearest the median total, its segments in order. */
+export function browserBar(warm: { run: number; total: number; segments: Segment[] }[]): Bar | null {
+  if (warm.length === 0) return null;
+  const { at, median: m, exact } = nearestMedian(warm.map((r) => r.total));
+  const { run, total, segments } = warm[at]!;
+  const parts: BarPart[] = [];
+  let start = 0;
+  for (const s of segments as Segment[]) {
+    if (s.ms === null || s.key === "other") continue;
+    const ms = Math.round(Math.max(0, s.ms));
+    const limit = BROWSER[s.key]?.limit.ms ?? null;
+    parts.push({ label: s.label, ms, start, over: limit !== null && ms > limit, limit });
+    start += ms;
+  }
+  // What no segment explains (an unknown segment, or no request): drawn, never hinted.
+  if (total - start > 0.5) parts.push({ label: "unattributed", ms: Math.round(total - start), start, over: false, limit: null });
+  return { title: `Run ${run}, ${which(exact, "warm run", m)}: ${total} ms from click to first word`, total, lanes: [parts] };
+}
+
+/** The server bar: the visit nearest the median first bytes sent, its spans on rows that don't overlap. */
+export function serverBar(block: ServerBlock): Bar | null {
+  const mark = (name: string) => block.marks.find((r) => r.name === name);
+  const firstBytes = mark("firstChunk");
+  // Each visit's axis: first bytes sent, or else the end of its last span.
+  const ends = block.visits.map((_, i) => {
+    const fb = firstBytes?.values[i];
+    if (fb !== undefined && fb !== null) return fb;
+    const spanEnds = block.spans.flatMap((s) => {
+      const start = mark(s.kind === "model" ? "modelCallSent" : `${s.name}Start`)?.values[i];
+      return start != null && s.values[i] != null ? [start + s.values[i]!] : [];
+    });
+    return spanEnds.length ? Math.max(...spanEnds) : null;
+  });
+  const known = ends.flatMap((e, i) => (e === null ? [] : [{ e, i }]));
+  if (!known.length || !block.spans.length) return null;
+  const { at, median: m, exact } = nearestMedian(known.map((k) => k.e));
+  const i = known[at]!.i;
+  const parts = block.spans
+    .flatMap((s) => {
+      const start = mark(s.kind === "model" ? "modelCallSent" : `${s.name}Start`)?.values[i];
+      const ms = s.values[i];
+      if (start == null || ms == null || s.kind === "mark") return [];
+      const limit = s.kind === "model" ? LIMITS.model.ms : LIMITS.instant.ms;
+      return [{ label: s.label, ms, start, over: ms > limit, limit }];
+    })
+    .sort((a, b) => a.start - b.start);
+  // Each span on the first row where it doesn't overlap the one before.
+  const lanes: BarPart[][] = [];
+  for (const p of parts) {
+    const lane = lanes.find((l) => l.at(-1)!.start + l.at(-1)!.ms <= p.start);
+    if (lane) lane.push(p);
+    else lanes.push([p]);
+  }
+  const to = firstBytes?.values[i] != null ? "server: first bytes sent" : "the end of its last span";
+  return { title: `Marked visit ${block.visits[i]}, ${which(exact, "visit", m)}: ${known[at]!.e} ms from arrival to ${to}`, total: known[at]!.e, lanes };
 }

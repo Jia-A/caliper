@@ -7,7 +7,7 @@ import { launchChromium } from "./browser.js";
 import { combineImageRules, describeRule, imageRule, splitPolicies, type ImageRule } from "./csp.js";
 import { ButtonNotFoundError, CliError, messageOf, PageLoadError, UnidentifiedRequestError } from "./errors.js";
 import { buttonHints, buttonNames, expiredLoginCookies, loadFailureHints } from "./loadhints.js";
-import { browserHints, formatHints, serverHints, type HintList } from "./hints.js";
+import { browserBar, browserHints, formatHints, serverBar, serverHints, verdictLines, type HintList } from "./hints.js";
 import { formatServerBlock, parseServerRecord, plural, serverBlock, type ServerRecord, type ServerReport } from "./serverblock.js";
 import { renderReport, type ReportReply } from "./report.js";
 import type {
@@ -81,7 +81,7 @@ export interface AuditOptions {
   timeout: number;
   settleMs: number;
   request: string | undefined;
-  report: string | undefined;
+  report: string | undefined; // the HTML report's path; undefined with --no-report
   stop: string | undefined;
   double: boolean;
   canary: boolean;
@@ -205,6 +205,7 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
 
     if (loaded.length === 0 && unidentified.length === 0) {
       console.log("Inconclusive — page failed to load");
+      if (report) console.log("no report written: every run failed to load");
       return;
     }
 
@@ -297,6 +298,14 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
       ...(cspReport ? [{ name: "csp", report: cspReport }] : []),
     ];
     console.log(formatSummaryBlock(entries));
+    // The verdict, under the summary: the same lines as the report's top.
+    const verdict = verdictLines({
+      median: summary?.median ?? null,
+      warm: summary?.warm ?? 0,
+      browser: browserList,
+      server: serverTimings ? { list: serverList } : null,
+    });
+    console.log(["verdict", ...verdict.map((l) => `    ${l}`)].join("\n"));
 
     if (report) {
       const reportPath = resolve(report);
@@ -319,11 +328,18 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
         checks: entries,
         server: serverReport,
         hints: { browser: browserList, server: serverList },
+        verdict,
+        bars: {
+          browser: browserBar(loaded.filter((r) => r.run > 1).map(({ run, result, parts }) => ({ run, total: result.ms, segments: parts.segments }))),
+          server: serverReport?.block ? serverBar(serverReport.block) : null,
+        },
       });
+      const existed = existsSync(reportPath);
       writeFileSync(reportPath, html);
-      console.log(`report: ${reportPath}`);
+      console.log(`report: ${existed ? "overwrote" : "wrote"} ${reportPath}`);
     }
   } catch (err) {
+    if (report) console.log("no report written: the audit stopped on the error below");
     if (err instanceof ButtonNotFoundError) throw withButtonHints(err, url, auth, authPath);
     throw err;
   } finally {

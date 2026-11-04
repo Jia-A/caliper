@@ -15,10 +15,17 @@
 //   (f) --auth whose cookie for this site expired: the login line with the file and date;
 //   (g) --auth with a valid cookie: nothing about login;
 //   (h) the same for a --step button.
+// The HTML report is on by default:
+//   (i) no --report: caliper-report.html in the current directory, last line "report: wrote
+//       <path>"; a second run "report: overwrote <path>";
+//   (j) --no-report: no file, no report line; (k) --report <path>: written there;
+//   (l) every run fails to load: "no report written: every run failed to load", no file;
+//   (m) --report with --no-report: an error before any run;
+//   (n) an audit stopped by an error: "no report written: the audit stopped on the error below".
 // Run with `npm run test:auth` (builds first).
 
 import { execFile } from "node:child_process";
-import { mkdtempSync, realpathSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -125,6 +132,33 @@ try {
   const hSeen = SEEN.replace("/^nosuch$/i", "/^nostep$/i");
   check(h.code !== 0 && h.stderr.includes("No button matching /^nostep$/i (--step) appeared within 3000 ms.") && h.stderr.split("\n").includes(`  - ${hSeen}`) && h.stderr.includes(NO_LOGIN),
     "(h) --step: same things to check", h);
+
+  // (i) The report is on by default, in the current directory.
+  const reports = realpathSync(mkdtempSync(join(tmpdir(), "caliper-auth-report-")));
+  const lastLine = (out) => out.stdout.trimEnd().split("\n").at(-1);
+  const file = join(reports, "caliper-report.html");
+  const i1 = await caliper(reports, run);
+  check(i1.code === 0 && existsSync(file) && lastLine(i1) === `report: wrote ${file}`, `(i) no --report: writes ${file}, last line "report: wrote …" (got: ${lastLine(i1)})`, i1);
+  const i2 = await caliper(reports, run);
+  check(i2.code === 0 && lastLine(i2) === `report: overwrote ${file}`, `(i) again: "report: overwrote …" (got: ${lastLine(i2)})`, i2);
+  // (j) --no-report: nothing written, no report line.
+  rmSync(file, { force: true });
+  const j = await caliper(reports, [...run, "--no-report"]);
+  check(j.code === 0 && !existsSync(file) && !/^report:|no report written/m.test(j.stdout), "(j) --no-report: no file, no report line", j);
+  // (k) --report <path>.
+  const k = await caliper(reports, [...run, "--report", "custom.html"]);
+  check(k.code === 0 && existsSync(join(reports, "custom.html")) && lastLine(k) === `report: wrote ${join(reports, "custom.html")}` && !existsSync(file),
+    `(k) --report custom.html: written there (got: ${lastLine(k)})`, k);
+  // (l) Every run fails to load: says why there's no report.
+  const l = await caliper(reports, ["http://127.0.0.1:1/x", "--measure", "^generate$", "--output", "#out", "--runs", "1", "--timeout", "5000"]);
+  check(l.code === 0 && lastLine(l) === "no report written: every run failed to load" && !existsSync(file), `(l) every run failed: "no report written: every run failed to load" (got: ${lastLine(l)})`, l);
+  // (m) Both flags: an error.
+  const m = await caliper(reports, [...run, "--report", "x.html", "--no-report"]);
+  check(m.code !== 0 && m.stderr.includes("audit: pass --report <path> or --no-report, not both.") && timedRuns(m.stdout) === 0, "(m) --report with --no-report is an error before any run", m);
+  // (n) Stopped by an error.
+  const n = await caliper(reports, noButton([]));
+  check(n.code !== 0 && lastLine(n) === "no report written: the audit stopped on the error below" && !existsSync(file), `(n) stopped by an error: says no report was written (got: ${lastLine(n)})`, n);
+  rmSync(reports, { recursive: true, force: true });
 } finally {
   await server.close();
   rmSync(empty, { recursive: true, force: true });

@@ -1,6 +1,6 @@
 // Self-contained HTML timeline for an audit: inline CSS/JS, no external requests.
 
-import type { Hint, HintList } from "./hints.js";
+import type { Bar, BarPart, Hint, HintList } from "./hints.js";
 import type { ServerReport, ServerRow } from "./serverblock.js";
 import type {
   Breakdown,
@@ -44,6 +44,8 @@ export interface ReportInput {
   checks: SummaryEntry[]; // every check that ran, in summary order
   server: ServerReport | null; // null without --server-timings
   hints: { browser: HintList | null; server: HintList | null }; // browser: null with no run measured; server: null without a server block
+  verdict: string[]; // the median wait, then one line per side (hints.ts verdictLines)
+  bars: { browser: Bar | null; server: Bar | null }; // null when there's nothing to draw
 }
 
 // The button by name (as the regex it's matched with), or the CSS selector.
@@ -67,12 +69,15 @@ const SEGMENTS: { key: SegmentKey; legend: string }[] = [
   { key: "other", legend: "unattributed" },
 ];
 
-export function renderReport({ url, measure, chat, output, steps, startedAt, summary, runs, failed, unidentified, stop, double, canary, csp, streaming, checks, server, hints }: ReportInput): string {
-  const bars: ChartRun[] = runs.map((run) => ({ ...run, bars: barSegments(run) }));
+// Top to bottom: the verdict; each side's bar and where to look (browser, then the server, never
+// merged); the checks; then everything else in a collapsed Details.
+export function renderReport({ url, measure, chat, output, steps, startedAt, summary, runs, failed, unidentified, stop, double, canary, csp, streaming, checks, server, hints, verdict, bars }: ReportInput): string {
+  const timeline: ChartRun[] = runs.map((run) => ({ ...run, bars: barSegments(run) }));
   const scale = Math.max(...runs.map((r) => r.total), 1);
   const ticks = niceTicks(scale);
-  const used = SEGMENTS.filter((s) => bars.some((run) => run.bars.some((b) => b.key === s.key)));
+  const used = SEGMENTS.filter((s) => timeline.some((run) => run.bars.some((b) => b.key === s.key)));
   const tableKeys = SEGMENTS.filter((s) => runs.some((run) => run.segments.some((b) => b.key === s.key)));
+  const [headline, ...sides] = verdict;
 
   return `<!doctype html>
 <html lang="en">
@@ -100,6 +105,30 @@ export function renderReport({ url, measure, chat, output, steps, startedAt, sum
         unidentified.length ? ` (${unidentified.map((n) => `run ${n}`).join(", ")}: AI request not identified, timing inconclusive)` : "",
       ].join("")}</dd>
     </dl>
+  </header>
+
+  <section aria-labelledby="verdict-h" class="verdict-box">
+    <h2 id="verdict-h">Verdict</h2>
+    <p class="headline">${esc(headline ?? "")}</p>
+    ${sides.length ? `<ul class="sides">${sides.map((l) => `<li>${esc(l)}</li>`).join("")}</ul>` : ""}
+  </section>
+
+  <section aria-labelledby="browser-h">
+    <h2 id="browser-h">In the browser</h2>
+    ${bars.browser ? barHtml(bars.browser) : `<p class="muted">No warm run to draw${summary ? " (use --runs 2 or more)" : ""}.</p>`}
+    ${hints.browser ? `<h3>Where to look — browser</h3><div class="stop">${hintsBody(hints.browser)}</div>` : ""}
+  </section>
+  ${server ? serverTop(server, hints.server, bars.server) : ""}
+
+  ${summaryBlock(checks)}
+  ${streamingSection(streaming)}
+  ${stop ? stopSection(stop) : ""}
+  ${double ? doubleSection(double) : ""}
+  ${canary ? canarySection(canary) : ""}
+  ${csp ? cspSection(csp) : ""}
+
+  <details class="more">
+    <summary>Details: every run, the data, request matching${server ? ", server marks" : ""}</summary>
     <div class="tiles">
       ${summary ? `${tile(
         summary.cold !== null ? "Cold (run 1)" : summary.coldUnidentified ? "Cold (run 1: AI request not identified)" : "Cold (run 1 failed to load)",
@@ -108,61 +137,84 @@ export function renderReport({ url, measure, chat, output, steps, startedAt, sum
       ${tile(medianLabel(summary, runs.length + failed.length + unidentified.length), summary.median)}
       ${tile("Worst (all runs)", summary.worst)}` : tile("AI request not identified in any run", null)}
     </div>
-  </header>
-  ${summaryBlock(checks)}
 
-  <section aria-labelledby="timeline-h">
-    <h2 id="timeline-h">Timeline per run</h2>
-    <ul class="legend">
-      ${used.map((s) => `<li><span class="swatch" style="background:var(--seg-${s.key})"></span>${esc(s.legend)}</li>`).join("")}
-    </ul>
-    <div class="chart">
-      ${bars.map((run) => runRow(run, scale, ticks)).join("")}
-      <div class="row axis" aria-hidden="true">
-        <div></div>
-        <div class="plot">${ticks.map((t) => `<span style="left:${pct(t, scale)}">${fmtTick(t)}</span>`).join("")}</div>
+    <section aria-labelledby="timeline-h">
+      <h3 id="timeline-h">Timeline per run</h3>
+      <ul class="legend">
+        ${used.map((s) => `<li><span class="swatch" style="background:var(--seg-${s.key})"></span>${esc(s.legend)}</li>`).join("")}
+      </ul>
+      <div class="chart">
+        ${timeline.map((run) => runRow(run, scale, ticks)).join("")}
+        <div class="row axis" aria-hidden="true">
+          <div></div>
+          <div class="plot">${ticks.map((t) => `<span style="left:${pct(t, scale)}">${fmtTick(t)}</span>`).join("")}</div>
+        </div>
       </div>
-    </div>
-  </section>
+    </section>
 
-  <section aria-labelledby="table-h">
-    <h2 id="table-h">Data</h2>
-    <div class="table-wrap">
-    <table>
-      <thead><tr>
-        <th scope="col">Run</th><th scope="col" class="num">Total (ms)</th>
-        ${tableKeys.map((s) => `<th scope="col" class="num">${esc(s.legend)} (ms)</th>`).join("")}
-      </tr></thead>
-      <tbody>
-        ${runs.map((run) => tableRow(run, tableKeys)).join("")}
-      </tbody>
-    </table>
-    </div>
-    <div class="table-wrap">
-    <table>
-      <thead><tr>
-        <th scope="col">Run</th><th scope="col">Request</th><th scope="col">Chosen because</th><th scope="col">Clock check</th>
-      </tr></thead>
-      <tbody>
-        ${runs.map((run) => requestRow(run)).join("")}
-      </tbody>
-    </table>
-    </div>
-  </section>
-  ${hints.browser ? hintsSection(hints.browser) : ""}
-  ${chat || runs.some((r) => r.reply.preReply.length) ? replySection(runs, chat ? "Send" : "Click") : ""}
-  ${streamingSection(streaming)}
-  ${server ? serverSection(server, hints.server) : ""}
-  ${stop ? stopSection(stop) : ""}
-  ${double ? doubleSection(double) : ""}
-  ${canary ? canarySection(canary) : ""}
-  ${csp ? cspSection(csp) : ""}
+    <section aria-labelledby="table-h">
+      <h3 id="table-h">Data</h3>
+      <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th scope="col">Segment (ms)</th>${runs.map((run) => `<th scope="col" class="num">${runName(run.run)}</th>`).join("")}
+        </tr></thead>
+        <tbody>
+          <tr><th scope="row">Total</th>${runs.map((run) => `<td class="num">${fmtMs(run.total)}</td>`).join("")}</tr>
+          ${tableKeys.map((k) => `<tr><th scope="row">${esc(k.legend)}</th>${runs.map((run) => dataCell(run, k.key)).join("")}</tr>`).join("")}
+        </tbody>
+      </table>
+      </div>
+    </section>
+
+    <section aria-labelledby="requests-h">
+      <h3 id="requests-h">Request matching and clock check</h3>
+      <ul class="reqs">${runs.map(requestItem).join("")}</ul>
+    </section>
+    ${chat || runs.some((r) => r.reply.preReply.length) ? replySection(runs, chat ? "Send" : "Click") : ""}
+    ${server ? serverSection(server) : ""}
+  </details>
 </main>
 <div id="tip" role="tooltip" hidden></div>
 <script>${JS}</script>
 </body>
 </html>
 `;
+}
+
+// One side's bar: a row per lane, each segment placed at its start and labelled with its name,
+// its ms and, when it's over its limit, "over" (never colour alone). The key repeats each one in
+// words, for narrow screens and screen readers.
+function barHtml({ title, total, lanes }: Bar): string {
+  const scale = Math.max(total, 1);
+  const status = (p: BarPart) =>
+    p.limit === null ? "not attributed to any segment"
+    : p.over ? `<b>over</b> its ${p.limit} ms limit`
+    : `within its ${p.limit} ms limit`;
+  const seg = (p: BarPart) =>
+    `<div class="bseg ${p.over ? "over" : "ok"}" style="left:${pct(p.start, scale)};width:${pct(p.ms, scale)}" title="${esc(`${p.label}: ${p.ms} ms${p.over ? ` — over its ${p.limit} ms limit` : ""}`)}"><span class="bname">${esc(p.label)}</span> <span class="bms">${p.ms} ms</span>${p.over ? ` <span class="tag-over">over</span>` : ""}</div>`;
+  return `<p class="bar-title">${esc(title)}</p>
+    <div class="bar" role="group" aria-label="${esc(title)}">
+      ${lanes.map((lane) => `<div class="lane">${lane.map(seg).join("")}</div>`).join("")}
+    </div>
+    <ul class="barkey">${lanes.flat().sort((a, b) => a.start - b.start).map((p) => `<li class="${p.over ? "over" : "ok"}"><span class="sw"></span><span>${esc(p.label)} — ${p.ms} ms — ${status(p)}</span></li>`).join("")}</ul>`;
+}
+
+// One Data cell: a run's segment, "?" when unknown, "—" when the run didn't have it.
+function dataCell(run: ReportRun, key: SegmentKey): string {
+  const s = (run.segments as Segment[]).find((seg) => seg.key === key);
+  if (!s) return `<td class="num muted">—</td>`;
+  const note = s.note ? `<span class="note muted">${esc(s.note)}</span>` : "";
+  return `<td class="num">${s.ms === null ? "?" : s.ms.toFixed(1)}${note}</td>`;
+}
+
+// One run's chosen request, why it was chosen, and the clock check.
+function requestItem(run: ReportRun): string {
+  if (!run.request) return `<li><b>${runName(run.run)}</b> <span class="muted">no timed network request between click and first paint</span></li>`;
+  const r = run.request;
+  return `<li><b>${runName(run.run)}</b> <span class="wrap">${esc(r.method)} ${esc(r.url)} → ${esc(String(r.status))}${r.contentType ? ` ${esc(r.contentType)}` : ""}</span>
+        <span class="why">chosen from ${run.from} request(s): ${esc(run.reasons.join(", ") || "only candidate")}</span>
+        <span class="why">clock check: ${esc(run.clock)}</span></li>`;
 }
 
 // Segments as drawn: known, non-negative widths, plus a neutral remainder when part of the
@@ -192,7 +244,7 @@ function runRow(run: ChartRun, scale: number, ticks: number[]): string {
         <div class="plot">
           <div class="bar-area">
             ${ticks.map((t) => `<i class="grid" style="left:${pct(t, scale)}"></i>`).join("")}
-            <div class="bar" style="width:${pct(run.total, scale)}">
+            <div class="tbar" style="width:${pct(run.total, scale)}">
               ${run.bars.map((s) => segment(s, run.total)).join("")}
             </div>
             <div class="callouts"></div>
@@ -207,34 +259,6 @@ function segment(s: BarSegment, total: number): string {
   const tip = `${s.label}: ${s.ms.toFixed(1)} ms${share}${s.note ? ` — ${s.note}` : ""}`;
   return `<div class="seg" tabindex="0" style="flex-grow:${s.ms};background:var(--seg-${s.key})"
        data-tip="${esc(tip)}" aria-label="${esc(tip)}"><span class="in">${fmtMs(s.ms)} ms</span></div>`;
-}
-
-function tableRow(run: ReportRun, keys: { key: SegmentKey }[]): string {
-  const segments: Segment[] = run.segments;
-  const cells = keys.map(({ key }) => {
-    const s = segments.find((seg) => seg.key === key);
-    if (!s) return `<td class="num muted">—</td>`;
-    const value = s.ms === null ? "?" : s.ms.toFixed(1);
-    const note = s.note ? `<span class="note muted">${esc(s.note)}</span>` : "";
-    return `<td class="num">${value}${note}</td>`;
-  });
-  return `<tr>
-          <th scope="row">${runName(run.run)}</th>
-          <td class="num">${fmtMs(run.total)}</td>
-          ${cells.join("")}
-        </tr>`;
-}
-
-function requestRow(run: ReportRun): string {
-  const req = run.request
-    ? `${esc(run.request.method)} ${esc(run.request.url)} → ${esc(String(run.request.status))}${run.request.contentType ? ` ${esc(run.request.contentType)}` : ""}`
-    : "—";
-  return `<tr>
-          <th scope="row">${runName(run.run)}</th>
-          <td class="wrap">${req}</td>
-          <td>${run.request ? esc(run.reasons.join(", ") || "only candidate") : "—"}</td>
-          <td>${esc(run.clock ?? "—")}</td>
-        </tr>`;
 }
 
 // When the AI request's first body byte came, and what changed in the output before the reply.
@@ -317,10 +341,20 @@ function streamingSection({ verdict, fix, checks, notes }: CheckReport): string 
   </section>`;
 }
 
-// The marked visits (--server-timings): the same block as the terminal, as a table, then the lines
-// the terminal printed in a collapsed "Run details" (open when no visit succeeded, since they say
-// why). Its own section, never part of the browser numbers above.
-export function serverSection({ lines, block }: ServerReport, hints: HintList | null = null): string {
+// The server side at the top: its bar and where to look. Never next to browser numbers.
+export function serverTop({ block }: ServerReport, hints: HintList | null, bar: Bar | null): string {
+  return `<section aria-labelledby="server-top-h">
+    <h2 id="server-top-h">Inside the server</h2>
+    <p class="muted">From separate marked runs, on the server's clock. Never added to the browser timings above: different runs, different clocks.</p>
+    ${bar ? `${barHtml(bar)}<p class="muted">Empty parts of a row are time no span covers.</p>` : `<p>${block ? "No spans to draw." : "No marked visit succeeded: see Run details under Details."}</p>`}
+    ${hints ? `<h3>Where to look — server</h3><div class="stop">${hintsBody(hints)}</div>` : ""}
+  </section>`;
+}
+
+// The marked visits (--server-timings) in the details: the same block as the terminal, as a
+// table, then the lines the terminal printed in "Run details" (open when no visit succeeded,
+// since they say why).
+export function serverSection({ lines, block }: ServerReport): string {
   const many = !!block && block.visits.length > 1;
   const row = ({ label, values, stats, note }: ServerRow) => {
     const cells = values.map((v) => `<td class="num">${v === null ? "–" : v}</td>`);
@@ -331,7 +365,7 @@ export function serverSection({ lines, block }: ServerReport, hints: HintList | 
     rows.length ? `<tr class="group"><th scope="rowgroup" colspan="${block!.visits.length + (many ? 4 : 1)}">${name}</th></tr>${rows.map(row).join("")}` : "";
   const notes = block ? [...block.noSpan, block.workers, block.firstBytes].filter((n): n is string => n !== null) : [];
   return `<section aria-labelledby="server-h">
-    <h2 id="server-h">Inside the server</h2>
+    <h3 id="server-h">Inside the server: marks and spans</h3>
     <div class="stop">
       <p class="muted">From separate marked runs, on the server's clock. Never added to the browser timings above: different runs, different clocks.</p>
       ${block ? `<p class="verdict-sm">${esc(block.title)}</p>
@@ -349,19 +383,10 @@ export function serverSection({ lines, block }: ServerReport, hints: HintList | 
       ${notes.length ? `<ul class="notes">${notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}
       ${block.problems.length ? `<h3>Problems reported by the server</h3>
       <ul class="notes">${block.problems.map((p) => `<li>${esc(p)}</li>`).join("")}</ul>` : ""}` : ""}
-      ${hints ? `<h3>Where to look — server</h3>${hintsBody(hints)}` : ""}
       <details${block ? "" : " open"}><summary>Run details</summary>
       <ul class="notes log">${lines.map((l) => `<li>${esc(l)}</li>`).join("")}</ul>
       </details>
     </div>
-  </section>`;
-}
-
-// Browser hints: their own section, never next to the server's (different runs, different clocks).
-function hintsSection(list: HintList): string {
-  return `<section aria-labelledby="hints-browser-h">
-    <h2 id="hints-browser-h">Where to look — browser</h2>
-    <div class="stop">${hintsBody(list)}</div>
   </section>`;
 }
 
@@ -395,7 +420,7 @@ const STATUS_MARK: Record<CheckStatus, string> = { pass: "✓", warn: "⚠", fai
 // One line per check that ran, at the top of the report. Same lines as the terminal summary.
 function summaryBlock(entries: SummaryEntry[]): string {
   return `<section aria-labelledby="summary-h" class="summary">
-    <h2 id="summary-h">Summary</h2>
+    <h2 id="summary-h">Checks</h2>
     <ul>
       ${entries.map(({ name, report, suffix }) => `<li class="${report.status}"><span class="smark">${STATUS_MARK[report.status]}</span><b>${esc(name)}</b> ${esc(report.verdict + (suffix ?? ""))}</li>`).join("")}
     </ul>
@@ -459,6 +484,7 @@ const CSS = `
   --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
   --seg-click: #eda100; --seg-preflight: #e87ba4; --seg-connection: #008300; --seg-ttfb: #2a78d6;
   --seg-download: #1baf7a; --seg-render: #eb6834; --seg-streaming: #e34948; --seg-other: #c3c2b7;
+  --ok: #e1e0d9; --ok-ink: #0b0b0b; --warn: #b93a0b; --warn-ink: #ffffff; --track: #f1f0eb;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -467,6 +493,7 @@ const CSS = `
     --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
     --seg-click: #c98500; --seg-preflight: #d55181; --seg-connection: #008300; --seg-ttfb: #3987e5;
     --seg-download: #199e70; --seg-render: #d95926; --seg-streaming: #e66767; --seg-other: #52514e;
+    --ok: #383835; --ok-ink: #f0efec; --warn: #f2884f; --warn-ink: #0b0b0b; --track: #141413;
   }
 }
 * { box-sizing: border-box; }
@@ -498,7 +525,33 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .plot { position: relative; min-width: 0; }
 .bar-area { position: relative; }
 .grid { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--grid); }
-.bar { position: relative; display: flex; gap: 2px; height: 24px; }
+.tbar { position: relative; display: flex; gap: 2px; height: 24px; }
+.verdict-box { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 4px 16px 12px; margin-top: 20px; }
+.verdict-box h2 { margin-top: 12px; }
+.headline { font-size: 20px; font-weight: 600; margin: 0 0 8px; }
+.sides { margin: 0; padding-left: 18px; }
+.sides li { margin: 2px 0; }
+.bar-title { color: var(--ink-2); margin: 0 0 6px; }
+.bar { display: grid; gap: 4px; }
+.lane { position: relative; height: 30px; background: var(--track); border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
+.bseg { position: absolute; top: 0; bottom: 0; min-width: 2px; padding: 0 6px; box-sizing: border-box; display: flex; align-items: center; gap: 4px;
+  font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-right: 2px solid var(--surface); }
+.bseg.ok { background: var(--ok); color: var(--ok-ink); }
+.bseg.over { background: repeating-linear-gradient(135deg, var(--warn) 0 8px, color-mix(in srgb, var(--warn) 82%, var(--ink)) 8px 16px); color: var(--warn-ink); font-weight: 600; }
+.bname { overflow: hidden; text-overflow: ellipsis; }
+.bms { font-variant-numeric: tabular-nums; }
+.tag-over { text-transform: uppercase; font-size: 10px; letter-spacing: 0.04em; border: 1px solid currentColor; border-radius: 3px; padding: 0 3px; }
+.barkey { list-style: none; padding: 0; margin: 8px 0 0; display: grid; gap: 2px; font-size: 13px; }
+.barkey li { display: flex; align-items: baseline; gap: 8px; overflow-wrap: anywhere; }
+.barkey .sw { width: 10px; height: 10px; border-radius: 2px; flex: none; background: var(--ok); }
+.barkey .over .sw { background: var(--warn); }
+.barkey .over b { color: var(--warn); }
+details.more { margin-top: 32px; border-top: 1px solid var(--border); padding-top: 12px; }
+details.more > summary { font-size: 16px; font-weight: 600; color: var(--ink); }
+details.more h3 { font-size: 15px; margin: 24px 0 10px; }
+.reqs { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; font-size: 13px; }
+.reqs li { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; overflow-wrap: anywhere; }
+.reqs .why { display: block; }
 .seg { position: relative; flex: 1 1 0; min-width: 3px; display: flex; align-items: center; justify-content: center; cursor: default; }
 .seg:last-child { border-radius: 0 4px 4px 0; }
 .seg:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
@@ -519,7 +572,7 @@ code { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .table-wrap { overflow-x: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
 table { border-collapse: collapse; width: 100%; font-size: 13px; }
 th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--grid); vertical-align: top; }
-thead th { color: var(--ink-2); font-weight: 600; }
+thead th { color: var(--ink-2); font-weight: 600; white-space: normal; }
 tbody tr:last-child > * { border-bottom: 0; }
 .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .note { display: block; white-space: normal; font-size: 12px; }

@@ -51,4 +51,4 @@ CALIPER_TOKEN=local-test-token node packages/cli/dist/cli.js audit http://127.0.
   --server-timings http://127.0.0.1:8790 --server-runs 3
 ```
 
-No `--auth`: the app has no login. Caliper writes no report file unless you pass `--report`. Expect a `pre-check: feature on, token accepted` line, three marked visits, and an "Inside the server" block with a `db` span near 300 ms and `model call → first bytes sent` near 100 ms. `/__example/stamps` should then show 3 unmarked requests (the timed runs) and exactly 1 for each marked run id.
+No `--auth`: the app has no login. Caliper writes `caliper-report.html` in the current directory (`--no-report` to skip it). Expect a `pre-check: feature on, token accepted` line, three marked visits, and an "Inside the server" block with a `db` span near 300 ms and `model call → first bytes sent` near 100 ms. `/__example/stamps` should then show 3 unmarked requests (the timed runs) and exactly 1 for each marked run id.

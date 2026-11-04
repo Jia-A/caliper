@@ -30,7 +30,7 @@ let failed = 0;
 try {
   for (const { path, expect } of CASES) {
     const args = [cli, "audit", `${server.url}${path}`, "--measure", "^generate$", "--output", "#out",
-      "--canary-input", "#prompt", "--runs", "1", "--auth", auth, "--settle-ms", "500", "--timeout", "15000"];
+      "--canary-input", "#prompt", "--runs", "1", "--auth", auth, "--settle-ms", "500", "--timeout", "15000", "--no-report"];
     let stdout;
     try {
       ({ stdout } = await run(process.execPath, args, { timeout: 120_000 }));

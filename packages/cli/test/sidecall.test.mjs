@@ -31,7 +31,7 @@ const check = (ok, what) => {
 let stdout = "";
 try {
   const args = [cli, "audit", `${server.url}/sidecall`, "--input", "#msg", "--prompt", "hello", "--measure", "^send$",
-    "--output", "#chat", "--runs", "2", "--auth", auth, "--settle-ms", "500", "--timeout", "15000"];
+    "--output", "#chat", "--runs", "2", "--auth", auth, "--settle-ms", "500", "--timeout", "15000", "--no-report"];
   try {
     ({ stdout } = await run(process.execPath, args, { timeout: 120_000 }));
   } catch (err) {
@@ -56,7 +56,7 @@ try {
   let local = "";
   try {
     ({ stdout: local } = await run(process.execPath, [cli, "audit", `${server.url}/no-csp`, "--measure", "^generate$", "--output", "#out",
-      "--runs", "2", "--auth", auth, "--settle-ms", "500", "--timeout", "15000"], { timeout: 120_000 }));
+      "--runs", "2", "--auth", auth, "--settle-ms", "500", "--timeout", "15000", "--no-report"], { timeout: 120_000 }));
   } catch (err) {
     local = err.stdout ?? "";
     console.error(`caliper exited with an error\n${err.stderr ?? err.message}`);
