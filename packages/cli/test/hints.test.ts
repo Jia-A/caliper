@@ -44,8 +44,9 @@ test("a segment under or at its limit gets no hint", () => {
 test("each browser layer uses its own limit", () => {
   // click 250 > 200, ttfb 650 > 600, connection 150 > 100, streaming 150 > 100, render 150 > 100
   const over = browserHints([run({ click: 250, connection: 150, ttfb: 650, download: 150, render: 150 }), run({ click: 250, connection: 150, ttfb: 650, download: 150, render: 150 })]);
-  assert.deepEqual(labels(over), ["browser: response headers received", "click → request sent", "connection setup", "headers → done", "done → first paint"]);
-  assert.deepEqual(over.hints.map((h) => h.limit), [600, 200, 100, 100, 100]);
+  // Ranked by how far over: 1.5× (connection, done, first paint), 1.25× (click), 1.08× (headers).
+  assert.deepEqual(labels(over), ["connection setup", "headers → done", "done → first paint", "click → request sent", "browser: response headers received"]);
+  assert.deepEqual(over.hints.map((h) => h.limit), [100, 100, 100, 200, 600]);
   // The same ms under the other limits: 150 is fine for click (200), 550 for headers (600).
   const under = browserHints([run({ click: 150, ttfb: 550, streaming: 90 }), run({ click: 150, ttfb: 550, streaming: 90 })]);
   assert.deepEqual(under.hints, []);
@@ -63,19 +64,20 @@ test("each server layer uses its own limit: model at 400 ms no hint, an app span
   assert.equal(model.hints[0]!.limit, 450);
 });
 
-test("biggest first; the first is the full hint, the rest one short line each", () => {
+test("furthest over its own limit first, not the most ms; the first is the full hint, the rest one short line each", () => {
+  // headers 900 ms is 1.5× its 600; headers → first paint 400 ms is 4.0× its 100; click 300 ms is 1.5× its 200.
   const list = browserHints([run({ click: 300, ttfb: 900, streaming: 400 }), run({ click: 300, ttfb: 900, streaming: 400 })]);
-  assert.deepEqual(labels(list), ["browser: response headers received", "headers → first paint", "click → request sent"]);
+  assert.deepEqual(labels(list), ["headers → first paint", "browser: response headers received", "click → request sent"]);
   const text = formatHints(list).split("\n");
   assert.equal(text[0], "Where to look — browser (median of 2 warm runs)");
-  assert.equal(text[1], "    browser: response headers received: median 900 ms, over its 600 ms limit in 2 of 2 warm runs; 56% of the browser total");
-  assert.ok(text.includes(`    Limit: Lighthouse's "Reduce server response time" audit fails above 600 ms. ${CAVEAT}`), text.join("\n"));
+  assert.equal(text[1], "    headers → first paint: median 400 ms — 4.0× its 100 ms limit, in 2 of 2 warm runs; 25% of the browser total");
+  assert.ok(text.includes(`    Limit: Nielsen / RAIL: under 100 ms feels instant. ${CAVEAT}`), text.join("\n"));
   assert.ok(text.includes("    Things to check:"), text.join("\n"));
   assert.ok(text.includes(`    ${DISCLAIMER}`), text.join("\n"));
   assert.deepEqual(text.slice(-3), [
     "  also over their limits:",
-    "    headers → first paint: median 400 ms (limit 100 ms), over in 2 of 2 warm runs — learn more: https://developer.mozilla.org/en-US/docs/Web/API/Streams_API",
-    "    click → request sent: median 300 ms (limit 200 ms), over in 2 of 2 warm runs — learn more: https://web.dev/articles/optimize-inp · https://web.dev/optimize-long-tasks/",
+    "    browser: response headers received: median 900 ms — 1.5× its 600 ms limit, in 2 of 2 warm runs — learn more: https://web.dev/optimize-ttfb/",
+    "    click → request sent: median 300 ms — 1.5× its 200 ms limit, in 2 of 2 warm runs — learn more: https://web.dev/articles/optimize-inp · https://web.dev/optimize-long-tasks/",
   ]);
   // 2 to 4 things to check, worded as possibilities.
   const checks = list.hints[0]!.checks;
@@ -107,7 +109,7 @@ test("an app-named span gets the generic text, whatever its name", () => {
   assert.ok(!/database|postgres|sql/i.test([postgres.about, ...postgres.checks].join(" ")), postgres.checks.join(" | "));
   // Short lines carry it too.
   const two = serverHints(block({ marks: { aStart: 0, aEnd: 300, bStart: 300, bEnd: 500, firstChunk: 600 } }));
-  assert.ok(formatHints(two).includes(`    b: 200 ms (limit 100 ms), over in 1 of 1 marked visits — ${APP_SPAN}`), formatHints(two));
+  assert.ok(formatHints(two).includes(`    b: 200 ms — 2.0× its 100 ms limit, in 1 of 1 marked visits — ${APP_SPAN}`), formatHints(two));
 });
 
 test("unattributed is never hinted", () => {
@@ -128,12 +130,12 @@ test("browser: a segment in only some warm runs says how many it was measured in
   const list = browserHints([run({ ttfb: 10, connection: 300 }), run({ ttfb: 10 }), run({ ttfb: 10 })]);
   assert.deepEqual(labels(list), ["connection setup"]);
   // The share is of that run's own total (300 of 310), not of the median total of all three (10).
-  assert.equal(formatHints(list).split("\n")[1], "    connection setup: 300 ms, over its 100 ms limit in 1 of 1 warm runs (measured in 1 of 3); 97% of the browser total");
+  assert.equal(formatHints(list).split("\n")[1], "    connection setup: 300 ms — 3.0× its 100 ms limit, in 1 of 1 warm runs (measured in 1 of 3); 97% of the browser total");
 });
 
 test("one value: no \"median\", in the scope or the evidence", () => {
   const one = browserHints([run({ ttfb: 900 })]);
-  assert.equal(formatHints(one).split("\n").slice(0, 2).join("\n"), "Where to look — browser (1 warm run)\n    browser: response headers received: 900 ms, over its 600 ms limit in 1 of 1 warm runs; 100% of the browser total");
+  assert.equal(formatHints(one).split("\n").slice(0, 2).join("\n"), "Where to look — browser (1 warm run)\n    browser: response headers received: 900 ms — 1.5× its 600 ms limit, in 1 of 1 warm runs; 100% of the browser total");
   const server = formatHints(serverHints(block({ marks: { aStart: 0, aEnd: 300 } })));
   assert.ok(!server.includes("median"), server);
 });
@@ -165,7 +167,7 @@ test("server: no first bytes sent recorded: share unknown, and says why", () => 
   const [h] = serverHints(block({ marks: { dbStart: 0, dbEnd: 300 } })).hints;
   assert.equal(h!.share, null);
   assert.equal(h!.shareOf, "server: first bytes sent wasn't recorded, so no share");
-  assert.ok(formatHints(serverHints(block({ marks: { dbStart: 0, dbEnd: 300 } }))).includes("over its 100 ms limit in 1 of 1 marked visits; server: first bytes sent wasn't recorded, so no share"));
+  assert.ok(formatHints(serverHints(block({ marks: { dbStart: 0, dbEnd: 300 } }))).includes("— 3.0× its 100 ms limit, in 1 of 1 marked visits; server: first bytes sent wasn't recorded, so no share"));
 });
 
 // --- HTML ---
@@ -202,7 +204,7 @@ test("HTML: no server hints without --server-timings", () => {
 
 test("HTML: the full hint has evidence, basis, things to check and the disclaimer", () => {
   const html = serverSection({ lines: [], block: block({ marks: { modelCallSent: 0, firstChunk: 700 } }) }, serverHints(block({ marks: { modelCallSent: 0, firstChunk: 700 } })));
-  for (const want of ["model call → first bytes sent: 700 ms, over its 450 ms limit in 1 of 1 marked visits", "MLPerf Inference", CAVEAT, "Things to check", DISCLAIMER]) {
+  for (const want of ["model call → first bytes sent: 700 ms — 1.6× its 450 ms limit, in 1 of 1 marked visits", "MLPerf Inference", CAVEAT, "Things to check", DISCLAIMER]) {
     assert.ok(html.includes(want), `has: ${want}\n${html}`);
   }
 });
@@ -227,21 +229,47 @@ test("each browser hint has its Learn more links, in the full hint and in its sh
     assert.deepEqual(list.hints[0]!.links, links, label);
     assert.ok(formatHints(list).split("\n").includes(`    Learn more: ${links.join(" · ")}`), formatHints(list));
   }
-  // As a short line (not the biggest): the links at its end.
-  const two = browserHints([run({ ttfb: 900, preflight: 300 }), run({ ttfb: 900, preflight: 300 })]);
-  assert.equal(formatHints(two).split("\n").at(-1), "    CORS preflight: median 300 ms (limit 100 ms), over in 2 of 2 warm runs — learn more: https://developer.mozilla.org/en-US/docs/Glossary/preflight_request");
+  // As a short line (not the furthest over): the links at its end.
+  const two = browserHints([run({ ttfb: 2400, preflight: 300 }), run({ ttfb: 2400, preflight: 300 })]);
+  assert.equal(formatHints(two).split("\n").at(-1), "    CORS preflight: median 300 ms — 3.0× its 100 ms limit, in 2 of 2 warm runs — learn more: https://developer.mozilla.org/en-US/docs/Glossary/preflight_request");
 });
 
 test("no Learn more for the model span or app-named spans", () => {
   const list = serverHints(block({ marks: { aStart: 0, aEnd: 300, modelCallSent: 300, firstChunk: 900 } }));
-  assert.deepEqual(labels(list), ["model call → first bytes sent", "a"]);
+  assert.deepEqual(labels(list), ["a", "model call → first bytes sent"]);
   for (const h of list.hints) assert.deepEqual(h.links, [], h.label);
   assert.ok(!/learn more/i.test(formatHints(list)), formatHints(list));
 });
 
 test("HTML: Learn more links are links, in the full hint and the short lines", () => {
-  const list = browserHints([run({ ttfb: 900, preflight: 300 }), run({ ttfb: 900, preflight: 300 })]);
+  const list = browserHints([run({ ttfb: 2400, preflight: 300 }), run({ ttfb: 2400, preflight: 300 })]);
   const html = renderReport(input(list, null, null));
   assert.ok(html.includes('Learn more: <a href="https://web.dev/optimize-ttfb/" rel="noopener noreferrer">https://web.dev/optimize-ttfb/</a>'), html);
   assert.ok(html.includes('learn more: <a href="https://developer.mozilla.org/en-US/docs/Glossary/preflight_request" rel="noopener noreferrer">'), html);
+});
+
+// --- Ranking by how far over its own limit ---
+
+test("Quill-like numbers: postgres 532 ms (5.3× its 100) gets the full hint, not the model's 552 ms (1.2× its 450)", () => {
+  const list = serverHints(block(
+    { marks: { postgresStart: 0, postgresEnd: 532, modelCallSent: 532, firstChunk: 1084 } },
+    { marks: { postgresStart: 0, postgresEnd: 532, modelCallSent: 532, firstChunk: 1084 } },
+    { marks: { postgresStart: 0, postgresEnd: 532, modelCallSent: 532, firstChunk: 1084 } },
+  ));
+  assert.deepEqual(labels(list), ["postgres", "model call → first bytes sent"]);
+  const text = formatHints(list).split("\n");
+  assert.equal(text[1], "    postgres: median 532 ms — 5.3× its 100 ms limit, in 3 of 3 marked visits; 49% of the time to server: first bytes sent");
+  assert.equal(text.at(-1), "    model call → first bytes sent: median 552 ms — 1.2× its 450 ms limit, in 3 of 3 marked visits");
+});
+
+test("just over its limit: two decimals, so it never reads 1.0×", () => {
+  const [h] = browserHints([run({ ttfb: 620 }), run({ ttfb: 620 })]).hints;
+  assert.ok(h!.evidence.startsWith("browser: response headers received: median 620 ms — 1.03× its 600 ms limit"), h!.evidence);
+});
+
+test("same ratio: the one over its limit in more of its runs comes first", () => {
+  // headers: 1200, 1200, 500 → median 1200, 2.0× its 600, over in 2 of 3; click: 400 ×3 → 2.0× its 200, over in 3 of 3.
+  const list = browserHints([run({ click: 400, ttfb: 1200 }), run({ click: 400, ttfb: 1200 }), run({ click: 400, ttfb: 500 })]);
+  assert.deepEqual(labels(list), ["click → request sent", "browser: response headers received"]);
+  assert.deepEqual(list.hints.map((h) => [h.over, h.of]), [[3, 3], [2, 3]]);
 });

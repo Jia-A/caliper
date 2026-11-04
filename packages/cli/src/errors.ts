@@ -14,6 +14,15 @@ export class PageLoadError extends CliError {
   }
 }
 
+// A --step or --measure button that never appeared, with the named buttons that were on the
+// page (null when they couldn't be read). audit() adds things to check before it's printed.
+export class ButtonNotFoundError extends CliError {
+  constructor(message: string, readonly pattern: RegExp, readonly seen: string[] | null) {
+    super(message);
+    this.name = "ButtonNotFoundError";
+  }
+}
+
 // A timed run whose AI request couldn't be identified: no request's body bytes explain the
 // output changes, or two explain them equally. The run reports it and isn't timed.
 export class UnidentifiedRequestError extends Error {

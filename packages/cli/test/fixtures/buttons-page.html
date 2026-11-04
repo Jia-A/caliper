@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Buttons fixture</title>
+</head>
+<body>
+<!-- A page whose buttons never match the test's --measure / --step, for the "Buttons I saw"
+     line: a name with extra spaces (shown trimmed), "Option 1" twice (shown once), Option 2 to
+     Option 20, an icon-only button with no name (not listed), and a hidden one (not seen). -->
+<button type="button">   Spaced   out   </button>
+<script>
+  for (const i of [1, 1, ...Array.from({ length: 19 }, (_, k) => k + 2)]) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = `Option ${i}`;
+    document.body.append(b);
+  }
+</script>
+<button type="button"><svg width="16" height="16"><path d="M2 8h12"/></svg></button>
+<button type="button" style="display:none">Hidden</button>
+<div id="out"></div>
+</body>
+</html>

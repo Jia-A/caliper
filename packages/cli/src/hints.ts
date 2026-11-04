@@ -151,8 +151,13 @@ export interface HintList {
   disclaimer: string;
 }
 
+// Furthest over its own limit first (median ÷ limit), not the most ms: each layer has its own
+// limit. Same ratio: over its limit in more of its runs first, then the bigger median.
+const rank = (a: Measured, b: Measured) =>
+  b.median / b.limit - a.median / a.limit || b.over / b.of - a.over / a.of || b.median - a.median;
+
 const list = (side: HintList["side"], scope: string, measured: Measured[], none = "Every part is within its limit."): HintList => {
-  const hints = measured.sort((a, b) => b.median - a.median).map((h) => ({ ...h, evidence: evidence(h), short: shortLine(h) }));
+  const hints = measured.sort(rank).map((h) => ({ ...h, evidence: evidence(h), short: shortLine(h) }));
   return { side, scope, hints, none: hints.length ? null : none, disclaimer: DISCLAIMER };
 };
 
@@ -233,16 +238,25 @@ export function serverHints(block: ServerBlock): HintList {
 // "median" only when there's more than one value, like the server block.
 const value = (h: Measured) => (h.of === 1 ? `${h.median} ms` : `median ${h.median} ms`);
 
+// How far over its limit, e.g. "5.3×". Under 1.1× one more digit, so it never reads "1.0×".
+function times(h: Measured): string {
+  const ratio = h.median / h.limit;
+  return `${ratio.toFixed(ratio < 1.1 ? 2 : 1)}×`;
+}
+
+// "<label>: median 532 ms — 5.3× its 100 ms limit, in 3 of 3 marked visits"
+const over = (h: Measured) => `${h.label}: ${value(h)} — ${times(h)} its ${h.limit} ms limit, in ${h.over} of ${h.of} ${h.unit}${h.measuredNote}`;
+
 // The full hint's evidence line.
 function evidence(h: Measured): string {
   const share = h.share === null ? h.shareOf : `${h.share}% of ${h.shareOf}`;
-  return `${h.label}: ${value(h)}, over its ${h.limit} ms limit in ${h.over} of ${h.of} ${h.unit}${h.measuredNote}; ${share}`;
+  return `${over(h)}; ${share}`;
 }
 
 // A hint after the first, in one line.
 function shortLine(h: Measured): string {
   const more = h.links.length ? ` — learn more: ${h.links.join(" · ")}` : "";
-  return `${h.label}: ${value(h)} (limit ${h.limit} ms), over in ${h.over} of ${h.of} ${h.unit}${h.measuredNote}${h.about ? ` — ${h.about}` : ""}${more}`;
+  return `${over(h)}${h.about ? ` — ${h.about}` : ""}${more}`;
 }
 
 /** The list as the terminal prints it: the first hint in full, the rest one line each. */

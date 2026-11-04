@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { BrowserContext, Locator, Page, Request, Response } from "playwright";
 import { launchChromium } from "./browser.js";
 import { combineImageRules, describeRule, imageRule, splitPolicies, type ImageRule } from "./csp.js";
-import { CliError, messageOf, PageLoadError, UnidentifiedRequestError } from "./errors.js";
-import { loadFailureHints } from "./loadhints.js";
+import { ButtonNotFoundError, CliError, messageOf, PageLoadError, UnidentifiedRequestError } from "./errors.js";
+import { buttonHints, buttonNames, expiredLoginCookies, loadFailureHints } from "./loadhints.js";
 import { browserHints, formatHints, serverHints, type HintList } from "./hints.js";
 import { formatServerBlock, parseServerRecord, plural, serverBlock, type ServerRecord, type ServerReport } from "./serverblock.js";
 import { renderReport, type ReportReply } from "./report.js";
@@ -323,6 +323,9 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
       writeFileSync(reportPath, html);
       console.log(`report: ${reportPath}`);
     }
+  } catch (err) {
+    if (err instanceof ButtonNotFoundError) throw withButtonHints(err, url, auth, authPath);
+    throw err;
   } finally {
     await browser.close();
   }
@@ -1685,7 +1688,7 @@ async function findButton(page: Page, text: string, flag: string, timeout: numbe
     await button.waitFor({ timeout });
   } catch (err) {
     if (err instanceof Error && err.name === "TimeoutError") {
-      throw new CliError(`No button matching ${name} (${flag}) appeared within ${timeout} ms.`);
+      throw new ButtonNotFoundError(`No button matching ${name} (${flag}) appeared within ${timeout} ms.`, name, await seenButtons(page));
     }
     if (/strict mode violation/.test(messageOf(err))) {
       const count = await button.count();
@@ -1696,6 +1699,33 @@ async function findButton(page: Page, text: string, flag: string, timeout: numbe
     throw err;
   }
   return button;
+}
+
+// The named buttons on the page now, from the same accessibility tree getByRole searches; null
+// if it couldn't be read (never a guess).
+async function seenButtons(page: Page): Promise<string[] | null> {
+  try {
+    return buttonNames(await page.locator("body").ariaSnapshot({ timeout: 5000 }));
+  } catch {
+    return null;
+  }
+}
+
+// The button error with things to check: the buttons seen, and the saved login when it's known
+// to have expired (--auth) or wasn't used.
+function withButtonHints(err: ButtonNotFoundError, url: string, auth: string | undefined, authPath: string | undefined): CliError {
+  let login: { file: string; expired: number[] } | null = null;
+  if (auth !== undefined && authPath) {
+    let state: unknown = null;
+    try {
+      state = JSON.parse(readFileSync(authPath, "utf8"));
+    } catch {
+      // Unreadable now: no expiry line, rather than a guess.
+    }
+    login = { file: auth, expired: expiredLoginCookies(state, url, Date.now()) };
+  }
+  const lines = buttonHints({ seen: err.seen, pattern: err.pattern, login, url });
+  return new CliError([err.message, ...(lines.length ? ["Things to check:", ...lines.map((l) => `  - ${l}`)] : [])].join("\n"));
 }
 
 const runLabel = (i: number) => (i === 1 ? `run ${i} (cold)` : `run ${i}`);

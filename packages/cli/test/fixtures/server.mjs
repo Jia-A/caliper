@@ -14,6 +14,8 @@
 //   /sidecall/stream    the reply (GET SSE: a status event at once, tokens after SIDECALL_WAIT_MS)
 // For an icon-only send button (no accessible name; Enter doesn't send):
 //   /icon         the page (streams from /chat/stream)
+// For a button that never appears (--measure / --step): /buttons, 21 named buttons, one
+// duplicate, one unnamed and one hidden (see buttons-page.html).
 // For the marked visit (server timings): a page whose reply URL varies per ?case and per load.
 //   /marked       the page (?case=a…f&id=<test id>; see marked-page.html). ?fail=<loads> (comma-
 //                 separated load numbers) drops the connection for those loads (net::ERR_EMPTY_RESPONSE);
@@ -47,6 +49,7 @@ const CHAT_PAGE = readFileSync(new URL("./chat-page.html", import.meta.url), "ut
 const SIDECALL_PAGE = readFileSync(new URL("./sidecall-page.html", import.meta.url), "utf8");
 const ICON_PAGE = readFileSync(new URL("./icon-page.html", import.meta.url), "utf8");
 const MARKED_PAGE = readFileSync(new URL("./marked-page.html", import.meta.url), "utf8");
+const BUTTONS_PAGE = readFileSync(new URL("./buttons-page.html", import.meta.url), "utf8");
 
 // The streamed reply: headers at once, the first token after a pause, then a token every 60 ms.
 const REPLY = "Hello! Here is **a streamed reply**, one token at a time.\n\nIt ends here.".split(/(?<= )/);
@@ -91,7 +94,7 @@ async function sidecallStream(res) {
   res.end();
 }
 
-const PAGES = { "/stream-nostore": STREAM_PAGE, "/chat": CHAT_PAGE, "/sidecall": SIDECALL_PAGE, "/icon": ICON_PAGE };
+const PAGES = { "/stream-nostore": STREAM_PAGE, "/chat": CHAT_PAGE, "/sidecall": SIDECALL_PAGE, "/icon": ICON_PAGE, "/buttons": BUTTONS_PAGE };
 const STREAMS = { "/chat/stream": "no-cache", "/chat/stream-nostore": "no-store" };
 
 const VARIANTS = {

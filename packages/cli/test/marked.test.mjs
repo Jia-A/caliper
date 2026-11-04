@@ -341,7 +341,7 @@ function hintList(stdout, side) {
   if (at === -1) return null;
   const end = lines.findIndex((l, i) => i > at && !l.startsWith("  "));
   const body = lines.slice(at + 1, end === -1 ? undefined : end);
-  const m = /^    (.+?): median (\d+) ms, over its (\d+) ms limit in (\d+) of (\d+) (warm runs|marked visits)/.exec(body[0] ?? "");
+  const m = /^    (.+?): median (\d+) ms — [\d.]+× its (\d+) ms limit, in (\d+) of (\d+) (warm runs|marked visits)/.exec(body[0] ?? "");
   return { at, title: lines[at], body, first: m && { label: m[1], median: Number(m[2]), limit: Number(m[3]), over: Number(m[4]), of: Number(m[5]) } };
 }
 

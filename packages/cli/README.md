@@ -103,6 +103,16 @@ report: /path/to/caliper-report.html
 
 `--step` and `--measure` match accessible button names as case-insensitive regular expressions, so `"^(re)?generate$"` matches exactly "Generate" or "Regenerate". If a pattern matches more than one button, Caliper stops and asks you to make it more specific.
 
+### When a button doesn't appear
+
+If a `--step` or `--measure` button doesn't appear within `--timeout`, the audit stops with `No button matching /<pattern>/i (<flag>) appeared within <ms> ms.`, followed by things to check. They come only from what Caliper can see:
+
+- **The buttons it saw:** `Buttons I saw: "…", "…". None matched /<pattern>/i.` These are the visible buttons' accessible names at the timeout, from the same accessibility tree the search uses, in page order, trimmed and deduped. At most 15 are shown, then `(and <n> more)`. Unnamed buttons (icon-only) aren't listed. If the page can't be read, there's no such line.
+- **With `--auth`:** if a cookie in that file for the audited site (its host, or a parent domain cookie) has expired: `Your saved login (<file>) has cookies that expired on <date> — run: caliper login <url> --auth <file>`. When there are several dates, it says "between <first> and <last>". If no cookie has expired, nothing is said about login.
+- **Without `--auth`:** `No saved login was used. If this button only shows when logged in, run caliper login first and pass --auth.`
+
+This applies to the timed runs. The Stop, double-send and canary checks and the marked visits report their own first line, as before. Tested with `npm run test:auth` (end to end) and `npm run test:loadhints` (unit).
+
 ### Icon-only buttons (`--measure-selector`)
 
 `--measure` finds buttons by accessible name: their text or `aria-label`. A button that only holds an icon (an `<svg>` with no text and no `aria-label`) has no name, so `--measure` can't find it. Use `--measure-selector` to click it by CSS selector instead:
@@ -256,7 +266,7 @@ After the timings, Caliper compares each segment's median with a limit for its l
 - **Browser:** the median of each segment over the warm runs (runs 2 and later), like the Median tile. A segment that only shows up on the cold run, such as a first CORS preflight, isn't hinted. With `--runs 1` there's no warm run, and the list says so.
 - **Server** (only with `--server-timings`): the median of each span in the "Inside the server" block, the same number as its table. The span between `modelCallSent` and `firstChunk` has its own limit. Every app-named span uses the general one, with the same text whatever its name: "a step your app named; Caliper can't see inside it."
 
-Within each list, the biggest median comes first and gets the full hint. That's the evidence (median, limit, in how many runs it was over, and its share of that side's total), the limit's basis, 2 to 4 things to check worded as possibilities, "Learn more" links for browser segments, and "Caliper sees timings, not your code — these are common causes, not a diagnosis." Every other segment over its limit gets one line, ending with its links. In the HTML report the links can be clicked. Model and app-named spans have no links: Caliper can't see inside an app's step, and model speed depends on the provider.
+Within each list, the segment furthest over its own limit (median ÷ limit) comes first and gets the full hint. A 532 ms span with a 100 ms limit (5.3×) ranks above a 552 ms model call with a 450 ms limit (1.2×). When two have the same ratio, the one over its limit in more of its runs comes first. The evidence line reads like `postgres: median 532 ms — 5.3× its 100 ms limit, in 3 of 3 marked visits; 49% of the time to server: first bytes sent` (two decimals under 1.1×, so it never reads 1.0×). Its evidence covers the median, how many times its limit, in how many runs it was over, and its share of that side's total. Then come the limit's basis, 2 to 4 things to check worded as possibilities, "Learn more" links for browser segments, and "Caliper sees timings, not your code — these are common causes, not a diagnosis." Every other segment over its limit gets one line, ending with its links. In the HTML report the links can be clicked. Model and app-named spans have no links: Caliper can't see inside an app's step, and model speed depends on the provider.
 
 | Segment | Learn more |
 |---|---|

@@ -8,6 +8,13 @@
 //   (c) --auth auth.json (relative, resolved from the current directory): its cookie reaches
 //       every request, and the no-session line isn't printed;
 //   (d) --auth naming a missing file: the same "No saved session" error as before, no run.
+// A --measure or --step button that never appears keeps its error and adds things to check,
+// only from what Caliper can see:
+//   (e) no --auth: the buttons it saw (the first 15 visible names, trimmed, deduped), what
+//       didn't match, and that no saved login was used;
+//   (f) --auth whose cookie for this site expired: the login line with the file and date;
+//   (g) --auth with a valid cookie: nothing about login;
+//   (h) the same for a --step button.
 // Run with `npm run test:auth` (builds first).
 
 import { execFile } from "node:child_process";
@@ -38,6 +45,11 @@ const page = `${server.url}/stream-nostore`;
 const run = [page, "--measure", "^generate$", "--output", "#out", "--runs", "1", "--settle-ms", "500", "--timeout", "15000"];
 // A Playwright storage state with one cookie for the fixture's host.
 const SESSION = { cookies: [{ name: "caliper_session", value: "s3cret", domain: "127.0.0.1", path: "/", expires: -1, httpOnly: false, secure: false, sameSite: "Lax" }], origins: [] };
+const buttons = `${server.url}/buttons`;
+const noButton = (extra) => [buttons, "--measure", "^nosuch$", "--output", "#out", "--runs", "1", "--timeout", "3000", ...extra];
+const SEEN = `Buttons I saw: ${["Spaced out", ...Array.from({ length: 14 }, (_, i) => `Option ${i + 1}`)].map((n) => JSON.stringify(n)).join(", ")} (and 6 more). None matched /^nosuch$/i.`;
+const NO_LOGIN = "No saved login was used. If this button only shows when logged in, run caliper login first and pass --auth.";
+const cookieState = (expires) => ({ cookies: [{ ...SESSION.cookies[0], expires }], origins: [] });
 const failures = [];
 const logs = [];
 const check = (ok, what, out) => {
@@ -86,6 +98,33 @@ try {
   const want = `No saved session at ${join(empty, "missing.json")}.\nRun: caliper login <url> --auth missing.json`;
   check(d.out.code !== 0 && d.out.stderr.includes(want) && timedRuns(d.out.stdout) === 0 && d.requests.length === 0,
     `(d) --auth missing.json: "No saved session" error, no run, no request (exit ${d.out.code}, requests ${d.requests.length})`, d.out);
+
+  // (e) --measure button never appears, no --auth.
+  const e = await caliper(empty, noButton([]));
+  const eLines = e.stderr.split("\n");
+  check(e.code !== 0 && eLines[0] === "error: No button matching /^nosuch$/i (--measure) appeared within 3000 ms.",
+    "(e) keeps the error", e);
+  check(eLines.includes("Things to check:") && eLines.includes(`  - ${SEEN}`), `(e) lists the first 15 buttons it saw, trimmed and deduped (want: ${SEEN})`, e);
+  check(!e.stderr.includes("Hidden"), "(e) a hidden button isn't listed", e);
+  check(eLines.includes(`  - ${NO_LOGIN}`), "(e) no --auth: says no saved login was used", e);
+
+  // (f) --auth with this site's cookie expired.
+  writeFileSync(join(empty, "old.json"), JSON.stringify(cookieState(Date.UTC(2026, 9, 30) / 1000)));
+  const f = await caliper(empty, noButton(["--auth", "old.json"]));
+  const login = `  - Your saved login (old.json) has cookies that expired on 2026-10-30 — run: caliper login ${buttons} --auth old.json`;
+  check(f.code !== 0 && f.stderr.split("\n").includes(login), `(f) expired cookie: the login line (want: ${login.trim()})`, f);
+  check(!f.stderr.includes("No saved login was used"), "(f) no 'no saved login' line with --auth", f);
+
+  // (g) --auth with a valid cookie: nothing about login.
+  writeFileSync(join(empty, "fresh.json"), JSON.stringify(cookieState(Date.now() / 1000 + 86_400)));
+  const g = await caliper(empty, noButton(["--auth", "fresh.json"]));
+  check(g.code !== 0 && g.stderr.split("\n").includes(`  - ${SEEN}`) && !/login/i.test(g.stderr), "(g) valid cookie: the buttons line, nothing about login", g);
+
+  // (h) A --step button that never appears gets the same things to check.
+  const h = await caliper(empty, [buttons, "--step", "^nostep$", "--measure", "^nosuch$", "--output", "#out", "--runs", "1", "--timeout", "3000"]);
+  const hSeen = SEEN.replace("/^nosuch$/i", "/^nostep$/i");
+  check(h.code !== 0 && h.stderr.includes("No button matching /^nostep$/i (--step) appeared within 3000 ms.") && h.stderr.split("\n").includes(`  - ${hSeen}`) && h.stderr.includes(NO_LOGIN),
+    "(h) --step: same things to check", h);
 } finally {
   await server.close();
   rmSync(empty, { recursive: true, force: true });
