@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 — 2026-11-04
 
 ### Added
 
@@ -11,7 +11,7 @@
 - **Token pre-check.** Before the marked visit, Caliper asks `<origin>/__caliper/timings/caliper.precheck` (a deliberately malformed id, so it can never reach a record) with `Authorization: Bearer <token>`, and doesn't follow redirects. A `400` goes ahead. `401` (token rejected), `404` (no wrapper, or `CALIPER_TOKEN` not set on the server), any other status, or a network error skip the marked visit. Either way one `pre-check:` line says what it got, for example `Server timings — pre-check: feature on, token accepted (400 on caliper.precheck)` or `Server timings ? — pre-check: token rejected (401 on caliper.precheck): wrong, expired or rotated; no marked visit.`
 - **Server record printed.** After a stamped run whose AI request was the stamped one, Caliper fetches `<origin>/__caliper/timings/<run id>`. It prints an "Inside the server (from 1 marked run)" block: each recorded mark in ms after the request arrived, plus spans when both of their marks are in the record (see "Spans are app-chosen" below). A note that Workers time waits only appears when the record has `"runtime": "workers"`, and not otherwise. Nothing that wasn't recorded is shown or computed, and the numbers are never mixed into the user-timing summary. A missing record (`404`), another status, or a record of the wrong shape prints `Server timings ? — <reason>`. Terminal only.
 - **`--server-runs <n>`: several marked visits** (default 3, 1 to 10, only with `--server-timings`; anything else is an error before any run). Before any run, Caliper prints `This audit triggers the AI feature up to <runs + n> times for timing (<runs> timed + <n> marked).` It counts triggers, not requests: the endpoint isn't known until the runs pick it, and `--stop`, `--double` and `--canary` aren't counted. The token pre-check runs once. Then each visit gets a fresh run id, with the same key and rules. A visit that fails prints `Server timings ? — marked visit <i> of <n>: <reason>` and is left out. The block is now headed "Inside the server (from <k> of <n> marked runs)" and shows each visit's value per mark and span, then min · median · max across the visits that recorded it (just the value with one visit). Spans are computed inside each visit, then summarised. If no visit succeeds: `Server timings ? — 0 of <n> marked visits succeeded`. The marked visits stay out of the browser summary.
-- **Spans are app-chosen ([caliper-timings SPEC v1](../timings/SPEC.md#marks)).**
+- **Spans are app-chosen ([caliper-timings SPEC v1](https://github.com/Jia-A/caliper/blob/main/packages/timings/SPEC.md#marks)).**
   - **Marks:** every recorded mark is shown under its own name, in the order they happened. The reserved `modelCallSent` and `firstChunk` keep their labels.
   - **Spans:** each `<name>Start` / `<name>End` pair is a span called `<name>`, replacing the fixed "database wait". Quill's `postgresStart`/`postgresEnd` show as `postgres`. "model: sent → first chunk" stays.
   - **No span:** when a pair is missing a mark, or its End is before its Start, there's no span, and one line per pair says why. With several visits, that line says how many visits had no span and which ones when not all, then the reason once if it's the same, else per visit.

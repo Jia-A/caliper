@@ -4,12 +4,28 @@ Caliper is Lighthouse for AI interfaces. Everyone is shipping AI features, but a
 
 ## Install
 
+Two steps, in two places. Step 2 is optional.
+
+### 1. On your machine: `caliper-ai`
+
+The machine you run Caliper from (your laptop, or CI):
+
 ```sh
 npm install -g caliper-ai
 npx playwright install chromium
 ```
 
 Caliper drives a real Chromium through [Playwright](https://playwright.dev). The browser is a separate download and there is no postinstall script, so run the second command once. If you skip it, Caliper tells you to run it. Requires Node.js 20 or newer.
+
+### 2. In your server's project: `caliper-timings` (optional)
+
+Only for [server timings](#marked-visit---server-timings): what happened inside one marked request on your server (database wait, model call). Install it in the project of the app Caliper measures, not on the machine that runs Caliper:
+
+```sh
+npm install caliper-timings
+```
+
+Then wire it into your server: see the [caliper-timings README](https://github.com/Jia-A/caliper/tree/main/packages/timings#readme). Skip this step and everything else in Caliper works the same.
 
 ## Quick start
 
@@ -105,7 +121,7 @@ caliper audit https://your-app.example.com/chat --input "#msg" --prompt "hello" 
 
 ### Marked visit (`--server-timings`)
 
-Server-side timings from marked runs, read from a Caliper wrapper on your server: [`caliper-timings`](../timings/README.md), or anything that implements its [protocol](../timings/SPEC.md). They're printed in the terminal only, not in the HTML report yet.
+Server-side timings from marked runs, read from a Caliper wrapper on your server: [`caliper-timings`](https://github.com/Jia-A/caliper/tree/main/packages/timings#readme), or anything that implements its [protocol](https://github.com/Jia-A/caliper/blob/main/packages/timings/SPEC.md). They're printed in the terminal only, not in the HTML report yet.
 
 ```sh
 CALIPER_TOKEN=… caliper audit http://localhost:5173/post/1 --measure "^generate$" --output textarea \
@@ -144,7 +160,7 @@ After the timed runs, Caliper builds a match key from the AI request each run pi
 
   With one successful visit (for example `--server-runs 1`) there's no column row and no min · median · max, only the values. A mark or span that a successful visit didn't record shows `–` in its column, and min · median · max cover only the visits that recorded it (none with fewer than two).
 
-  **Marks and spans follow the [protocol](../timings/SPEC.md#marks).** Every recorded mark is shown under its own name, in the order the marks happened. The exceptions are `modelCallSent` and `firstChunk`, which are reserved and labelled. Spans:
+  **Marks and spans follow the [protocol](https://github.com/Jia-A/caliper/blob/main/packages/timings/SPEC.md#marks).** Every recorded mark is shown under its own name, in the order the marks happened. The exceptions are `modelCallSent` and `firstChunk`, which are reserved and labelled. Spans:
   - each `<name>Start` / `<name>End` pair the app recorded is a span called `<name>`;
   - `modelCallSent` → `firstChunk` is "model: sent → first chunk".
 

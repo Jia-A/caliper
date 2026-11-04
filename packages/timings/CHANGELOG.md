@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0 — 2026-11-04
 
 ### Added
 
@@ -11,5 +11,5 @@
   - **`watchFirstChunk`** skips chunks with no bytes.
 - **`caliper-timings/node`:** `createTimings({ token, store })`, with `handle(req, res)` for the timings endpoint and `start(req, res)` for a route.
 - **`SPEC.md`:** the protocol, v1, with the rule that an implementation never changes the app's response or errors, and the `problems` field.
-- **`"private": true`** until publishing is decided.
+- **First published release.** The package ships the compiled JavaScript and type declarations (`dist/`), with this changelog, the README, SPEC.md and the license.
 - **Measured cost** in SPEC.md and the README: on `examples/node-memory`, marked requests median 1.2 ms slower before the first byte (20 pairs), unmarked requests median 0.0 ms against the pre-wiring server (20 pairs). Cause not measured.

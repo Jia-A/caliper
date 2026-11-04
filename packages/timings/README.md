@@ -11,6 +11,31 @@ Light enough to stay in production, deployed dark:
 
 The wire format is in [SPEC.md](SPEC.md), so other languages can implement it too.
 
+## Install
+
+Two steps, in two places. Step 2 is optional.
+
+### 1. On your machine: `caliper-ai`
+
+The machine you run Caliper from (your laptop, or CI). It's the CLI that marks a request and reads the timings back:
+
+```sh
+npm install -g caliper-ai
+npx playwright install chromium
+```
+
+See the [caliper-ai README](https://github.com/Jia-A/caliper/tree/main/packages/cli#readme).
+
+### 2. In your server's project: `caliper-timings` (optional)
+
+Only if you want server timings. Install it in the project of the app Caliper measures, then wire it in as below:
+
+```sh
+npm install caliper-timings
+```
+
+Without it (or without `CALIPER_TOKEN` set on the server), Caliper still times everything it sees from the browser. Requires Node.js 20 or newer.
+
 ## Node (`node:http`)
 
 ```js
@@ -73,7 +98,7 @@ There's no framework adapter other than Node yet.
 
 ## Measured cost
 
-The rule covers status, headers, bytes and errors, not time. This is what the reference implementation (`caliper-timings/node`) measured in time, on [`examples/node-memory`](../../examples/node-memory/): a single-process `node:http` app on 127.0.0.1, Node 22.22, one macOS machine. The client is `examples/node-memory/measure.mjs`, timing on its own clock from sending the request to the first body chunk arriving, one request at a time, each on a new connection.
+The rule covers status, headers, bytes and errors, not time. This is what the reference implementation (`caliper-timings/node`) measured in time, on [`examples/node-memory`](https://github.com/Jia-A/caliper/tree/main/examples/node-memory): a single-process `node:http` app on 127.0.0.1, Node 22.22, one macOS machine. The client is `examples/node-memory/measure.mjs`, timing on its own clock from sending the request to the first body chunk arriving, one request at a time, each on a new connection.
 
 - **Marked requests: about 1.2 ms slower before the first byte.** 20 marked and 20 unmarked requests to the same server, alternating, compared in pairs: the marked one was later by median 1.2 ms (min 0.1, max 4.1). The difference is already there when the headers arrive (paired median 1.4 ms); between headers and first chunk it's 0.1 ms. What causes it hasn't been measured.
 - **Unmarked requests: no difference measured.** 20 unmarked requests to the wired server (`CALIPER_TOKEN` set) alternated with 20 to the same app before it was wired: paired difference median 0.0 ms (min −2.3, max 5.4).
@@ -101,4 +126,5 @@ That is one app, one machine and 20 pairs each. Other runtimes, frameworks, stor
 - **One process only.** `MemoryStore` is for single-process servers. There's no shared store for Node yet. The Durable Object store for Workers comes with the Hono adapter.
 - **Node only, so far.** Only the `node:http` adapter exists. Express or Fastify can use it through their raw `req`/`res`, but that hasn't been tested.
 - **No cross-origin test yet.** Cross-origin APIs need the CORS preflight to allow `x-caliper-run` and `x-caliper-token`.
-- **Node 20 isn't tested.** The build targets Node 20+, but tests run on Node 22.
+- **Node 20: one end-to-end run, no test suite.** The packed package was installed into a fresh project and the [example server](https://github.com/Jia-A/caliper/tree/main/examples/node-memory) ran on Node 20.18.3 with Caliper's 3 marked visits. `npm test` runs on Node 22 only.
+- **ES module only.** Use `import`. `require("caliper-timings/node")` works on Node 22.22 but fails on Node 20.18.3 with `ERR_REQUIRE_ESM`. The type declarations were checked from an ES module with TypeScript 5.0, 5.9 and 7.0.
