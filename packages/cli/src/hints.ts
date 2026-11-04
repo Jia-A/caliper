@@ -26,9 +26,12 @@ const LIMITS = {
 };
 type Limit = (typeof LIMITS)[keyof typeof LIMITS];
 
-// Per browser segment: its limit and what a slow value could point to. "other" (unattributed)
-// is never hinted: it's the part Caliper couldn't attribute.
-const BROWSER: Partial<Record<SegmentKey, { limit: Limit; checks: string[] }>> = {
+const INP_LINK = "https://web.dev/articles/optimize-inp";
+const STREAMS_LINK = "https://developer.mozilla.org/en-US/docs/Web/API/Streams_API";
+
+// Per browser segment: its limit, what a slow value could point to, and where to read more.
+// "other" (unattributed) is never hinted: it's the part Caliper couldn't attribute.
+const BROWSER: Partial<Record<SegmentKey, { limit: Limit; checks: string[]; links: string[] }>> = {
   click: {
     limit: LIMITS.input,
     checks: [
@@ -36,6 +39,7 @@ const BROWSER: Partial<Record<SegmentKey, { limit: Limit; checks: string[] }>> =
       "code loaded only on the first click (a lazy import)",
       "a busy main thread (long tasks) delaying the click handler",
     ],
+    links: [INP_LINK, "https://web.dev/optimize-long-tasks/"],
   },
   preflight: {
     limit: LIMITS.instant,
@@ -44,6 +48,7 @@ const BROWSER: Partial<Record<SegmentKey, { limit: Limit; checks: string[] }>> =
       "no Access-Control-Max-Age on the preflight response, so it isn't cached between requests",
       "a custom header or content type that makes the request need a preflight",
     ],
+    links: ["https://developer.mozilla.org/en-US/docs/Glossary/preflight_request"],
   },
   connection: {
     limit: LIMITS.instant,
@@ -52,6 +57,7 @@ const BROWSER: Partial<Record<SegmentKey, { limit: Limit; checks: string[] }>> =
       "DNS, TCP or TLS to a distant server",
       "no preconnect to the API's origin",
     ],
+    links: ["https://developer.chrome.com/docs/lighthouse/performance/uses-rel-preconnect"],
   },
   ttfb: {
     limit: LIMITS.server,
@@ -61,6 +67,7 @@ const BROWSER: Partial<Record<SegmentKey, { limit: Limit; checks: string[] }>> =
       "queueing or a cold start on the server",
       "network distance to the server",
     ],
+    links: ["https://web.dev/optimize-ttfb/"],
   },
   download: {
     limit: LIMITS.instant,
@@ -69,6 +76,7 @@ const BROWSER: Partial<Record<SegmentKey, { limit: Limit; checks: string[] }>> =
       "a large response body",
       "a slow network",
     ],
+    links: [STREAMS_LINK],
   },
   render: {
     limit: LIMITS.instant,
@@ -77,6 +85,7 @@ const BROWSER: Partial<Record<SegmentKey, { limit: Limit; checks: string[] }>> =
       "rendering after the data arrives (framework updates, layout)",
       "a busy main thread",
     ],
+    links: [INP_LINK],
   },
   streaming: {
     limit: LIMITS.instant,
@@ -86,10 +95,12 @@ const BROWSER: Partial<Record<SegmentKey, { limit: Limit; checks: string[] }>> =
       "a proxy or compression buffering the stream",
       "parsing or rendering each chunk",
     ],
+    links: [STREAMS_LINK],
   },
 };
 
 // Server spans. An app-named span is the app's own step: the same text whatever its name.
+// No links: Caliper can't see inside an app's step, and the model's depends on the provider.
 const SERVER: Record<"span" | "model", { limit: Limit; about?: string; checks: string[] }> = {
   span: {
     limit: LIMITS.instant,
@@ -125,6 +136,7 @@ export interface Hint {
   shareOf: string; // what share is of, or why there's none
   about?: string; // the app-named span line
   checks: string[];
+  links: string[]; // Learn more; none for server spans
   evidence: string; // the full hint's first line
   short: string; // the hint as one line, after the first
 }
@@ -173,6 +185,7 @@ export function browserHints(warm: { total: number; segments: Segment[] }[]): Hi
       share: median(shares),
       shareOf: "the browser total",
       checks: layer.checks,
+      links: layer.links,
     });
   }
   return list("browser", scope, hints);
@@ -210,6 +223,7 @@ export function serverHints(block: ServerBlock): HintList {
       shareOf: share !== null ? "the time to server: first bytes sent" : "server: first bytes sent wasn't recorded, so no share",
       ...(layer.about && { about: layer.about }),
       checks: layer.checks,
+      links: [],
     });
   }
   const scope = `${k === 1 ? "1 marked visit" : `median of ${k} marked visits`}, on the server's clock; never compared with the browser`;
@@ -227,7 +241,8 @@ function evidence(h: Measured): string {
 
 // A hint after the first, in one line.
 function shortLine(h: Measured): string {
-  return `${h.label}: ${value(h)} (limit ${h.limit} ms), over in ${h.over} of ${h.of} ${h.unit}${h.measuredNote}${h.about ? ` — ${h.about}` : ""}`;
+  const more = h.links.length ? ` — learn more: ${h.links.join(" · ")}` : "";
+  return `${h.label}: ${value(h)} (limit ${h.limit} ms), over in ${h.over} of ${h.of} ${h.unit}${h.measuredNote}${h.about ? ` — ${h.about}` : ""}${more}`;
 }
 
 /** The list as the terminal prints it: the first hint in full, the rest one line each. */
@@ -241,6 +256,7 @@ export function formatHints({ side, scope, hints, none }: HintList): string {
     `    Limit: ${first!.basis}`,
     "    Things to check:",
     ...first!.checks.map((c) => `      - could be ${c}`),
+    ...(first!.links.length ? [`    Learn more: ${first!.links.join(" · ")}`] : []),
     `    ${DISCLAIMER}`,
   );
   if (rest.length) lines.push("  also over their limits:", ...rest.map((h) => `    ${h.short}`));

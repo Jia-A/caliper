@@ -74,8 +74,8 @@ test("biggest first; the first is the full hint, the rest one short line each", 
   assert.ok(text.includes(`    ${DISCLAIMER}`), text.join("\n"));
   assert.deepEqual(text.slice(-3), [
     "  also over their limits:",
-    "    headers → first paint: median 400 ms (limit 100 ms), over in 2 of 2 warm runs",
-    "    click → request sent: median 300 ms (limit 200 ms), over in 2 of 2 warm runs",
+    "    headers → first paint: median 400 ms (limit 100 ms), over in 2 of 2 warm runs — learn more: https://developer.mozilla.org/en-US/docs/Web/API/Streams_API",
+    "    click → request sent: median 300 ms (limit 200 ms), over in 2 of 2 warm runs — learn more: https://web.dev/articles/optimize-inp · https://web.dev/optimize-long-tasks/",
   ]);
   // 2 to 4 things to check, worded as possibilities.
   const checks = list.hints[0]!.checks;
@@ -205,4 +205,43 @@ test("HTML: the full hint has evidence, basis, things to check and the disclaime
   for (const want of ["model call → first bytes sent: 700 ms, over its 450 ms limit in 1 of 1 marked visits", "MLPerf Inference", CAVEAT, "Things to check", DISCLAIMER]) {
     assert.ok(html.includes(want), `has: ${want}\n${html}`);
   }
+});
+
+// --- Learn more ---
+
+const INP = "https://web.dev/articles/optimize-inp";
+const LINKS: [Partial<Record<SegmentKey, number>>, string, string[]][] = [
+  [{ click: 300, ttfb: 10 }, "click → request sent", [INP, "https://web.dev/optimize-long-tasks/"]],
+  [{ click: 10, preflight: 300, ttfb: 10 }, "CORS preflight", ["https://developer.mozilla.org/en-US/docs/Glossary/preflight_request"]],
+  [{ click: 10, connection: 300, ttfb: 10 }, "connection setup", ["https://developer.chrome.com/docs/lighthouse/performance/uses-rel-preconnect"]],
+  [{ click: 10, ttfb: 900 }, "browser: response headers received", ["https://web.dev/optimize-ttfb/"]],
+  [{ click: 10, ttfb: 10, streaming: 300 }, "headers → first paint", ["https://developer.mozilla.org/en-US/docs/Web/API/Streams_API"]],
+  [{ click: 10, ttfb: 10, download: 300, render: 10 }, "headers → done", ["https://developer.mozilla.org/en-US/docs/Web/API/Streams_API"]],
+  [{ click: 10, ttfb: 10, download: 10, render: 300 }, "done → first paint", [INP]],
+];
+
+test("each browser hint has its Learn more links, in the full hint and in its short line", () => {
+  for (const [parts, label, links] of LINKS) {
+    const list = browserHints([run(parts), run(parts)]);
+    assert.deepEqual(labels(list), [label]);
+    assert.deepEqual(list.hints[0]!.links, links, label);
+    assert.ok(formatHints(list).split("\n").includes(`    Learn more: ${links.join(" · ")}`), formatHints(list));
+  }
+  // As a short line (not the biggest): the links at its end.
+  const two = browserHints([run({ ttfb: 900, preflight: 300 }), run({ ttfb: 900, preflight: 300 })]);
+  assert.equal(formatHints(two).split("\n").at(-1), "    CORS preflight: median 300 ms (limit 100 ms), over in 2 of 2 warm runs — learn more: https://developer.mozilla.org/en-US/docs/Glossary/preflight_request");
+});
+
+test("no Learn more for the model span or app-named spans", () => {
+  const list = serverHints(block({ marks: { aStart: 0, aEnd: 300, modelCallSent: 300, firstChunk: 900 } }));
+  assert.deepEqual(labels(list), ["model call → first bytes sent", "a"]);
+  for (const h of list.hints) assert.deepEqual(h.links, [], h.label);
+  assert.ok(!/learn more/i.test(formatHints(list)), formatHints(list));
+});
+
+test("HTML: Learn more links are links, in the full hint and the short lines", () => {
+  const list = browserHints([run({ ttfb: 900, preflight: 300 }), run({ ttfb: 900, preflight: 300 })]);
+  const html = renderReport(input(list, null, null));
+  assert.ok(html.includes('Learn more: <a href="https://web.dev/optimize-ttfb/" rel="noopener noreferrer">https://web.dev/optimize-ttfb/</a>'), html);
+  assert.ok(html.includes('learn more: <a href="https://developer.mozilla.org/en-US/docs/Glossary/preflight_request" rel="noopener noreferrer">'), html);
 });

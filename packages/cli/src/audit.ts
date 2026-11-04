@@ -1808,9 +1808,9 @@ function breakdown(result: RunResult): Breakdown {
   if (!rt) {
     clock = "n/a (no Resource Timing entry)";
   } else if (rt.responseStart > 0 && r.firstByte !== null) {
-    clock = `first byte within ${Math.abs(r.firstByte - rt.responseStart).toFixed(1)} ms of Resource Timing`;
+    clock = `response headers within ${Math.abs(r.firstByte - rt.responseStart).toFixed(1)} ms of Resource Timing`;
   } else {
-    clock = "n/a (Resource Timing hides first byte without Timing-Allow-Origin)";
+    clock = "n/a (Resource Timing hides the response headers time without Timing-Allow-Origin)";
   }
 
   return {

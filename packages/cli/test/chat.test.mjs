@@ -72,6 +72,8 @@ try {
     // The headers-received segment says what it measures (it used to read "request → first byte").
     check(msOf(block, "browser: response headers received") !== null && !block.includes("request → first byte"),
       `${name}: the breakdown has a "browser: response headers received" row`);
+    check(/^    clock check: response headers within \d+\.\d ms of Resource Timing$/m.test(block) && !/clock check:.*first byte/.test(block),
+      `${name}: the clock check speaks of response headers`);
     check(/^\s+headers → (first paint|done)\s/m.test(block) && !block.includes("first byte →"), `${name}: the segments after the headers start with "headers →"`);
   }
 
@@ -83,6 +85,7 @@ try {
   check(html.includes("browser: response headers received") && !html.includes("request → first byte"), 'HTML report labels the segment "browser: response headers received"');
   check(!html.includes("Inside the server"), "HTML report has no server section without --server-timings");
   check(/headers → (first paint|done)/.test(html) && !html.includes("first byte →"), 'HTML report labels the segments after the headers "headers → …"');
+  check(html.includes("response headers within") && !html.includes("first byte within"), "HTML report's clock check speaks of response headers");
 } finally {
   await server.close();
   rmSync(dir, { recursive: true, force: true });

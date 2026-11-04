@@ -59,7 +59,7 @@ run 1 (cold)   7702 ms
     browser: response headers received    7524 ms
     headers → done                          21 ms
     done → first paint                      44 ms   ← what Lighthouse can't see
-    clock check: n/a (Resource Timing hides first byte without Timing-Allow-Origin)
+    clock check: n/a (Resource Timing hides the response headers time without Timing-Allow-Origin)
 run 2          5746 ms
     ...
 cold 7702 ms · median 6080 ms · worst 7702 ms
@@ -247,7 +247,7 @@ Each run's total is split into consecutive segments that add up to it. A segment
 | done → first paint | From the response finishing until the output is on screen: parsing, state updates and rendering. Lab tools such as Lighthouse don't capture this part for a click-triggered feature. |
 | headers → first paint | Replaces the last two lines for streaming responses that are still open at first paint. The note says when the response finished. |
 
-The **clock check** line compares the request's first-byte time from Playwright with the page's own Resource Timing entry for the same request. Both should land on the same clock, and they normally agree within a millisecond.
+The **clock check** line compares when the response headers arrived according to Playwright with the page's own Resource Timing entry for the same request (`response headers within <n> ms of Resource Timing`). Both should land on the same clock, and they normally agree within a millisecond.
 
 ### Where to look
 
@@ -256,7 +256,16 @@ After the timings, Caliper compares each segment's median with a limit for its l
 - **Browser:** the median of each segment over the warm runs (runs 2 and later), like the Median tile. A segment that only shows up on the cold run, such as a first CORS preflight, isn't hinted. With `--runs 1` there's no warm run, and the list says so.
 - **Server** (only with `--server-timings`): the median of each span in the "Inside the server" block, the same number as its table. The span between `modelCallSent` and `firstChunk` has its own limit. Every app-named span uses the general one, with the same text whatever its name: "a step your app named; Caliper can't see inside it."
 
-Within each list, the biggest median comes first and gets the full hint. That's the evidence (median, limit, in how many runs it was over, and its share of that side's total), the limit's basis, 2 to 4 things to check worded as possibilities, and "Caliper sees timings, not your code — these are common causes, not a diagnosis." Every other segment over its limit gets one line. The browser share is each run's own share of its total, then the median. The server share is of the time to "server: first bytes sent", and when that wasn't recorded, the hint says there's no share. "unattributed" is never hinted. With one value, the hint says "300 ms" rather than "median 300 ms".
+Within each list, the biggest median comes first and gets the full hint. That's the evidence (median, limit, in how many runs it was over, and its share of that side's total), the limit's basis, 2 to 4 things to check worded as possibilities, "Learn more" links for browser segments, and "Caliper sees timings, not your code — these are common causes, not a diagnosis." Every other segment over its limit gets one line, ending with its links. In the HTML report the links can be clicked. Model and app-named spans have no links: Caliper can't see inside an app's step, and model speed depends on the provider.
+
+| Segment | Learn more |
+|---|---|
+| click → request sent / click → fetch() called | [Optimize INP](https://web.dev/articles/optimize-inp), [Optimize long tasks](https://web.dev/optimize-long-tasks/) |
+| CORS preflight | [Preflight request (MDN)](https://developer.mozilla.org/en-US/docs/Glossary/preflight_request) |
+| connection setup | [Preconnect to required origins](https://developer.chrome.com/docs/lighthouse/performance/uses-rel-preconnect) |
+| browser: response headers received | [Optimize TTFB](https://web.dev/optimize-ttfb/) |
+| headers → first paint, headers → done | [Streams API (MDN)](https://developer.mozilla.org/en-US/docs/Web/API/Streams_API) |
+| done → first paint | [Optimize INP](https://web.dev/articles/optimize-inp) | The browser share is each run's own share of its total, then the median. The server share is of the time to "server: first bytes sent", and when that wasn't recorded, the hint says there's no share. "unattributed" is never hinted. With one value, the hint says "300 ms" rather than "median 300 ms".
 
 The browser list follows the browser summary in the terminal. The server list follows the "Inside the server" block. In the HTML report, the browser list is a "Where to look — browser" section, and the server list sits inside the server section.
 

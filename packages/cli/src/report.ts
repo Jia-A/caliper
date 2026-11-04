@@ -1,6 +1,6 @@
 // Self-contained HTML timeline for an audit: inline CSS/JS, no external requests.
 
-import type { HintList } from "./hints.js";
+import type { Hint, HintList } from "./hints.js";
 import type { ServerReport, ServerRow } from "./serverblock.js";
 import type {
   Breakdown,
@@ -376,9 +376,19 @@ function hintsBody({ scope, hints, none, disclaimer }: HintList): string {
       <p class="muted">Limit: ${esc(first!.basis)}</p>
       <p>Things to check:</p>
       <ul class="notes">${first!.checks.map((c) => `<li>could be ${esc(c)}</li>`).join("")}</ul>
+      ${first!.links.length ? `<p>Learn more: ${linksHtml(first!.links)}</p>` : ""}
       <p class="muted">${esc(disclaimer)}</p>
-      ${rest.length ? `<h3>Also over their limits</h3><ul class="notes">${rest.map((h) => `<li>${esc(h.short)}</li>`).join("")}</ul>` : ""}`;
+      ${rest.length ? `<h3>Also over their limits</h3><ul class="notes">${rest.map(shortHtml).join("")}</ul>` : ""}`;
 }
+
+// A short line with its links as links: the terminal text up to them, then each one.
+function shortHtml(h: Hint): string {
+  const more = h.links.length ? ` — learn more: ${h.links.join(" · ")}` : "";
+  const text = more ? h.short.slice(0, -more.length) : h.short;
+  return `<li>${esc(text)}${h.links.length ? ` — learn more: ${linksHtml(h.links)}` : ""}</li>`;
+}
+
+const linksHtml = (links: string[]) => links.map((l) => `<a href="${esc(l)}" rel="noopener noreferrer">${esc(l)}</a>`).join(" · ");
 
 const STATUS_MARK: Record<CheckStatus, string> = { pass: "✓", warn: "⚠", fail: "✗", unknown: "?" };
 
