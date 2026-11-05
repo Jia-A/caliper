@@ -101,7 +101,7 @@ It follows the system's light or dark theme, and the layout works down to phone 
 | `--headed` | off | Show the browser window. Useful for debugging a flow. |
 | `--auth <path>` | none | Session saved by `caliper login`. A path with no file is an error before any run. Without `--auth` there's no saved session (an `auth.json` in the current directory is not loaded), and Caliper prints `No --auth given: running without a saved session.` |
 | `--timeout <ms>` | `60000` | Limit for page loads, finding buttons, the output changing, and the AI request finishing. |
-| `--request <regex>` | auto | Use the first request whose URL matches (case-insensitive) instead of auto-detecting it. |
+| `--request <"METHOD /path" \| regex>` | auto | Name the AI request instead of auto-detecting it. `"POST /generate"`: that method and exactly that path, on any origin, with any query string. Anything else is a case-insensitive regex on the URL. The first matching request is used. A run where no request matches is reported as "AI request not identified" with the requests it saw, and the audit goes on. |
 | `--report <path>` | `caliper-report.html` | Where to write the HTML report. It's written in the current directory unless you give a path. A bare `--report` uses the default. |
 | `--no-report` | off | Don't write the HTML report. |
 | `--settle-ms <ms>` | `2000` | The answer counts as done at its last change once the output has been unchanged this long. |
@@ -250,7 +250,39 @@ The total is the time from the click event to the first word: the first frame in
 
 Caliper records every request the page makes from just before the click, and when each chunk of each response body arrives (Chrome's own network events). It keeps watching until every one of those requests has ended and the output has been quiet for `--settle-ms`, so a reply stream that is still open, or only opens after the output first changes, is included.
 
-Then it matches on timing: each output change counts toward the request whose body bytes arrived most recently, at most 250 ms before the change. The request that explains the most output changes is the AI request. It must explain at least one, and no other request may explain as many. Otherwise the run is reported as **AI request not identified, timing inconclusive**, without a number, and left out of the medians. The output shows how many changes the chosen request explained, and the runner-up. To name the request yourself, use `--request`.
+Then it matches on timing: each output change counts toward the request whose body bytes arrived most recently, at most 250 ms before the change. The request that explains the most output changes is the AI request. It must explain at least one. Otherwise the run is reported as **AI request not identified, timing inconclusive**, without a number, and left out of the medians. The output shows how many changes the chosen request explained, and the runner-up. To name the request yourself, use `--request`.
+
+**When it's not sure, it asks.** On the first run that names a winner (and without `--request`), Caliper counts the output changes from the winner's first body byte on. Changes before that, such as a placeholder, are the same pre-reply changes that are never timed. The winner's **share** is how many of those it explains. Caliper trusts the pick only when the share is at least 95%, and no other request's bytes came within 250 ms before 50% or more of those changes. Both numbers are Caliper's own thresholds, with no outside source. They come from the test fixtures:
+
+| Fixture | Winner's share | Most another request could explain |
+|---|---|---|
+| one stream, a chat page with "Thinking…", a fast side-call next to the stream | 100% | 0% |
+| two streams taking turns writing the output | 54% (7 of 13) | 92% |
+| a reply in 400 ms chunks shown one letter per 30 ms, next to a 50 ms heartbeat | 94–98%, won by the heartbeat | 65–67% (the reply) |
+
+Otherwise Caliper stops before timing anything and lists up to 3 candidates:
+
+```
+Not sure which request is the AI reply:
+  1) POST /ambiguous/generate — 7 of 13 changes (54%)
+  2) GET /ambiguous/status — 6 of 13 (46%); its bytes came ≤ 250 ms before 12 of 13 (92%)
+Which one? (number, waiting 2 minutes)
+```
+
+- **In an interactive terminal** (stdin and stdout both a terminal), type a number. That request (method and path) is then used for this run and every later timed run and marked visit, as if you had passed `--request`. Each timed run says `you chose it ("POST /ambiguous/generate")`. The Stop, double-send and canary checks are given it too, but that isn't tested yet.
+- **No answer within 2 minutes:** Caliper stops. There are no more runs and no report: `error: No answer in 2 minutes. Too close to choose. Rerun with --request "POST /ambiguous/generate" or --request "GET /ambiguous/status"`.
+- **Ctrl-C at the question** stops the same way: `error: Stopped at the question. Too close to choose. Rerun with --request …`.
+- **Not an interactive terminal** (CI, piped): it stops at once with `error: Too close to choose. Rerun with --request …`. It never waits.
+
+Two requests with exactly the same number of changes have a share of 50% at most, so they're asked about too. Only the first run that names a winner is checked. Later runs pick by the same timing rule without asking, and a tie there is still reported as not identified.
+
+Every run prints and reports the chosen request's share, whether it was auto-detected, named by `--request` or chosen by you, with the thresholds:
+
+```
+    share: 13 of 13 output changes from its first body byte (100%) — the first run asks below 95% (Caliper's own threshold, no outside source)
+```
+
+When another request's bytes came within 250 ms before some of those changes, the line names that request too, with how many.
 
 Done is never earlier than the AI request's last body byte.
 
@@ -407,6 +439,9 @@ An allowed domain that anyone can make send a request (an image proxy, an open r
 - **Chromium only.** Timings come from Chromium's network events.
 - **HTTP requests only.** Output delivered over a WebSocket isn't tied to any request. Such runs are reported as "AI request not identified", unless an unrelated HTTP request happens to be followed by more output changes.
 - **A reply that starts after a long gap with nothing open can be missed.** Caliper stops watching once every request has ended and the output has been quiet for `--settle-ms`. A page that renders a placeholder from one request and opens the reply stream only after a longer pause would end the run first. Raise `--settle-ms`, or use `--request`.
+- **Asking is checked on the first run only.** If run 1 is clear and a later run is ambiguous, that later run is still picked by timing without asking. Every run shows its share, so a low one can be spotted.
+- **An answer or `--request "METHOD /path"` matches the exact path.** If the AI request's path changes per run (`/chat/abc123/reply`), later runs won't match and are reported as not identified. Use a regex with `--request` instead.
+- **Two requests to the same method and path can't be told apart.** The first one that matches is used.
 - **`auth.json` holds your session cookies.** Treat it like a password and don't commit it.
 - **A run whose page fails to load doesn't stop the audit.** It's reported as "page failed to load" and left out of the medians, and the summary says how many runs were used. If every run fails, Caliper prints "Inconclusive — page failed to load" and exits.
 - **Each failed load lists things to check, then "Rerun to try again."** The things to check are candidates for that kind of error, not a diagnosis. Three kinds have them so far:
@@ -438,4 +473,6 @@ npm run test:chat    # builds, then times a chat page with a "Thinking…" place
 npm run test:sidecall # builds, then checks the AI request is picked by timing next to a fast side-call
 npm run test:selector # builds, then clicks an icon-only send button with --measure-selector (click and chat)
 npm run test:marked  # builds, then checks the --server-timings marked visit: match key, stamping, origin guard
+npm run test:ambiguous # builds, then checks Caliper asks when unsure which request is the reply (needs python3 for a pseudo-terminal)
+npm run test:browser # builds, then checks the "isn't installed" instruction when Playwright's Chromium is missing
 ```

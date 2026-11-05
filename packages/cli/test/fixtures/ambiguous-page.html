@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Ambiguous request fixture</title>
+</head>
+<body>
+<!-- Pages where more than one request's bytes line up with the output changing.
+     ?case=split       Generate opens two streams, POST /ambiguous/generate and
+                       GET /ambiguous/status, and both write into #out, taking turns.
+     ?case=tie         The same, with as many tokens on each stream.
+     ?case=typewriter  Generate opens POST /ambiguous/generate (a chunk every 400 ms) and
+                       GET /ambiguous/heartbeat (a tick every 50 ms, never shown). The page
+                       reveals the reply one letter every 30 ms, so most letters land just
+                       after a heartbeat tick, not after a reply chunk. -->
+<button id="generate">Generate</button>
+<div id="out"></div>
+<script>
+  const which = new URLSearchParams(location.search).get("case");
+  const out = document.getElementById("out");
+
+  // Calls onEvent with each SSE event's data until the stream ends.
+  async function read(res, onEvent) {
+    const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+    let buffer = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) return;
+      buffer += value;
+      const events = buffer.split("\n\n");
+      buffer = events.pop();
+      for (const event of events) onEvent(JSON.parse(event.replace(/^data: /, "")));
+    }
+  }
+
+  document.getElementById("generate").addEventListener("click", () => {
+    const generate = fetch(`/ambiguous/generate?case=${which}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    if (which === "split" || which === "tie") {
+      generate.then((res) => read(res, (d) => (out.textContent += d.t)));
+      fetch(`/ambiguous/status?case=${which}`).then((res) => read(res, (d) => (out.textContent += d.t)));
+      return;
+    }
+    fetch("/ambiguous/heartbeat").then((res) => read(res, () => {}));
+    const queue = [];
+    generate.then((res) => read(res, (d) => queue.push(...d.t)));
+    const timer = setInterval(() => {
+      if (queue.length) out.textContent += queue.shift();
+    }, 30);
+    setTimeout(() => clearInterval(timer), 5000);
+  });
+</script>
+</body>
+</html>

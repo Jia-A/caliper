@@ -60,6 +60,17 @@ export interface ScoredRequest {
   reasons: string[];
   from: number; // how many requests it was chosen from
   score?: number; // output changes it explains; absent when chosen by --request
+  share?: RequestShare | null; // set once chosen; null without its body bytes on the wire
+}
+
+/**
+ * How much of the reply the chosen request explains: the output changes from its first body
+ * byte on, and how many of them its bytes were the latest ≤ 250 ms before.
+ */
+export interface RequestShare {
+  points: number;
+  of: number;
+  rival: { name: string; could: number } | null; // the other request whose bytes came ≤ 250 ms before the most of them
 }
 
 /**
@@ -116,7 +127,7 @@ export interface RequestSummary {
 /** One run's timeline split into segments, shared by the terminal output and the report. */
 export type Breakdown =
   | { request: null; segments: []; clock: null }
-  | { request: RequestSummary; reasons: string[]; from: number; segments: Segment[]; clock: string };
+  | { request: RequestSummary; reasons: string[]; from: number; share: string; segments: Segment[]; clock: string };
 
 /**
  * Cold is run 1 (null if it failed to load or its AI request wasn't identified); median covers

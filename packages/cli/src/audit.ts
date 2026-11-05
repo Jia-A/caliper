@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { createInterface } from "node:readline/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { BrowserContext, Locator, Page, Request, Response } from "playwright";
 import { launchChromium } from "./browser.js";
@@ -29,6 +30,7 @@ import type {
   RequestSummary,
   RequestTiming,
   ReplyTiming,
+  RequestShare,
   ResourceTimingEntry,
   RunResult,
   ScoredRequest,
@@ -112,10 +114,40 @@ interface MeasureOptions {
   steps: string[];
   timeout: number;
   settleMs: number;
-  requestPattern: RegExp | null;
+  request: RequestMatcher | null; // --request, or the request the developer chose when asked
   chat?: ChatOptions;
   beforeTrigger?: () => Promise<void>; // just before the click or send (the marked visit's stamping)
+  decide?: (found: Correlation) => Promise<RequestMatcher | null>; // until a run has named a winner
 }
+
+/** The AI request named by --request, or by the developer's answer when Caliper asked. */
+interface RequestMatcher {
+  text: string; // as given, e.g. POST /generate
+  via: "--request" | "answer";
+  test(method: string, url: string): boolean;
+}
+
+// "METHOD /path": that method and exactly that path, on any origin, with any query.
+const METHOD_PATH = /^([A-Z]+) (\/\S*)$/;
+
+// --request is "METHOD /path" or, as before, a case-insensitive regex on the URL.
+function parseRequest(value: string): RequestMatcher {
+  const m = value.match(METHOD_PATH);
+  if (m) return methodPath(m[1]!, m[2]!, "--request");
+  let pattern: RegExp;
+  try {
+    pattern = new RegExp(value, "i");
+  } catch (err) {
+    throw new CliError(`--request "${value}" is not "METHOD /path" or a valid regular expression: ${messageOf(err)}`);
+  }
+  return { text: value, via: "--request", test: (_method, url) => pattern.test(url) };
+}
+
+function methodPath(method: string, path: string, via: RequestMatcher["via"]): RequestMatcher {
+  return { text: `${method} ${path}`, via, test: (m, url) => m === method && new URL(url).pathname === path };
+}
+
+const requestName = (method: string, url: string) => `${method} ${new URL(url).pathname}`;
 
 export async function audit({ url, measure, output, steps, runs, headed, auth, timeout, settleMs, request, report, stop, double, canary, canaryInput, csp, chat, serverTimings }: AuditOptions): Promise<void> {
   // --auth is optional: without it there's no saved session, never an implicit ./auth.json.
@@ -126,14 +158,15 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
     );
   }
 
-  let requestPattern: RegExp | null = null;
-  if (request) {
-    try {
-      requestPattern = new RegExp(request, "i");
-    } catch (err) {
-      throw new CliError(`--request "${request}" is not a valid regular expression: ${messageOf(err)}`);
-    }
-  }
+  // Set by the developer's answer when the first run is ambiguous, then used like --request.
+  let locked: RequestMatcher | null = request ? parseRequest(request) : null;
+  let decided = locked !== null; // a run has named its AI request, or --request did
+  const decide = async (found: Correlation): Promise<RequestMatcher | null> => {
+    decided = true;
+    if (!found.ambiguous) return null;
+    locked = await askWhich(found);
+    return locked;
+  };
 
   let stopPattern: RegExp | null = null;
   if (stop) {
@@ -174,7 +207,7 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
       try {
         let result: RunResult;
         try {
-          result = await measureOnce(page, { url, measure, output, steps, timeout, settleMs, requestPattern, chat });
+          result = await measureOnce(page, { url, measure, output, steps, timeout, settleMs, request: locked, chat, decide: decided ? undefined : decide });
         } catch (err) {
           if (err instanceof UnidentifiedRequestError) {
             unidentified.push(i);
@@ -224,7 +257,7 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
     let serverReport: ServerReport | null = null;
     if (serverTimings) {
       // Its own fresh page, after the timed runs, which are never stamped.
-      const options = { url, measure, output, steps, timeout, settleMs, requestPattern, chat };
+      const options = { url, measure, output, steps, timeout, settleMs, request: locked, chat };
       serverReport = await markedVisits(context, options, serverTimings, loaded, failed, unidentified);
     }
     // From the server block only: never compared with the browser list.
@@ -238,7 +271,7 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
       page.setDefaultTimeout(timeout);
       try {
         stopReport = describeStop(
-          await stopOnce(page, { url, measure, output, steps, timeout, settleMs, requestPattern }, stopPattern)
+          await stopOnce(page, { url, measure, output, steps, timeout, settleMs, request: locked }, stopPattern)
         );
         console.log(formatChecks("stop check", stopReport));
       } finally {
@@ -253,7 +286,7 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
       page.setDefaultTimeout(timeout);
       try {
         doubleReport = describeDouble(
-          await doubleOnce(page, { url, measure, output, steps, timeout, settleMs, requestPattern })
+          await doubleOnce(page, { url, measure, output, steps, timeout, settleMs, request: locked })
         );
         console.log(formatChecks("double-send check", doubleReport));
       } finally {
@@ -272,7 +305,7 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
       const page = await context.newPage();
       page.setDefaultTimeout(timeout);
       try {
-        canaryResult = await canaryOnce(page, { url, measure, output, steps, timeout, settleMs, requestPattern }, canaryInput);
+        canaryResult = await canaryOnce(page, { url, measure, output, steps, timeout, settleMs, request: locked }, canaryInput);
         canaryReport = describeCanary(canaryResult);
         console.log(formatChecks("canary check", canaryReport));
       } finally {
@@ -349,7 +382,7 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
 
 async function measureOnce(page: Page, options: MeasureOptions): Promise<RunResult> {
   if (options.chat) return measureChatOnce(page, options, options.chat);
-  const { timeout, requestPattern } = options;
+  const { timeout } = options;
   const target = await prepareRun(page, options);
   // Byte counts per request, to tell a stream that ended ERR_ABORTED after its full body.
   const wire = await startWireCapture(page, await page.evaluate(() => performance.timeOrigin));
@@ -422,16 +455,18 @@ interface RunCapture {
 //      first changes, or open only after it, and a long pause before the reply (a placeholder,
 //      then nothing until the fetch) mustn't end the run. Without any explained change by
 //      --timeout from the trigger, the run ends unidentified.
-//   2. Pick the AI request by time correlation (pickByCorrelation), or by --request.
+//   2. Pick the AI request by time correlation (correlate), or by --request. Until a run has
+//      named a winner, decide() sees the correlation: an ambiguous one asks the developer.
 //   3. First word: the first output change at or after its first body byte. Earlier changes
 //      are pre-reply changes, never timed.
 //   4. Done: the last output change, but never before the AI request's last byte or end.
 // Throws UnidentifiedRequestError when no request can be named; nothing is guessed.
 async function finishRun(
   page: Page,
-  { settleMs, timeout, requestPattern }: MeasureOptions,
-  { clickAt, firstChangeAt, network, wire, deadline, chat }: RunCapture
+  { settleMs, timeout, request, decide }: MeasureOptions,
+  { clickAt, firstChangeAt, network, wire, deadline: until, chat }: RunCapture
 ): Promise<RunResult> {
+  let deadline = until;
   let capped = false;
   for (;;) {
     const [now, seen] = await page.evaluate(() => [performance.now(), window.__caliperChanges] as const);
@@ -452,10 +487,30 @@ async function finishRun(
   });
   const { requests, timeOrigin } = await network.stop({ clickAt, firstPaintAt: Infinity });
 
-  const pick = requestPattern
-    ? chooseRequest(requests, { clickAt, firstPaintAt: firstChangeAt }, requestPattern)!
-    : pickByCorrelation(changes, requests, wire);
+  let matcher = request;
+  let pick: ScoredRequest | null = null;
+  if (!matcher) {
+    const found = correlate(changes, requests, wire);
+    if (decide) {
+      // The answer can take minutes; --timeout still counts only the page's own waiting.
+      const askedAt = Date.now();
+      matcher = await decide(found);
+      deadline += Date.now() - askedAt;
+    } else if (found.tie) {
+      throw new UnidentifiedRequestError(`${found.tie[0]} and ${found.tie[1]} each explain ${found.candidates[0]!.points} output change(s)`);
+    }
+    if (!matcher) pick = found.pick;
+  }
+  if (!pick) {
+    const match = requests.find((r) => matcher!.test(r.method, r.url));
+    if (!match) {
+      const seen = requests.map((r) => `${r.method} ${r.url}`).join(", ") || "none";
+      throw new UnidentifiedRequestError(`no request matches ${matched(matcher!)} (seen: ${seen})`);
+    }
+    pick = { request: match, reasons: [matchReason(matcher!)], from: requests.length };
+  }
   const w = wire.match(pick.request);
+  pick.share = w ? shareOf(w, changes, wire.requests()) : null;
   const ended = w ? w.finishedAt !== null || w.failedAt !== null : pick.request.end !== null;
   // Its Resource Timing entry only appears once it completes; a capped run may still be open.
   if (ended) pick.request = await waitUntilFinished(page, pick.request, timeOrigin, deadline, wire);
@@ -494,29 +549,82 @@ function explainsAny(changes: ContainerChange[], requests: WireRequest[]): boole
   return changes.some((change) => requests.some((w) => w.chunks.some((c) => c.at <= change.at && change.at - c.at <= CORRELATION_MS)));
 }
 
-// The AI request is the one whose body bytes are followed by the output changing: each output
-// change counts toward the request with the most recent body chunk within CORRELATION_MS before
-// it, and the request with the most changes wins. Matched on timing only, never on text. It
-// must be the unique top with at least one change; a tie, or no change explained, throws
-// UnidentifiedRequestError.
-function pickByCorrelation(changes: ContainerChange[], requests: RequestTiming[], wire: Wire): ScoredRequest {
-  const explained = new Map<WireRequest, number>();
-  const all = wire.requests();
-  for (const change of changes) {
-    let best: WireRequest | null = null;
-    let bestAt = -Infinity;
-    for (const w of all) {
-      for (const c of w.chunks) {
-        if (c.at <= change.at && change.at - c.at <= CORRELATION_MS && c.at > bestAt) {
-          best = w;
-          bestAt = c.at;
-        }
+// Each output change counts toward the request whose body bytes arrived most recently, at most
+// CORRELATION_MS before it; null when none did. Matched on timing only, never on text.
+function latestBytes(change: ContainerChange, all: WireRequest[]): WireRequest | null {
+  let best: WireRequest | null = null;
+  let bestAt = -Infinity;
+  for (const w of all) {
+    for (const c of w.chunks) {
+      if (c.at <= change.at && change.at - c.at <= CORRELATION_MS && c.at > bestAt) {
+        best = w;
+        bestAt = c.at;
       }
     }
+  }
+  return best;
+}
+
+// Caliper's own thresholds for picking the AI request without asking, from no outside source.
+// Measured on the fixtures: the winner had 100% of the changes from its first body byte on
+// wherever one stream fills the output (chat, side-call, plain stream); 54% with two streams
+// taking turns; and 94–98% on a typewriter page whose 50 ms heartbeat came just before most
+// letters, while the reply's own bytes came ≤ CORRELATION_MS before 65–67% of them (other
+// requests: 0% on the one-stream pages, 92% with two streams).
+const SHARE_MIN = 0.95;
+const RIVAL_MAX = 0.5;
+
+// Of these changes, how many w's body bytes arrived at most CORRELATION_MS before, latest or not.
+function couldExplain(w: WireRequest, changes: ContainerChange[]): number {
+  return changes.filter((ch) => w.chunks.some((c) => c.at <= ch.at && ch.at - c.at <= CORRELATION_MS)).length;
+}
+
+const fromFirstByte = (w: WireRequest, changes: ContainerChange[]) => changes.filter((c) => c.at >= (w.chunks[0]?.at ?? Infinity));
+
+// How much of the reply one request explains: the output changes from its first body byte on,
+// the ones it's the latest bytes before, and the other request whose bytes came within
+// CORRELATION_MS before the most of them.
+function shareOf(target: WireRequest, changes: ContainerChange[], all: WireRequest[]): RequestShare {
+  const counted = fromFirstByte(target, changes);
+  let rival: RequestShare["rival"] = null;
+  for (const w of all) {
+    if (w === target) continue;
+    const n = couldExplain(w, counted);
+    if (n > 0 && n > (rival?.could ?? 0)) rival = { name: requestName(w.method, w.url), could: n };
+  }
+  return { points: counted.filter((c) => latestBytes(c, all) === target).length, of: counted.length, rival };
+}
+
+/** One request the output changes line up with, as the question lists it. */
+interface Candidate {
+  name: string; // METHOD /path
+  method: string;
+  path: string;
+  points: number; // changes from the winner's first body byte on whose latest bytes were its
+  could: number; // of those changes, how many its bytes came ≤ CORRELATION_MS before
+}
+
+/** The correlation pick, and whether Caliper should ask instead of trusting it. */
+interface Correlation {
+  pick: ScoredRequest;
+  of: number; // changes from the winner's first body byte on
+  candidates: Candidate[]; // the winner first
+  ambiguous: boolean; // share under SHARE_MIN, or another request could explain RIVAL_MAX or more
+  tie: [string, string] | null; // two requests explain the same number of changes
+}
+
+// The AI request is the one whose body bytes are followed by the output changing: the request
+// that's the latest bytes before the most output changes (latestBytes). It must explain at
+// least one, or this throws UnidentifiedRequestError. Ambiguous when its share of the changes
+// from its first body byte on is under SHARE_MIN, or another request's bytes came within
+// CORRELATION_MS before RIVAL_MAX or more of them.
+function correlate(changes: ContainerChange[], requests: RequestTiming[], wire: Wire): Correlation {
+  const all = wire.requests();
+  const explained = new Map<WireRequest, number>();
+  for (const change of changes) {
+    const best = latestBytes(change, all);
     if (best) explained.set(best, (explained.get(best) ?? 0) + 1);
   }
-
-  const name = (w: WireRequest) => `${w.method} ${w.url}`;
   const ranked = [...explained].sort((a, b) => b[1] - a[1]);
   const [top, next] = ranked;
   if (!top) {
@@ -524,16 +632,105 @@ function pickByCorrelation(changes: ContainerChange[], requests: RequestTiming[]
       `no request's body bytes arrived within ${CORRELATION_MS} ms before any of the ${changes.length} output change(s)`
     );
   }
-  if (next && next[1] === top[1]) {
-    throw new UnidentifiedRequestError(`${name(top[0])} and ${name(next[0])} each explain ${top[1]} output change(s)`);
-  }
-  const request = requests.find((r) => wire.match(r) === top[0]);
-  if (!request) throw new UnidentifiedRequestError(`${name(top[0])} explains the most output changes, but the page's request for it wasn't seen`);
+  const name = (w: WireRequest) => `${w.method} ${w.url}`;
+  const winner = top[0];
+  const request = requests.find((r) => wire.match(r) === winner);
+  if (!request) throw new UnidentifiedRequestError(`${name(winner)} explains the most output changes, but the page's request for it wasn't seen`);
+
+  const counted = fromFirstByte(winner, changes);
+  const candidate = (w: WireRequest): Candidate => ({
+    name: requestName(w.method, w.url),
+    method: w.method,
+    path: new URL(w.url).pathname,
+    points: counted.filter((c) => latestBytes(c, all) === w).length,
+    could: couldExplain(w, counted),
+  });
+  const rivalAt = RIVAL_MAX * counted.length;
+  const others = all.filter((w) => w !== winner).map(candidate).filter((c) => c.points > 0 || c.could > 0);
+  // Rivals the second check flags first, so the list of 3 never leaves one out.
+  others.sort((a, b) => Number(b.could >= rivalAt) - Number(a.could >= rivalAt) || b.points - a.points || b.could - a.could);
+  const candidates = [candidate(winner), ...others];
+  const ambiguous = candidates[0]!.points < SHARE_MIN * counted.length || others.some((c) => c.could >= rivalAt);
 
   const reasons = [`explains ${top[1]} of ${changes.length} output changes (body bytes ≤ ${CORRELATION_MS} ms before each)`];
   reasons.push(next ? `next: ${next[0].method} ${new URL(next[0].url).pathname} with ${next[1]}` : "no other request explains any");
-  return { request, reasons, from: requests.length, score: top[1] };
+  return {
+    pick: { request, reasons, from: requests.length, score: top[1] },
+    of: counted.length,
+    candidates,
+    ambiguous,
+    tie: next && next[1] === top[1] ? [name(winner), name(next[0])] : null,
+  };
 }
+
+// How long the developer has to answer. CALIPER_ASK_TIMEOUT_MS shortens it for the tests.
+const ASK_TIMEOUT_MS = 120_000;
+
+const waitText = (ms: number) =>
+  ms % 60_000 === 0 ? plural(ms / 60_000, "minute") : `${Number((ms / 1000).toFixed(1))} seconds`;
+
+// An ambiguous first run: list the top 3 candidates and, in an interactive terminal, wait for a
+// number. Returns that request's matcher, used for this and every later visit. Without a
+// terminal, or without an answer in time, stops the audit (CliError) with --request lines to
+// rerun with; nothing is guessed.
+async function askWhich(found: Correlation): Promise<RequestMatcher> {
+  const shown = found.candidates.slice(0, 3);
+  const pct = (n: number) => `${Math.round((100 * n) / found.of)}%`;
+  console.log("Not sure which request is the AI reply:");
+  shown.forEach((c, i) => {
+    const count = i === 0 ? `${c.points} of ${found.of} changes` : `${c.points} of ${found.of}`;
+    const could = i > 0 && c.could >= RIVAL_MAX * found.of ? `; its bytes came ≤ ${CORRELATION_MS} ms before ${c.could} of ${found.of} (${pct(c.could)})` : "";
+    console.log(`  ${i + 1}) ${c.name} — ${count} (${pct(c.points)})${could}`);
+  });
+  const tooClose = `Too close to choose. Rerun with ${shown.map((c) => `--request "${c.name}"`).join(" or ")}`;
+  if (!process.stdin.isTTY || !process.stdout.isTTY) throw new CliError(tooClose);
+
+  const env = Number(process.env.CALIPER_ASK_TIMEOUT_MS);
+  const wait = Number.isInteger(env) && env > 0 ? env : ASK_TIMEOUT_MS;
+  const timer = AbortSignal.timeout(wait);
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  // Ctrl-D closes the input; Ctrl-C rejects the question itself. Either stops the audit.
+  // Ctrl-C is tested (test:ambiguous); Ctrl-D was checked by hand only, not by a test.
+  const closed = new AbortController();
+  rl.on("close", () => closed.abort());
+  const signal = AbortSignal.any([timer, closed.signal]);
+  try {
+    let prompt = `Which one? (number, waiting ${waitText(wait)}) `;
+    for (;;) {
+      let line: string;
+      try {
+        line = await rl.question(prompt, { signal });
+      } catch (err) {
+        if (!signal.aborted && (err as Error).name !== "AbortError") throw err;
+        console.log("");
+        throw new CliError(timer.aborted ? `No answer in ${waitText(wait)}. ${tooClose}` : `Stopped at the question. ${tooClose}`);
+      }
+      const n = Number(line.trim());
+      const chosen = Number.isInteger(n) ? shown[n - 1] : undefined;
+      if (chosen) {
+        console.log(`Using ${chosen.name} for every remaining visit.`);
+        return methodPath(chosen.method, chosen.path, "answer");
+      }
+      prompt = `Type a number from 1 to ${shown.length}: `;
+    }
+  } finally {
+    rl.close();
+  }
+}
+
+// The chosen request's share, as the terminal and the report print it, with the thresholds.
+function shareText(share: RequestShare | null): string {
+  if (!share) return "? (none of its body bytes were seen on the wire)";
+  const pct = (n: number) => (share.of ? `${Math.round((100 * n) / share.of)}%` : "?");
+  const head = `${share.points} of ${share.of} output changes from its first body byte (${pct(share.points)})`;
+  const percent = (f: number) => `${Math.round(f * 100)}%`;
+  if (!share.rival) return `${head} — the first run asks below ${percent(SHARE_MIN)} (Caliper's own threshold, no outside source)`;
+  const { name, could } = share.rival;
+  return `${head}; ${name}'s bytes came ≤ ${CORRELATION_MS} ms before ${could} of ${share.of} (${pct(could)}) — the first run asks below ${percent(SHARE_MIN)}, or at ${percent(RIVAL_MAX)} or more for another request (Caliper's own thresholds, no outside source)`;
+}
+
+const matchReason = (m: RequestMatcher) => (m.via === "answer" ? `you chose it ("${m.text}")` : `matches --request "${m.text}"`);
+const matched = (m: RequestMatcher) => (m.via === "answer" ? `your answer "${m.text}"` : `--request "${m.text}"`);
 
 /** What the marked visit stamps: method + origin + path segments, null where runs differed. */
 interface MatchKey {
@@ -987,7 +1184,7 @@ async function stopOnce(page: Page, options: MeasureOptions, stopPattern: RegExp
       return { kind: "no-first-word", error: err.message };
     }
     const [{ requests }] = await Promise.all([network.stop(timing), sleep(STOP_AFTER_MS)]);
-    const r = chooseRequest(requests, timing, options.requestPattern)?.request ?? null;
+    const r = chooseRequest(requests, timing, options.request)?.request ?? null;
 
     if (!(await stillChanging(page))) {
       const span = (await page.evaluate(() => window.__caliperLastChangeAt)) - timing.firstPaintAt;
@@ -1101,7 +1298,7 @@ async function doubleOnce(page: Page, options: MeasureOptions): Promise<DoubleRe
   // Same detection as the timed runs; a --request that matches nothing means "not identified".
   const pick = (requests: RequestTiming[], timing: PageTiming) => {
     try {
-      return chooseRequest(requests, timing, options.requestPattern)?.request ?? null;
+      return chooseRequest(requests, timing, options.request)?.request ?? null;
     } catch (err) {
       if (err instanceof CliError) return null;
       throw err;
@@ -1576,14 +1773,14 @@ function isJson(body: string | null): boolean {
   }
 }
 
-function chooseRequest(requests: RequestTiming[], { clickAt, firstPaintAt }: PageTiming, pattern: RegExp | null): ScoredRequest | null {
-  if (pattern) {
-    const match = requests.find((r) => pattern.test(r.url));
+function chooseRequest(requests: RequestTiming[], { clickAt, firstPaintAt }: PageTiming, matcher: RequestMatcher | null): ScoredRequest | null {
+  if (matcher) {
+    const match = requests.find((r) => matcher.test(r.method, r.url));
     if (!match) {
       const seen = requests.map((r) => `  ${r.method} ${r.url}`).join("\n") || "  (none)";
-      throw new CliError(`No request matching ${pattern} between click and first paint. Seen:\n${seen}`);
+      throw new CliError(`No request matching ${matched(matcher)} between click and first paint. Seen:\n${seen}`);
     }
-    return { request: match, reasons: [`matches --request ${pattern}`], from: requests.length };
+    return { request: match, reasons: [matchReason(matcher)], from: requests.length };
   }
 
   const candidates = requests.filter((r): r is TimedRequest => r.start !== null);
@@ -1863,6 +2060,7 @@ function breakdown(result: RunResult): Breakdown {
     request: summarizeRequest(r),
     reasons: pick.reasons,
     from: pick.from,
+    share: shareText(pick.share ?? null),
     segments,
     clock,
   };
@@ -2333,7 +2531,7 @@ function summarizeRequest(r: RequestTiming): RequestSummary {
 
 function formatNetwork(parts: Breakdown, seen: number): string {
   if (!parts.request) return `    no timed network request between click and first paint (${seen} seen)`;
-  const { request, reasons, from, segments, clock } = parts;
+  const { request, reasons, from, share, segments, clock } = parts;
 
   const row = ({ key, label, ms: value, note }: Segment) => {
     const suffix = !note ? "" : key === "render" ? `   ← ${note}` : `   (${note})`;
@@ -2342,6 +2540,7 @@ function formatNetwork(parts: Breakdown, seen: number): string {
   return [
     `    ${request.method} ${request.url} → ${request.status} ${request.contentType ?? ""}`.trimEnd(),
     `    chosen from ${from} request(s): ${reasons.join(", ") || "only candidate"}`,
+    `    share: ${share}`,
     ...segments.map(row),
     `    clock check: ${clock}`,
   ].join("\n");

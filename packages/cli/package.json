@@ -55,6 +55,8 @@
     "test:sidecall": "npm run -s build >/dev/null && node test/sidecall.test.mjs",
     "test:selector": "npm run -s build >/dev/null && node test/selector.test.mjs",
     "test:marked": "npm run -s build >/dev/null && node test/marked.test.mjs",
-    "test:auth": "npm run -s build >/dev/null && node test/auth.test.mjs"
+    "test:auth": "npm run -s build >/dev/null && node test/auth.test.mjs",
+    "test:ambiguous": "npm run -s build >/dev/null && node test/ambiguous.test.mjs",
+    "test:browser": "npm run -s build >/dev/null && node test/browser.test.mjs"
   }
 }

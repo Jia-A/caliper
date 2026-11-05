@@ -214,6 +214,7 @@ function requestItem(run: ReportRun): string {
   const r = run.request;
   return `<li><b>${runName(run.run)}</b> <span class="wrap">${esc(r.method)} ${esc(r.url)} → ${esc(String(r.status))}${r.contentType ? ` ${esc(r.contentType)}` : ""}</span>
         <span class="why">chosen from ${run.from} request(s): ${esc(run.reasons.join(", ") || "only candidate")}</span>
+        <span class="why">share: ${esc(run.share)}</span>
         <span class="why">clock check: ${esc(run.clock)}</span></li>`;
 }
 
@@ -235,7 +236,8 @@ function runRow(run: ChartRun, scale: number, ticks: number[]): string {
   const req = run.request
     ? `<p class="req wrap"><span class="method">${esc(run.request.method)}</span> ${esc(run.request.url)}
          → ${esc(String(run.request.status))}${run.request.contentType ? ` · ${esc(run.request.contentType)}` : ""}</p>
-       <p class="why">chosen from ${run.from} request(s): ${esc(run.reasons.join(", ") || "only candidate")}</p>`
+       <p class="why">chosen from ${run.from} request(s): ${esc(run.reasons.join(", ") || "only candidate")}</p>
+       <p class="why">share: ${esc(run.share)}</p>`
     : `<p class="why">no timed network request between click and first paint</p>`;
 
   return `

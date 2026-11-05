@@ -36,6 +36,13 @@
 //   vectorSearchStart/End around 15 ms, then cacheStart with no End, warmupEnd with no Start,
 //   and lockEnd 5 ms before lockStart (reversed), then modelCallSent and firstChunk, and one
 //   problem (GENERIC_PROBLEM) as a wrapper reports a mark name it skipped.
+// For more than one request lining up with the output (see ambiguous-page.html):
+//   /ambiguous              the page (?case=split | tie | typewriter)
+//   /ambiguous/generate     the reply (POST SSE). split and tie: SPLIT_GENERATE tokens, one every 200 ms;
+//                           typewriter: TYPEWRITER_CHUNKS chunks of 12 letters, one every 400 ms
+//   /ambiguous/status       the second stream (GET SSE), 100 ms after each reply token: SPLIT_STATUS tokens
+//                           (?case=tie: SPLIT_GENERATE, as many as the reply)
+//   /ambiguous/heartbeat    typewriter's tick (GET SSE): one every 50 ms for 3 s, never shown
 // Run on its own with `node test/fixtures/server.mjs [port]`, or import startFixtureServer().
 
 import { readFileSync } from "node:fs";
@@ -49,6 +56,7 @@ const CHAT_PAGE = readFileSync(new URL("./chat-page.html", import.meta.url), "ut
 const SIDECALL_PAGE = readFileSync(new URL("./sidecall-page.html", import.meta.url), "utf8");
 const ICON_PAGE = readFileSync(new URL("./icon-page.html", import.meta.url), "utf8");
 const MARKED_PAGE = readFileSync(new URL("./marked-page.html", import.meta.url), "utf8");
+const AMBIGUOUS_PAGE = readFileSync(new URL("./ambiguous-page.html", import.meta.url), "utf8");
 const BUTTONS_PAGE = readFileSync(new URL("./buttons-page.html", import.meta.url), "utf8");
 
 // The streamed reply: headers at once, the first token after a pause, then a token every 60 ms.
@@ -94,7 +102,41 @@ async function sidecallStream(res) {
   res.end();
 }
 
-const PAGES = { "/stream-nostore": STREAM_PAGE, "/chat": CHAT_PAGE, "/sidecall": SIDECALL_PAGE, "/icon": ICON_PAGE, "/buttons": BUTTONS_PAGE };
+export const SPLIT_GENERATE = 7;
+export const SPLIT_STATUS = 6;
+export const TYPEWRITER_CHUNKS = 5;
+const TYPEWRITER_REPLY = "The answer is forty-two, and here is why it is so.....".match(/.{12}/g).slice(0, TYPEWRITER_CHUNKS);
+
+// An SSE stream that writes each token after its own delay (ms since the stream opened).
+async function timedStream(res, tokens) {
+  res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+  res.flushHeaders();
+  const start = Date.now();
+  for (const [at, t] of tokens) {
+    await sleep(Math.max(0, start + at - Date.now()));
+    if (res.destroyed) return;
+    res.write(`data: ${JSON.stringify({ t })}\n\n`);
+  }
+  res.end();
+}
+
+function ambiguousRoute(req, res, url) {
+  req.resume(); // bodies aren't used
+  const path = url.pathname;
+  const each = (n, first, gap, text) => Array.from({ length: n }, (_, i) => [first + i * gap, text(i)]);
+  if (path === "/ambiguous/generate" && req.method === "POST") {
+    if (["split", "tie"].includes(url.searchParams.get("case"))) return timedStream(res, each(SPLIT_GENERATE, 300, 200, (i) => `g${i} `));
+    return timedStream(res, each(TYPEWRITER_CHUNKS, 300, 400, (i) => TYPEWRITER_REPLY[i]));
+  }
+  if (path === "/ambiguous/status") {
+    const n = url.searchParams.get("case") === "tie" ? SPLIT_GENERATE : SPLIT_STATUS;
+    return timedStream(res, each(n, 400, 200, (i) => `s${i} `));
+  }
+  if (path === "/ambiguous/heartbeat") return timedStream(res, each(60, 0, 50, () => "tick"));
+  res.writeHead(404).end("not found");
+}
+
+const PAGES = { "/stream-nostore": STREAM_PAGE, "/chat": CHAT_PAGE, "/sidecall": SIDECALL_PAGE, "/icon": ICON_PAGE, "/buttons": BUTTONS_PAGE, "/ambiguous": AMBIGUOUS_PAGE };
 const STREAMS = { "/chat/stream": "no-cache", "/chat/stream-nostore": "no-store" };
 
 const VARIANTS = {
@@ -209,6 +251,10 @@ export function startFixtureServer(port = 0, { caliperToken = null, caliperStatu
       markedRoute(req, res, url, loads, seen, caliper);
       return;
     }
+    if (path.startsWith("/ambiguous/")) {
+      ambiguousRoute(req, res, url);
+      return;
+    }
     if (path.startsWith("/__caliper/timings/") && req.method === "GET") {
       caliperRoute(req, res, url, caliper);
       return;
@@ -258,5 +304,5 @@ export function startFixtureServer(port = 0, { caliperToken = null, caliperStatu
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const { url } = await startFixtureServer(Number(process.argv[2] ?? 0));
-  console.log(`fixture: ${url}/no-csp  ${url}/csp  ${url}/stream-nostore  ${url}/chat  ${url}/sidecall  ${url}/icon  ${url}/marked?case=a&id=x`);
+  console.log(`fixture: ${url}/no-csp  ${url}/csp  ${url}/stream-nostore  ${url}/chat  ${url}/sidecall  ${url}/icon  ${url}/marked?case=a&id=x  ${url}/ambiguous?case=split`);
 }

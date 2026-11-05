@@ -12,11 +12,18 @@ const USAGE = `Usage:
   caliper audit <url> --input <selector> --prompt <text> --output <selector>
       [--measure <text> | --measure-selector <css>]
       [--step <text>]... [--runs 3] [--headed] [--auth <path>] [--timeout 60000]
-      [--request <regex>] [--report <path> | --no-report] [--settle-ms 2000] [--stop <text>] [--double]
+      [--request <"METHOD /path" | regex>] [--report <path> | --no-report] [--settle-ms 2000] [--stop <text>] [--double]
       [--canary] [--canary-input <selector>] [--csp] [--server-timings <origin> [--server-runs 3]]
       Measure time from clicking the --measure button to first painted output,
-      and break it down using the AI request (auto-detected, or the first whose
-      URL matches --request). Every completed audit writes an HTML report to
+      and break it down using the AI request (auto-detected, or --request: "POST
+      /generate" for that method and exact path, or a regex on the URL; the first
+      match is used, and a run where none matches is reported as not identified).
+      If the first run's pick is unclear (under 95% of the output changes from its
+      first body byte, or another request's bytes within 250 ms before 50% or
+      more of them: Caliper's own thresholds), Caliper lists the candidates and,
+      in an interactive terminal, waits 2 minutes for a number; that request is
+      then used for every run. No answer, or no terminal (CI): it stops and says
+      which --request to rerun with. Every completed audit writes an HTML report to
       ${DEFAULT_REPORT} in the current directory (--report <path> for another
       path, --no-report for none); the last line says where, or why there's none.
       The answer counts as done at its last change once the output has been
