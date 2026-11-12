@@ -1,6 +1,6 @@
 {
   "name": "caliper-timings",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Server side of Caliper's server timings: records when a marked request reaches each step, for caliper-ai to read back.",
   "keywords": [
     "caliper",
