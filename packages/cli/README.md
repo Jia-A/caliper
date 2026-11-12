@@ -180,6 +180,7 @@ After the timed runs, Caliper builds a match key from the AI request each run pi
     spans
       postgres                            41    11    71   min 11 · median 41 · max 71 ms   (postgresStart → postgresEnd)
       model call → first bytes sent      301   302   301   min 301 · median 301 · max 302 ms
+    prompt sizes: none recorded (needs caliper-timings 0.2.0 or later, and run.prompt(messages) before the model call)
     first bytes sent = the server's first write to the browser. If your app writes anything before the model's reply (a heartbeat, an envelope), this is that write.
   ```
 
@@ -212,6 +213,7 @@ After the timed runs, Caliper builds a match key from the AI request each run pi
       no cache span: cacheEnd wasn't recorded
       no warmup span: warmupStart wasn't recorded
       no lock span: lockEnd (58 ms) is before lockStart (64 ms)
+    prompt sizes: none recorded (needs caliper-timings 0.2.0 or later, and run.prompt(messages) before the model call)
     problems reported by the server
       mark name "db-start" rejected — use a letter, then up to 63 letters, digits or _ (e.g. dbStart)
     first bytes sent = the server's first write to the browser. If your app writes anything before the model's reply (a heartbeat, an envelope), this is that write.
@@ -229,12 +231,23 @@ After the timed runs, Caliper builds a match key from the AI request each run pi
       postgres                            41 ms   (postgresStart → postgresEnd)
       model call → first bytes sent      301 ms
       Workers time waits only — a span with only computation inside (no I/O) can read 0 ms.
+    prompt sizes: none recorded (needs caliper-timings 0.2.0 or later, and run.prompt(messages) before the model call)
     first bytes sent = the server's first write to the browser. If your app writes anything before the model's reply (a heartbeat, an envelope), this is that write.
   ```
 
   With several visits there's one "no span" line per pair. It says how many visits had no span and which ones when not all, then the reason once if it's the same in each, otherwise each visit's values or reason (`no lock span in 2 of 2 visits: lockEnd is before lockStart (visit 1: lockEnd 58 ms, lockStart 63 ms · visit 2: lockEnd 59 ms, lockStart 64 ms)`).
 
   **Problems the server reports.** A record's `problems` (for example a mark name the wrapper skipped) are printed last, under "problems reported by the server". Each distinct one is printed once, with the visits that reported it when there are several (`(2 of 3 visits: 1, 3)`). They're printed as the server wrote them, with control characters escaped and anything past 200 characters cut. A `problems` that isn't a list of strings makes that visit's record unusable, with the reason. The Workers note appears only when the record says `"runtime": "workers"`. Without that field, or with any other value, there's no note: Caliper doesn't guess where the server ran. Each mark is shown as the server recorded it, in ms after the request reached the route. A mark that isn't in the record isn't shown. A `404` prints `Server timings ? — token OK and wrapper present, but no record for run <id>.`; any other status, a record for another run id, or a mark that isn't a number prints `?` with the reason, and that visit is left out.
+  **Prompt sizes.** When the server records them (caliper-timings 0.2.0's `run.prompt(messages)`, called with the list the app sends to the model), the block shows each message's role and the size of its text in bytes, with its share of the total:
+
+  ```txt
+    prompt sizes (marked visit 1) — UTF-8 bytes of each message's text as your app passed it to run.prompt(); not tokens
+      1 system                          2310 bytes   28%
+      2 user                            5874 bytes   72%
+      total                             8184 bytes
+  ```
+
+  These are the sizes your app reported, not tokens and not the size of the request to the model. The text itself is never recorded or shown. A message the server couldn't measure (content that isn't a string) shows `–` and "not measured", and the total counts only the measured ones (`total (2 of 3 measured)`). The sizes come from the first marked visit that recorded them. Without any, one line says so: `prompt sizes: none recorded (needs caliper-timings 0.2.0 or later, and run.prompt(messages) before the model call)`. A `prompt` field Caliper can't read, including a role that isn't a lowercase name (it could be text), gets `prompt sizes ? — marked visit <i>: <why>`, and that visit's timings are still shown. Tested on fixture records only (a fake wrapper), not yet with caliper-timings itself.
 - **Their timing isn't reported.** Marked visits aren't timed runs and are left out of the medians, because they run with request interception on, which Playwright documents as turning off the HTTP cache.
 - **Requests made during page load are never stamped or counted.** Interception starts just before the click and ends with the run.
 - **Tested** against local fixtures only (including a fake wrapper that answers like Quill's, in the same order), in click runs and chat-style runs, with and without `--request`. Several visits are tested in click runs: all succeed, one of three fails, all fail, one visit, and one visit's record missing a mark. Span pairing is tested with Quill's `postgresStart`/`postgresEnd` (shown as `postgres`), with app-chosen pairs, and with a Start without its End, an End without its Start, and a reversed pair. It hasn't been tested on a real server, on a cross-origin API behind a CORS preflight, or together with `--stop`, `--double` or `--canary`.

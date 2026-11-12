@@ -28,6 +28,33 @@ const FIRST_BYTES_NOTE =
 
 type Span = { value: number } | { why: string; reversed?: [end: number, start: number] };
 
+// Prompt sizes (caliper-timings 0.2.0, run.prompt): each message's role and UTF-8 bytes, never its
+// text. A role that isn't a lowercase name (or the wrapper's "?") could be text, so it's never shown.
+const ROLE = /^([a-z][a-z_]{0,31}|\?)$/;
+const SIZES_NOTE = "UTF-8 bytes of each message's text as your app passed it to run.prompt(); not tokens";
+const NO_SIZES = "prompt sizes: none recorded (needs caliper-timings 0.2.0 or later, and run.prompt(messages) before the model call)";
+
+/** One message of the prompt: its role and size, or null when the server couldn't measure it. */
+export interface PromptSize {
+  role: string;
+  bytes: number | null;
+}
+
+// The record's prompt sizes, or why they can't be shown. Never fails the record: the timings stand.
+function parsePrompt(prompt: unknown): PromptSize[] | { unreadable: string } {
+  const messages = (prompt as { messages?: unknown } | null)?.messages;
+  if (typeof prompt !== "object" || prompt === null || !Array.isArray(messages)) return { unreadable: "the prompt field isn't { messages: [...] }" };
+  const sizes: PromptSize[] = [];
+  for (const [i, m] of messages.entries()) {
+    if (typeof m !== "object" || m === null) return { unreadable: `message ${i + 1} isn't { role, bytes }` };
+    const { role, bytes } = m as { role?: unknown; bytes?: unknown };
+    if (typeof role !== "string" || !ROLE.test(role)) return { unreadable: `message ${i + 1}'s role isn't a lowercase name of up to 32 letters or _ (or "?"), so the prompt isn't shown` };
+    if (bytes !== null && !(Number.isInteger(bytes) && (bytes as number) >= 0)) return { unreadable: `message ${i + 1}'s bytes isn't a whole number ≥ 0 or null` };
+    sizes.push({ role, bytes: bytes as number | null });
+  }
+  return sizes;
+}
+
 // One visit's <name> span, or why there's none. Never estimated from other marks.
 function spanIn(at: Map<string, number>, name: string): Span {
   const start = at.get(`${name}Start`);
@@ -66,12 +93,13 @@ export interface ServerRecord {
   runtime: unknown;
   at: Map<string, number>;
   problems: string[]; // what the wrapper reports it skipped or couldn't do (SPEC v1)
+  prompt: PromptSize[] | { unreadable: string } | null; // null when the record has none
 }
 
 // The wrapper's record for one run, or why it can't be used: not the expected shape, another
 // run's record, a mark that isn't a number, or problems that aren't a list of strings.
 export function parseServerRecord(record: unknown, runId: string): ServerRecord | string {
-  const r = record as { id?: unknown; status?: unknown; runtime?: unknown; marks?: unknown; problems?: unknown } | null;
+  const r = record as { id?: unknown; status?: unknown; runtime?: unknown; marks?: unknown; problems?: unknown; prompt?: unknown } | null;
   if (typeof r !== "object" || r === null || typeof r.marks !== "object" || r.marks === null) {
     return `the record for run ${runId} has no marks object.`;
   }
@@ -83,7 +111,8 @@ export function parseServerRecord(record: unknown, runId: string): ServerRecord 
   if (!Array.isArray(problems) || !problems.every((p) => typeof p === "string")) {
     return `the record for run ${runId} has a problems field that isn't a list of strings.`;
   }
-  return { status: typeof r.status === "number" ? r.status : null, runtime: r.runtime, at: new Map(marks as [string, number][]), problems };
+  const prompt = r.prompt === undefined ? null : parsePrompt(r.prompt);
+  return { status: typeof r.status === "number" ? r.status : null, runtime: r.runtime, at: new Map(marks as [string, number][]), problems, prompt };
 }
 
 export const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
@@ -108,6 +137,15 @@ export interface ServerBlock {
   workers: string | null; // the note, when a record says runtime "workers"
   firstBytes: string | null; // what "first bytes sent" means, when a visit recorded firstChunk
   problems: string[]; // each distinct problem once, with the visits that reported it
+  prompt: PromptBlock;
+}
+
+/** Prompt sizes from the first visit that recorded them, and a "?" line per visit that sent unreadable ones. */
+export interface PromptBlock {
+  visit: number | null; // null when no visit's sizes could be shown
+  messages: PromptSize[];
+  unreadable: string[]; // "marked visit <n>: <why>"
+  none: boolean; // no visit recorded a prompt at all
 }
 
 /** What the marked visits printed, in order, and the block from the visits that succeeded. */
@@ -168,12 +206,43 @@ export function serverBlock(visits: { visit: number; record: ServerRecord }[], n
     workers: visits.some((v) => v.record.runtime === "workers") ? WORKERS_NOTE : null,
     firstBytes: visits.some((v) => v.record.at.has("firstChunk")) ? FIRST_BYTES_NOTE : null,
     problems,
+    prompt: promptBlock(visits),
   };
+}
+
+function promptBlock(visits: { visit: number; record: ServerRecord }[]): PromptBlock {
+  const shown = visits.find((v) => Array.isArray(v.record.prompt));
+  return {
+    visit: shown?.visit ?? null,
+    messages: (shown?.record.prompt as PromptSize[] | undefined) ?? [],
+    unreadable: visits.flatMap(({ visit, record: { prompt } }) => (prompt && !Array.isArray(prompt) ? [`marked visit ${visit}: ${prompt.unreadable}`] : [])),
+    none: visits.every((v) => v.record.prompt === null),
+  };
+}
+
+// Each message's bytes and its share of the measured total; no share when the total is 0.
+function promptLines({ visit, messages, unreadable, none }: PromptBlock): string[] {
+  if (none) return [`  ${NO_SIZES}`];
+  const out = unreadable.map((u) => `  prompt sizes ? — ${u}`);
+  if (visit === null) return out;
+  const measured = messages.filter((m) => m.bytes !== null).map((m) => m.bytes!);
+  const total = measured.reduce((a, b) => a + b, 0);
+  const share = (bytes: number) => (total > 0 ? `   ${Math.round((bytes / total) * 100)}%` : "");
+  const row = (label: string, bytes: number | null, tail: string) => `    ${label.padEnd(LABEL_WIDTH)}${(bytes === null ? "–" : String(bytes)).padStart(6)} bytes${tail}`;
+  const totalLabel = measured.length < messages.length ? `total (${measured.length} of ${messages.length} measured)` : "total";
+  return [
+    `  prompt sizes (marked visit ${visit}) — ${SIZES_NOTE}`,
+    ...(messages.length === 0 ? ["    no messages"] : [
+      ...messages.map((m, i) => row(`${i + 1} ${m.role}`, m.bytes, m.bytes === null ? "   not measured (content wasn't a string)" : share(m.bytes))),
+      row(totalLabel, total, ""),
+    ]),
+    ...out,
+  ];
 }
 
 // The block as the terminal prints it. With one visit, its values; with more, one column per
 // visit ("–" where it didn't record that mark or span), then min · median · max.
-export function formatServerBlock({ title, visits, marks, spans, noSpan, workers, firstBytes, problems }: ServerBlock): string {
+export function formatServerBlock({ title, visits, marks, spans, noSpan, workers, firstBytes, problems, prompt }: ServerBlock): string {
   const line = ({ label, values, stats, note }: ServerRow) => {
     const tail = note ? `   (${note})` : "";
     if (visits.length === 1) return `    ${label.padEnd(LABEL_WIDTH)}${String(values[0]).padStart(6)} ms${tail}`;
@@ -188,6 +257,7 @@ export function formatServerBlock({ title, visits, marks, spans, noSpan, workers
     ...marks.map(line),
     ...(spans.length || noSpan.length ? ["  spans", ...spans.map(line), ...noSpan.map((l) => `    ${l}`)] : []),
     ...(workers ? [`    ${workers}`] : []),
+    ...promptLines(prompt),
     ...(problems.length ? ["  problems reported by the server", ...problems.map((p) => `    ${p}`)] : []),
     ...(firstBytes ? [`  ${firstBytes}`] : []),
   ].join("\n");

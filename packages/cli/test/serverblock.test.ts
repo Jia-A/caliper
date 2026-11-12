@@ -7,7 +7,7 @@ import { renderReport, serverSection, type ReportInput } from "../src/report.ts"
 import { formatServerBlock, parseServerRecord, serverBlock, type ServerRecord, type ServerReport } from "../src/serverblock.ts";
 
 // The visits of one block, from plain records (id is the run id each one is parsed against).
-function visits(...records: { marks: Record<string, number>; status?: number; runtime?: string; problems?: unknown }[]) {
+function visits(...records: { marks: Record<string, number>; status?: number; runtime?: string; problems?: unknown; prompt?: unknown }[]) {
   return records.map((r, i) => {
     const parsed = parseServerRecord({ id: `run${i + 1}`, status: 200, ...r }, `run${i + 1}`);
     assert.equal(typeof parsed, "object", `record ${i + 1} parses: ${parsed as string}`);
@@ -17,6 +17,8 @@ function visits(...records: { marks: Record<string, number>; status?: number; ru
 const lines = (block: string) => block.split("\n");
 const text = (v: ReturnType<typeof visits>, n: number) => formatServerBlock(serverBlock(v, n));
 const FIRST_BYTES = "  first bytes sent = the server's first write to the browser. If your app writes anything before the model's reply (a heartbeat, an envelope), this is that write.";
+const SIZES_HEAD = (visit: number) => `  prompt sizes (marked visit ${visit}) — UTF-8 bytes of each message's text as your app passed it to run.prompt(); not tokens`;
+const NONE = "  prompt sizes: none recorded (needs caliper-timings 0.2.0 or later, and run.prompt(messages) before the model call)";
 
 test("one visit, Quill's record: marks in order, the postgres span and the model span", () => {
   const block = text(visits({ marks: { postgresStart: 1, postgresEnd: 301, modelCallSent: 301, firstChunk: 402 } }), 1);
@@ -29,17 +31,19 @@ test("one visit, Quill's record: marks in order, the postgres span and the model
     "  spans",
     "    postgres                           300 ms   (postgresStart → postgresEnd)",
     "    model call → first bytes sent      101 ms",
+    NONE,
     FIRST_BYTES,
   ].join("\n"));
 });
 
 test("one visit: each pair without a valid span gets one line with the reason", () => {
   const block = text(visits({ marks: { cacheStart: 10, warmupEnd: 20, lockEnd: 58, lockStart: 63 } }), 1);
-  assert.deepEqual(lines(block).slice(-4), [
+  assert.deepEqual(lines(block).slice(-5), [
     "  spans",
     "    no cache span: cacheEnd wasn't recorded",
     "    no warmup span: warmupStart wasn't recorded",
     "    no lock span: lockEnd (58 ms) is before lockStart (63 ms)",
+    NONE,
   ]);
 });
 
@@ -78,8 +82,9 @@ test("several visits, different reasons: one line, with each visit's reason", ()
 test("problems the server reported are printed, last, under their own heading", () => {
   const problem = 'mark name "db-start" rejected — use a letter, then up to 63 letters, digits or _ (e.g. dbStart)';
   const block = text(visits({ marks: { dbStart: 1, dbEnd: 301 }, runtime: "workers", problems: [problem] }), 1);
-  assert.deepEqual(lines(block).slice(-3), [
+  assert.deepEqual(lines(block).slice(-4), [
     "    Workers time waits only — a span with only computation inside (no I/O) can read 0 ms.",
+    NONE,
     "  problems reported by the server",
     `    ${problem}`,
   ]);
@@ -241,4 +246,74 @@ test("HTML report: the server section only with --server-timings, and the browse
   const browserPart = (html: string) => cut(cut(html, "server-top-h"), "server-h").replace(", server marks</summary>", "</summary>").replace(/\n\s*\n/g, "\n");
   assert.equal(browserPart(withServer), browserPart(without), "verdict, tiles, timeline and tables are the same with and without server numbers");
   assert.ok(!browserPart(withServer).includes("9000") && !browserPart(withServer).includes("8900"), "no server number in the browser part");
+});
+
+// Prompt sizes (caliper-timings 0.2.0's run.prompt): each message's role and bytes, never text.
+const QUILL_MARKS = { postgresStart: 1, postgresEnd: 301, modelCallSent: 301, firstChunk: 402 };
+const promptLines = (block: string) => lines(block).filter((l) => l.startsWith("  prompt sizes") || /^    (\d+ \S+|total)/.test(l));
+
+test("prompt sizes: one row per message with its role, bytes and share of the total, then the total", () => {
+  const prompt = { messages: [{ role: "system", bytes: 2310 }, { role: "user", bytes: 5874 }] };
+  const block = text(visits({ marks: QUILL_MARKS, prompt }), 1);
+  assert.deepEqual(promptLines(block), [
+    SIZES_HEAD(1),
+    "    1 system                          2310 bytes   28%",
+    "    2 user                            5874 bytes   72%",
+    "    total                             8184 bytes",
+  ]);
+  // After the spans, before the first-bytes line.
+  assert.ok(lines(block).indexOf(SIZES_HEAD(1)) > lines(block).indexOf("    model call → first bytes sent      101 ms"), block);
+  assert.ok(lines(block).indexOf(SIZES_HEAD(1)) < lines(block).indexOf(FIRST_BYTES), block);
+});
+
+test("prompt sizes: a message with no size says so, and the total counts the measured ones only", () => {
+  const prompt = { messages: [{ role: "system", bytes: 100 }, { role: "?", bytes: null }, { role: "user", bytes: 300 }] };
+  assert.deepEqual(promptLines(text(visits({ marks: QUILL_MARKS, prompt }), 1)).slice(1), [
+    "    1 system                           100 bytes   25%",
+    "    2 ?                                  – bytes   not measured (content wasn't a string)",
+    "    3 user                             300 bytes   75%",
+    "    total (2 of 3 measured)            400 bytes",
+  ]);
+});
+
+test("prompt sizes: an empty prompt or a zero total has no percentages", () => {
+  assert.deepEqual(promptLines(text(visits({ marks: QUILL_MARKS, prompt: { messages: [{ role: "user", bytes: 0 }] } }), 1)).slice(1), [
+    "    1 user                               0 bytes",
+    "    total                                0 bytes",
+  ]);
+  const empty = lines(text(visits({ marks: QUILL_MARKS, prompt: { messages: [] } }), 1));
+  assert.deepEqual(empty.slice(empty.indexOf(SIZES_HEAD(1)) + 1, empty.indexOf(SIZES_HEAD(1)) + 2), ["    no messages"]);
+  assert.ok(!empty.some((l) => l.startsWith("    total")), empty.join("\n"));
+});
+
+test("prompt sizes: no visit recorded any, one line says what's needed", () => {
+  const block = text(visits({ marks: QUILL_MARKS }, { marks: QUILL_MARKS }), 2);
+  assert.ok(lines(block).includes(NONE), block);
+  assert.equal(promptLines(block).length, 1, block);
+});
+
+test("prompt sizes: from the first visit that recorded one, named in the heading", () => {
+  const prompt = { messages: [{ role: "user", bytes: 10 }] };
+  const block = text(visits({ marks: QUILL_MARKS }, { marks: QUILL_MARKS, prompt }), 2);
+  assert.equal(promptLines(block)[0], SIZES_HEAD(2));
+  assert.ok(!lines(block).includes(NONE), block);
+});
+
+test("prompt sizes: a malformed prompt keeps the visit's timings and says why, never showing the role", () => {
+  const cases: [unknown, string][] = [
+    ["a string", "the prompt field isn't { messages: [...] }"],
+    [{ messages: "x" }, "the prompt field isn't { messages: [...] }"],
+    [{ messages: [{ role: "You are a secret system prompt", bytes: 5 }] }, "message 1's role isn't a lowercase name of up to 32 letters or _ (or \"?\"), so the prompt isn't shown"],
+    [{ messages: [{ role: "user", bytes: 5 }, { role: "user", bytes: -1 }] }, "message 2's bytes isn't a whole number ≥ 0 or null"],
+    [{ messages: [{ role: "user", bytes: 1.5 }] }, "message 1's bytes isn't a whole number ≥ 0 or null"],
+    [{ messages: [{ role: "user" }] }, "message 1's bytes isn't a whole number ≥ 0 or null"],
+    [{ messages: [null] }, "message 1 isn't { role, bytes }"],
+  ];
+  for (const [prompt, why] of cases) {
+    const block = text(visits({ marks: QUILL_MARKS, prompt }), 1);
+    assert.ok(lines(block).includes("    postgres                           300 ms   (postgresStart → postgresEnd)"), block);
+    assert.ok(lines(block).includes(`  prompt sizes ? — marked visit 1: ${why}`), `${JSON.stringify(prompt)}\n${block}`);
+    assert.ok(!block.includes("secret system prompt"), block);
+    assert.ok(!lines(block).includes(NONE), block);
+  }
 });

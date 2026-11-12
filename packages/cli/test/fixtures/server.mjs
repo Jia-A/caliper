@@ -36,6 +36,7 @@
 //   vectorSearchStart/End around 15 ms, then cacheStart with no End, warmupEnd with no Start,
 //   and lockEnd 5 ms before lockStart (reversed), then modelCallSent and firstChunk, and one
 //   problem (GENERIC_PROBLEM) as a wrapper reports a mark name it skipped.
+//   ?prompt=1 adds PROMPT_SIZES, the prompt field caliper-timings 0.2.0's run.prompt() writes.
 // For more than one request lining up with the output (see ambiguous-page.html):
 //   /ambiguous              the page (?case=split | splitid | tie | typewriter | late&id=<x>; loads counted per id)
 //   /ambiguous/generate     the reply (POST SSE). split and tie: SPLIT_GENERATE tokens, one every 200 ms;
@@ -150,6 +151,7 @@ const VARIANTS = {
 
 const RUN_ID = /^[A-Za-z0-9_-]{1,64}$/; // Quill's isValidRunId
 const DB_MS = 40; // the stand-in database query before every /marked reply
+export const PROMPT_SIZES = { messages: [{ role: "system", bytes: 2310 }, { role: "user", bytes: 5874 }] };
 export const GENERIC_PROBLEM = 'mark name "db-start" rejected — use a letter, then up to 63 letters, digits or _ (e.g. dbStart)';
 
 // The fake wrapper's timings endpoint, checking in the same order as Quill's.
@@ -203,6 +205,7 @@ function markedRoute(req, res, url, loads, seen, caliper) {
     const marked = !!caliper.token && req.headers["x-caliper-token"] === caliper.token && RUN_ID.test(run ?? "") && !url.searchParams.has("norecord");
     const record = { id: run, status: null, marks: {} };
     if (url.searchParams.has("runtime")) record.runtime = url.searchParams.get("runtime");
+    if (url.searchParams.has("prompt")) record.prompt = PROMPT_SIZES;
     const mark = (name) => (record.marks[name] = Date.now() - start);
     const pre = Number(url.searchParams.get("pre") ?? 0);
     const db = Number(url.searchParams.get("db") ?? DB_MS);

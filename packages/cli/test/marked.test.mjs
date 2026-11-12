@@ -543,6 +543,20 @@ try {
   const sLines = s.out.stdout.split("\n");
   const sAt = sLines.indexOf("  problems reported by the server");
   check(sAt !== -1 && sLines[sAt + 1] === `    ${GENERIC_PROBLEM}`, `(s) prints the problem the record reports, under its heading`, s.out);
+  // (z) Prompt sizes: the record's prompt field, one row per message, under the spans.
+  const z = await runCase("z, prompt sizes", "z");
+  checkStamped(z, /^\/marked\/reply\?/, `POST ${origin}/marked/reply`);
+  const zLines = z.out.stdout.split("\n");
+  const zAt = zLines.indexOf("  prompt sizes (marked visit 1) — UTF-8 bytes of each message's text as your app passed it to run.prompt(); not tokens");
+  check(zAt !== -1 && JSON.stringify(zLines.slice(zAt + 1, zAt + 4)) === JSON.stringify([
+    "    1 system                          2310 bytes   28%",
+    "    2 user                            5874 bytes   72%",
+    "    total                             8184 bytes",
+  ]), `(z) prints the prompt sizes: system 2310, user 5874, total 8184`, z.out);
+  // A record without a prompt field: one line saying what's needed.
+  check(s.out.stdout.split("\n").includes("  prompt sizes: none recorded (needs caliper-timings 0.2.0 or later, and run.prompt(messages) before the model call)"),
+    "(s) a record without prompt sizes says none were recorded, and what's needed", s.out);
+
   // (s2) Two visits: the spans per visit, and one "no span" line per broken pair, for both
   // visits: the reason once when it's the same, else each visit's values.
   const s2 = await runCase("s2, app-chosen names, 2 visits", "s", { serverRuns: 2 });
