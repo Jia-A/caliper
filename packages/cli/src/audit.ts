@@ -502,12 +502,19 @@ async function finishRun(
     if (!matcher) pick = found.pick;
   }
   if (!pick) {
-    const match = requests.find((r) => matcher!.test(r.method, r.url));
-    if (!match) {
+    const matches = requests.filter((r) => matcher!.test(r.method, r.url));
+    if (matches.length === 0) {
       const seen = requests.map((r) => `${r.method} ${r.url}`).join(", ") || "none";
-      throw new UnidentifiedRequestError(`no request matches ${matched(matcher!)} (seen: ${seen})`);
+      const regex = matcher!.via === "answer" ? '. If its path changes per run, rerun with --request and a regex on the URL (e.g. --request "/chat/[^/]+/reply" for /chat/abc123/reply).' : "";
+      throw new UnidentifiedRequestError(`no request matches ${matched(matcher!)} (seen: ${seen})${regex}`);
     }
-    pick = { request: match, reasons: [matchReason(matcher!)], from: requests.length };
+    if (matches.length > 1) {
+      const all = matches.map((r) => `${r.method} ${r.url}`).join(", ");
+      throw new UnidentifiedRequestError(
+        `${matches.length} requests match ${matched(matcher!)}: ${all}. Caliper doesn't guess which one is the AI reply: rerun with a --request regex that matches only one.`
+      );
+    }
+    pick = { request: matches[0]!, reasons: [matchReason(matcher!)], from: requests.length };
   }
   const w = wire.match(pick.request);
   pick.share = w ? shareOf(w, changes, wire.requests()) : null;

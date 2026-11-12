@@ -10,9 +10,13 @@
 //   - typewriter: the reply comes in 400 ms chunks shown a letter per 30 ms, next to a 50 ms
 //     heartbeat → asks, never picks the heartbeat silently
 //   - no terminal → stops at once with the --request line
+//   - known limit, late: run 1 clear, later runs where another stream wins → later runs pick that
+//     stream (only the first run is checked)
+//   - the answered request's path changes per run → later runs fail, suggesting a regex --request
 //   - tie: both streams explain 7 of 14 → asked about like any share under 95%, not "not identified"
 //   - no answer in time → stops (CALIPER_ASK_TIMEOUT_MS shortens the 2-minute wait); Ctrl-C stops at once
-//   - --request "POST /path" locks the request; one that matches nothing fails each visit
+//   - --request "POST /path" locks the request; one that matches nothing fails each visit; one
+//     that matches 2+ requests in a visit fails it, listing every match (METHOD /path and regex)
 //   - the answer also decides the marked visit (--server-timings), which would otherwise pick
 //     the heartbeat; the HTML report shows each run's share
 // The terminal runs go through test/fixtures/pty.py (needs python3).
@@ -154,6 +158,31 @@ try {
     check(ms < 60_000, `${page}, no terminal: doesn't wait (${ms} ms)`);
   }
 
+  // KNOWN LIMIT, not the behaviour we want: only the first run is checked. Run 1 is clear, so
+  // nothing is asked, and runs 2 and 3, where the status stream explains more changes, pick it.
+  {
+    const { out, code } = await audit("late, known limit", "late&id=limit", { args: ["--runs", "3"] });
+    check(code === 0, `late (known limit): exits 0 (got ${code})`);
+    check(!asked(out), "late (known limit): no question");
+    const picks = chosen(out);
+    check(picks.join(", ") === "POST /ambiguous/generate?case=late, GET /ambiguous/status?case=late, GET /ambiguous/status?case=late",
+      `late (known limit): run 1 picks the reply, runs 2 and 3 the status stream (got ${picks.join(", ") || "none"})`);
+    check(/^ {4}share: 6 of 6 output changes from its first body byte \(100%\)/m.test(out), "late (known limit): run 1's share (6 of 6) is shown");
+    check((out.match(/^ {4}share: 7 of 12 output changes from its first body byte \(58%\); POST \/ambiguous\/generate's bytes came ≤ 250 ms before 11 of 12 \(92%\)/gm) ?? []).length === 2,
+      "late (known limit): runs 2 and 3 show the status stream's share (7 of 12, 58%) and the reply's 11 of 12");
+  }
+
+  // The answered request's path changes per run (/ambiguous/c/<random>/generate): later runs
+  // fail, with the reason and a regex --request to rerun with.
+  {
+    const { out, code } = await audit("splitid, answered", "splitid", { tty: true, answer: answerWith("POST /ambiguous/c/\\w+/generate") });
+    check(asked(out), "path changes: asks");
+    check(code === 0, `path changes: the audit still finishes (got ${code})`);
+    check(/^run 1 \(cold\)\s+\d+ ms$/m.test(out), "path changes: run 1 is timed");
+    check(/^run 2 — AI request not identified, timing inconclusive\n {4}no request matches your answer "POST \/ambiguous\/c\/\w+\/generate" \(seen: .*\)\. If its path changes per run, rerun with --request and a regex on the URL \(e\.g\. --request "\/chat\/\[\^\/\]\+\/reply" for \/chat\/abc123\/reply\)\.$/m.test(out),
+      "path changes: run 2 fails naming the answer and suggesting a regex --request");
+  }
+
   // An exact tie is asked about (a share of 50%), not reported as not identified.
   {
     const { out, code } = await audit("tie, no terminal", "tie");
@@ -211,6 +240,16 @@ try {
     const fails = out.match(/^run \d.* — AI request not identified, timing inconclusive\n {4}no request matches --request "nomatch-\\d\+" \(seen: .*\)$/gm) ?? [];
     check(fails.length === 2, `wrong regex --request: both runs fail naming it (got ${fails.length})`);
     check(code === 0, `wrong regex --request: the audit itself still finishes (got ${code})`);
+  }
+
+  // A --request that matches 2+ requests in a visit (a JSON ping, then the reply, both POST
+  // /marked/reply): each visit fails, listing every match, instead of timing the first.
+  for (const request of ["POST /marked/reply", "/marked/reply"]) {
+    const { out, code } = await audit(`two matches, --request ${request}`, `/marked?case=d&id=two-${request.length}`, { args: ["--request", request] });
+    const re = new RegExp(`^run \\d.* — AI request not identified, timing inconclusive\\n {4}2 requests match --request "${request.replace(/[/]/g, "\\/")}": POST \\S+\\/marked\\/reply\\?\\S*kind=ping\\S*, POST \\S+\\/marked\\/reply\\?(?!\\S*kind=ping)\\S+\\. Caliper doesn't guess which one is the AI reply: rerun with a --request regex that matches only one\\.$`, "gm");
+    check((out.match(re) ?? []).length === 2, `two matches (${request}): both runs fail, listing the ping and the reply (got ${(out.match(re) ?? []).length})`);
+    check(!/^run \d.*\s\d+ ms$/m.test(out), `two matches (${request}): no timing reported`);
+    check(code === 0, `two matches (${request}): the audit itself still finishes (got ${code})`);
   }
 } finally {
   await server.close();

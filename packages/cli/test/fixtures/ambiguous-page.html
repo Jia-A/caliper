@@ -9,6 +9,11 @@
      ?case=split       Generate opens two streams, POST /ambiguous/generate and
                        GET /ambiguous/status, and both write into #out, taking turns.
      ?case=tie         The same, with as many tokens on each stream.
+     ?case=splitid     Like split, but the reply's path has a new random part per load:
+                       POST /ambiguous/c/<random>/generate.
+     ?case=late&id=<x> The first load of id x streams only POST /ambiguous/generate (6 tokens);
+                       later loads also open GET /ambiguous/status, now with more tokens (7)
+                       than the reply, so it would win the later runs on its own.
      ?case=typewriter  Generate opens POST /ambiguous/generate (a chunk every 400 ms) and
                        GET /ambiguous/heartbeat (a tick every 50 ms, never shown). The page
                        reveals the reply one letter every 30 ms, so most letters land just
@@ -17,6 +22,7 @@
 <div id="out"></div>
 <script>
   const which = new URLSearchParams(location.search).get("case");
+  const LOAD = Number("__LOAD__"); // the server's count of this page's loads, per ?id
   const out = document.getElementById("out");
 
   // Calls onEvent with each SSE event's data until the stream ends.
@@ -34,13 +40,15 @@
   }
 
   document.getElementById("generate").addEventListener("click", () => {
-    const generate = fetch(`/ambiguous/generate?case=${which}`, {
+    const path = which === "splitid" ? `/ambiguous/c/${Math.random().toString(36).slice(2, 10)}/generate` : "/ambiguous/generate";
+    const generate = fetch(`${path}?case=${which}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: "{}",
     });
-    if (which === "split" || which === "tie") {
+    if (["split", "splitid", "tie", "late"].includes(which)) {
       generate.then((res) => read(res, (d) => (out.textContent += d.t)));
+      if (which === "late" && LOAD === 1) return;
       fetch(`/ambiguous/status?case=${which}`).then((res) => read(res, (d) => (out.textContent += d.t)));
       return;
     }

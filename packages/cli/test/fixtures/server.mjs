@@ -37,11 +37,13 @@
 //   and lockEnd 5 ms before lockStart (reversed), then modelCallSent and firstChunk, and one
 //   problem (GENERIC_PROBLEM) as a wrapper reports a mark name it skipped.
 // For more than one request lining up with the output (see ambiguous-page.html):
-//   /ambiguous              the page (?case=split | tie | typewriter)
+//   /ambiguous              the page (?case=split | splitid | tie | typewriter | late&id=<x>; loads counted per id)
 //   /ambiguous/generate     the reply (POST SSE). split and tie: SPLIT_GENERATE tokens, one every 200 ms;
+//                           splitid: the same, at /ambiguous/c/<random>/generate;
 //                           typewriter: TYPEWRITER_CHUNKS chunks of 12 letters, one every 400 ms
 //   /ambiguous/status       the second stream (GET SSE), 100 ms after each reply token: SPLIT_STATUS tokens
-//                           (?case=tie: SPLIT_GENERATE, as many as the reply)
+//                           (?case=tie: SPLIT_GENERATE, as many as the reply; ?case=late: SPLIT_GENERATE,
+//                           while the reply sends SPLIT_STATUS, so the status stream wins)
 //   /ambiguous/heartbeat    typewriter's tick (GET SSE): one every 50 ms for 3 s, never shown
 // Run on its own with `node test/fixtures/server.mjs [port]`, or import startFixtureServer().
 
@@ -124,19 +126,21 @@ function ambiguousRoute(req, res, url) {
   req.resume(); // bodies aren't used
   const path = url.pathname;
   const each = (n, first, gap, text) => Array.from({ length: n }, (_, i) => [first + i * gap, text(i)]);
-  if (path === "/ambiguous/generate" && req.method === "POST") {
-    if (["split", "tie"].includes(url.searchParams.get("case"))) return timedStream(res, each(SPLIT_GENERATE, 300, 200, (i) => `g${i} `));
+  if (/^\/ambiguous(\/c\/\w+)?\/generate$/.test(path) && req.method === "POST") {
+    const kase = url.searchParams.get("case");
+    if (kase === "late") return timedStream(res, each(SPLIT_STATUS, 300, 200, (i) => `g${i} `));
+    if (["split", "splitid", "tie"].includes(kase)) return timedStream(res, each(SPLIT_GENERATE, 300, 200, (i) => `g${i} `));
     return timedStream(res, each(TYPEWRITER_CHUNKS, 300, 400, (i) => TYPEWRITER_REPLY[i]));
   }
   if (path === "/ambiguous/status") {
-    const n = url.searchParams.get("case") === "tie" ? SPLIT_GENERATE : SPLIT_STATUS;
+    const n = ["tie", "late"].includes(url.searchParams.get("case")) ? SPLIT_GENERATE : SPLIT_STATUS;
     return timedStream(res, each(n, 400, 200, (i) => `s${i} `));
   }
   if (path === "/ambiguous/heartbeat") return timedStream(res, each(60, 0, 50, () => "tick"));
   res.writeHead(404).end("not found");
 }
 
-const PAGES = { "/stream-nostore": STREAM_PAGE, "/chat": CHAT_PAGE, "/sidecall": SIDECALL_PAGE, "/icon": ICON_PAGE, "/buttons": BUTTONS_PAGE, "/ambiguous": AMBIGUOUS_PAGE };
+const PAGES = { "/stream-nostore": STREAM_PAGE, "/chat": CHAT_PAGE, "/sidecall": SIDECALL_PAGE, "/icon": ICON_PAGE, "/buttons": BUTTONS_PAGE };
 const STREAMS = { "/chat/stream": "no-cache", "/chat/stream-nostore": "no-store" };
 
 const VARIANTS = {
@@ -249,6 +253,14 @@ export function startFixtureServer(port = 0, { caliperToken = null, caliperStatu
     cookies.push({ method: req.method, path, cookie: req.headers.cookie ?? null });
     if (path === "/marked" || path.startsWith("/marked/")) {
       markedRoute(req, res, url, loads, seen, caliper);
+      return;
+    }
+    if (path === "/ambiguous") {
+      const id = `ambiguous:${url.searchParams.get("id") ?? ""}`;
+      const load = (loads.get(id) ?? 0) + 1;
+      loads.set(id, load);
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+      res.end(AMBIGUOUS_PAGE.replace("__LOAD__", String(load)));
       return;
     }
     if (path.startsWith("/ambiguous/")) {
