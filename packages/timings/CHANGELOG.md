@@ -5,6 +5,7 @@
 ### Added
 
 - **`caliper-timings/upstash`: Upstash Redis store** for serverless hosts (Vercel and others), over Upstash's REST API with plain `fetch`, no dependency. One key per record (`caliper:timings:<id>`, `SET … EX 600`); `UpstashStore.fromEnv(env)` reads `UPSTASH_REDIS_REST_URL`/`_TOKEN` or Vercel's `KV_REST_API_URL`/`_TOKEN`, and returns `null` without them. Each call gives up after 2 s; failures reject without the token or URL, and never reach the app's request. Tested against a fake Upstash REST server, not Upstash itself. Re-exports `caliper-timings/fetch`.
+- **Next.js App Router** in the README, with [examples/next-app-router](https://github.com/Jia-A/caliper/tree/main/examples/next-app-router): route handlers use the fetch adapter as is, `defer: (p) => after(() => p)` keeps the save alive, and the endpoint's folder is `app/%5F_caliper/timings/[id]` (a `_` folder is private). Checked by hand once on Next.js 16.2.6 locally, with memory and with a local stand-in for Upstash; not on Vercel.
 
 ## 0.4.0 — 2026-11-12
 

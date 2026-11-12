@@ -170,6 +170,41 @@ const store = UpstashStore.fromEnv(process.env) ?? new MemoryStore();
 - **Use the Standard REST token,** not the Read Only one: the store writes.
 - **Each call gives up after 2 s** (`timeoutMs` to change it). A refused, failed or timed-out call rejects with the command and the status or Upstash's error, never the token or the URL. `CaliperRun.save()` logs it and drops the record; the endpoint answers 500. Neither reaches your request.
 
+## Next.js App Router (and Vercel)
+
+Route handlers take a Web `Request` and return a `Response`, so they use the fetch adapter as it is, with the Upstash store on Vercel:
+
+```js
+// app/api/generate/route.js
+import { after } from "next/server";
+import { finish, MemoryStore, start, UpstashStore } from "caliper-timings/upstash";
+
+const store = UpstashStore.fromEnv(process.env) ?? new MemoryStore();
+
+export async function POST(request) {
+  const run = await start(request, { token: process.env.CALIPER_TOKEN, store, defer: (p) => after(() => p) });
+  // … run?.mark(…), run?.prompt(messages, { parts }), then the model's stream:
+  const response = new Response(run ? run.watchFirstChunk(stream) : stream);
+  return run ? finish(run, response) : response;
+}
+```
+
+```js
+// app/%5F_caliper/timings/[id]/route.js
+import { handle, MemoryStore, UpstashStore } from "caliper-timings/upstash";
+
+const store = UpstashStore.fromEnv(process.env) ?? new MemoryStore();
+
+export async function GET(request) {
+  return (await handle(request, { token: process.env.CALIPER_TOKEN, store })) ?? new Response("Not found", { status: 404 });
+}
+```
+
+- **The folder is `%5F_caliper`.** A folder starting with `_` is private in the App Router and never routed; `%5F` is an encoded `_`, so it's the URL segment `__caliper`.
+- **`defer: (p) => after(() => p)`**, with `after` from `next/server` (Next.js 15.1+), keeps the function alive for the save after the response. Below 15.1, or outside Next.js on Vercel, use `waitUntil` from `@vercel/functions`.
+- Share one store between the two routes (the example has it in `lib/caliper.js`).
+- **Checked by hand once, not by an automated test:** Next.js 16.2.6 on 127.0.0.1, with memory and with a local stand-in for Upstash's REST API; see [examples/next-app-router](https://github.com/Jia-A/caliper/tree/main/examples/next-app-router). Not yet on Vercel or with real Upstash. The Pages Router isn't covered.
+
 ## Core (`caliper-timings`)
 
 The core works in any runtime with Web Streams and `crypto.subtle`. It exports:

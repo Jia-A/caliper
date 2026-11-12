@@ -1,0 +1,15 @@
+{
+  "name": "caliper-example-next-app-router",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "caliper-timings": "file:../../packages/timings",
+    "next": "^16.2.6",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  }
+}
