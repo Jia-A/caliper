@@ -120,6 +120,36 @@ export default {
 - **Never throws.** `start()` returns `null` if anything inside it fails, `finish()` returns the response whatever happens, and a store failure on the endpoint answers 500.
 - On Workers, `MemoryStore` lives in one isolate only, so Caliper's read can miss the record. Use a shared store there.
 
+## Cloudflare Workers (Durable Object store)
+
+`MemoryStore` doesn't work on Workers: each isolate has its own. `caliper-timings/workers` has a store that does, built on a Durable Object, and re-exports everything from `caliper-timings/fetch`.
+
+```js
+import { CaliperTimingsDO, DurableObjectStore, finish, handle, start } from "caliper-timings/workers";
+
+export { CaliperTimingsDO }; // the class wrangler binds
+
+export default {
+  async fetch(request, env, ctx) {
+    const options = { token: env.CALIPER_TOKEN, store: new DurableObjectStore(env.CALIPER_TIMINGS_DO) };
+    const answered = await handle(request, options);
+    if (answered) return answered;
+    // … your routes: start(request, { ...options, defer: (p) => ctx.waitUntil(p) }), then finish(run, response)
+  },
+};
+```
+
+```jsonc
+// wrangler.jsonc
+"durable_objects": { "bindings": [{ "name": "CALIPER_TIMINGS_DO", "class_name": "CaliperTimingsDO" }] },
+"migrations": [{ "tag": "v1", "new_classes": ["CaliperTimingsDO"] }]
+```
+
+- **One object per run id** (`idFromName(runId)`). It keeps the record as a JSON string under the key `"record"`, and an alarm deletes it 10 minutes after the last write. It answers `PUT` (204), `GET` (the record, or 404) and nothing else (405).
+- **A write or read the object refuses** rejects in the store. `CaliperRun.save()` logs it and the record is dropped; the endpoint answers 500. Neither reaches the app's request.
+- **No Cloudflare types needed.** The package declares the few methods it uses. Cloudflare's `DurableObjectNamespace`, `DurableObjectState` and `ExecutionContext` were checked to fit them, with TypeScript 5.9 and Wrangler's generated types.
+- Moved from Quill's backend, with the same class name and storage format, so an app that had Quill's version keeps its binding and migrations.
+
 ## Core (`caliper-timings`)
 
 The core works in any runtime with Web Streams and `crypto.subtle`. It exports:
@@ -130,7 +160,7 @@ The core works in any runtime with Web Streams and `crypto.subtle`. It exports:
 - the header and path constants;
 - the `TimingRecord` and `PromptMessageSize` types.
 
-The adapters are `caliper-timings/node` and `caliper-timings/fetch`.
+The adapters are `caliper-timings/node` and `caliper-timings/fetch`; `caliper-timings/workers` adds the Durable Object store.
 
 ## Measured cost
 
@@ -146,6 +176,7 @@ That is one app, one machine and 20 pairs each. Other runtimes, frameworks, stor
 
 `npm test` runs Node 22.18+ directly on the TypeScript source. It covers:
 
+- **The Durable Object store**, with a fake object state, storage and namespace (not the Workers runtime): a write then a read through one object per run id; `null` for no record; the stored format (the record as a JSON string under `"record"`) and the alarm 10 minutes after the write, moved by a later write; the alarm deleting the record; `PUT` 204, `GET` 200 or 404, anything else 405; a refused write rejecting in the store while `save()` only logs it; a refused read making the endpoint answer 500; and a marked streamed request through the fetch adapter, saved through the object and read back at the endpoint. Each checked by breaking the code (no alarm, a parsed object stored instead of the string, an alarm that doesn't delete, a refused write ignored, 404 read as an error).
 - **The fetch adapter** (`Request`/`Response` built directly, no socket): the endpoint's check order and answers as below, `null` for other paths and methods and for every request without a token; a stamped streamed reply saved once at the first chunk with its status, and passed to `defer`; the same status, headers and bytes marked or not; no run for requests that don't qualify; `finish` saving a non-streamed reply with its status and no `firstChunk`, and only noting the status for a streamed one; `start` and `finish` never throwing. Each checked by breaking the code (a wrong token accepted, no try/catch in `finish`, `finish` saving streamed replies too, the store read before the token check).
 - **The endpoint's check order**, over a real socket on 127.0.0.1: 404 with no or empty token (the app's own), 401 for a missing, wrong or non-`Bearer` token before the store is read, 400 for malformed ids including Caliper's `caliper.precheck`, 404 for no record, 200 with the record, and `no-store` on every answer.
 - **Which requests qualify:** marked requests get the same status, headers and bytes as unmarked ones. Requests missing a header, with a wrong token or a malformed id, or on a server with no token, record nothing.
@@ -164,7 +195,8 @@ That is one app, one machine and 20 pairs each. Other runtimes, frameworks, stor
 - **Prompt sizes: a role can still carry a little text.** `run.prompt()` keeps a role that is up to 32 lowercase letters or `_` as it is, so an app that puts text there (`ignoreallpreviousinstructions`) has it recorded and shown. Anything with a space, a capital, a digit or punctuation is recorded as `"?"`. Message content is never recorded.
 - **Saved once, at the first chunk.** Marks made after the first chunk of a streamed reply aren't in the record.
 - **`res.end(body)` doesn't mark `firstChunk`.** A reply sent only that way gets no `firstChunk` mark; only `res.write` is watched.
-- **One process only.** `MemoryStore` is for single-process servers. There's no shared store for Node yet. The Durable Object store for Workers comes with the Hono adapter.
+- **One process only.** `MemoryStore` is for single-process servers. There's no shared store for Node yet.
+- **The Durable Object store hasn't run in the Workers runtime in these tests.** Its object, storage and alarm are fakes with the same methods.
 - **Two adapters, so far:** `node:http` and fetch (`Request`/`Response`). Express or Fastify can use the Node one through their raw `req`/`res`, but that hasn't been tested. The fetch adapter is tested with `Request`/`Response` objects built in Node, not yet inside the Workers runtime or a framework.
 - **No cross-origin test yet.** Cross-origin APIs need the CORS preflight to allow `x-caliper-run` and `x-caliper-token`.
 - **Node 20: one end-to-end run, no test suite.** The packed package was installed into a fresh project and the [example server](https://github.com/Jia-A/caliper/tree/main/examples/node-memory) ran on Node 20.18.3 with Caliper's 3 marked visits. `npm test` runs on Node 22 only.

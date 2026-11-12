@@ -5,6 +5,7 @@
 ### Added
 
 - **`caliper-timings/fetch`: fetch adapter** (Web `Request`/`Response`), for Cloudflare Workers and other fetch-style runtimes: `handle(request, { token, store })` answers the timings endpoint or returns `null`; `start(request, { token, store, defer })` returns a `CaliperRun` or `null`; `finish(run, response)` notes the status, saves a non-streamed reply, and returns the response as it was. The token is passed on every call. Same check order, answers and never-throw rules as the Node adapter, which now shares the endpoint code. Tested with `Request`/`Response` built in Node, not yet inside the Workers runtime.
+- **`caliper-timings/workers`: Durable Object store** for Cloudflare Workers, moved from Quill's backend: `CaliperTimingsDO` (one object per run id; the record as a JSON string under `"record"`; deleted by an alarm 10 minutes after the last write) and `DurableObjectStore(namespace)`. Same class name and storage format as Quill's, so its binding and migrations stay. Declares the few Cloudflare methods it uses, so no Cloudflare types are needed; checked against Wrangler's generated types with TypeScript 5.9. Tested with a fake object state, storage and namespace, not the Workers runtime. Re-exports `caliper-timings/fetch`.
 
 ## 0.2.0 — 2026-11-12
 
