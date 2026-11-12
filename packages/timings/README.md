@@ -52,6 +52,8 @@ createServer(async (req, res) => {
     run?.mark("dbStart");
     const row = await db.query(/* … */);
     run?.mark("dbEnd");
+    const messages = [{ role: "system", content: SYSTEM }, { role: "user", content: row.text }];
+    run?.prompt(messages); // each message's role and size in bytes, never its text
     run?.mark("modelCallSent");
     res.writeHead(200, { "content-type": "text/event-stream" });
     for await (const chunk of model.stream(/* … */)) res.write(chunk); // the first write with bytes: firstChunk
@@ -65,6 +67,7 @@ createServer(async (req, res) => {
 - **`handle(req, res)`** answers `GET /__caliper/timings/:id` in SPEC.md's check order and returns `true`. For any other request it returns `false` and doesn't touch the response. With no token set it returns `false` for every request, so your own 404 answers.
 - **`start(req, res)`** returns a `CaliperRun` only when the request carries a valid `x-caliper-run` and the right `x-caliper-token`. Otherwise it returns `null` and the request and response are left exactly as they were. Call it first thing in the route: marks are measured from the moment `start()` was called.
 - **`run.mark(name)`** records ms since then. Name spans with `<name>Start` / `<name>End` (`dbStart` / `dbEnd`); Caliper shows each pair as a span called `<name>`. `modelCallSent` and `firstChunk` are reserved. A name outside `^[A-Za-z][A-Za-z0-9_]{0,63}$` is skipped, not thrown, and Caliper prints it under "problems reported by the server".
+- **`run.prompt(messages)`** records each message's role and its size in bytes (UTF-8), in order, for Caliper's prompt sizes. Pass the same list you send to the model, as `{ role, content }` objects, just before the model call. With a separate system text (Anthropic's API), pass it as the first message. It never records the text. A role that isn't a lowercase name (`system`, `user`, `assistant`, …) is recorded as `"?"`, and content that isn't a string gets no size (`null`), with a problem saying which message, by number. It reads the list and never changes it. A later call replaces an earlier one. See [SPEC.md](SPEC.md#prompt-sizes).
 - **When the record is saved:** at the first `res.write` with bytes, with `firstChunk` marked then. Otherwise when the response closes, whether it finished or the client left. `status` is `res.statusCode`, or `null` if no headers were sent. Every write goes through unchanged.
 
 ### It never changes your app
@@ -88,11 +91,11 @@ A marked request succeeds or fails exactly as it would unmarked; that's the prot
 
 The core works in any runtime with Web Streams and `crypto.subtle`. It exports:
 
-- `CaliperRun`, with `mark`, `save`, and `watchFirstChunk(stream)` for frameworks that return a `ReadableStream`;
+- `CaliperRun`, with `mark`, `prompt`, `save`, and `watchFirstChunk(stream)` for frameworks that return a `ReadableStream`;
 - `MemoryStore` and the `TimingStore` interface;
-- `tokenMatches`, `isValidRunId`, `isValidMarkName`;
+- `tokenMatches`, `isValidRunId`, `isValidMarkName`, `isValidRole`;
 - the header and path constants;
-- the `TimingRecord` type.
+- the `TimingRecord` and `PromptMessageSize` types.
 
 There's no framework adapter other than Node yet.
 
@@ -114,6 +117,7 @@ That is one app, one machine and 20 pairs each. Other runtimes, frameworks, stor
 - **When the record is saved:** at the first write with bytes (an empty write doesn't count), at close for `res.end(body)` replies, and at close with `status: null` when the client leaves before headers.
 - **Never changing the app:** with a store whose `put` throws, or one whose `put` rejects, the marked response is byte-identical to the unmarked one and nothing escapes as an unhandled error. With a broken `get`, the endpoint answers 500 and app requests are untouched. A URL that doesn't parse is left to the app. A `save()` with a throwing store or `defer` neither throws nor rejects. Each of these was checked by removing the guard, and the test then fails.
 - **Marks and mark names:** marks in ms from `start()`. Bad names are skipped and reported in `problems`, each once, at most 20, then one line saying more were dropped. There's no `problems` field when nothing went wrong.
+- **Prompt sizes (`run.prompt`):** role and UTF-8 bytes per message, in order, matching `TextEncoder` (lone surrogates included); a later call replaces an earlier one; no `prompt` field without a call. Roles that aren't lowercase names are recorded as `"?"`, content that isn't a string as `bytes: null`, and something that isn't a list as no `prompt`, each with a problem naming the message by number. At most 1000 messages.
 - **`runtime`:** `"workers"` only for `navigator.userAgent === "Cloudflare-Workers"`, and absent on Node.
 - **`watchFirstChunk`:** chunks unchanged, saved once.
 - **A failed save** is logged and not thrown.

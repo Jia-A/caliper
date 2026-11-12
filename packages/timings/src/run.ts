@@ -1,4 +1,4 @@
-import { isValidMarkName, type TimingRecord, type TimingStore } from "./protocol.ts";
+import { isValidMarkName, isValidRole, type PromptMessageSize, type TimingRecord, type TimingStore } from "./protocol.ts";
 
 // Cloudflare documents navigator.userAgent === "Cloudflare-Workers" as the way
 // to tell code is running on Workers (global_navigator flag, on by default
@@ -21,6 +21,8 @@ export type RunOptions = {
 };
 
 const MAX_PROBLEMS = 20;
+const MAX_PROMPT_MESSAGES = 1000;
+const utf8 = new TextEncoder();
 
 // Logged, never thrown: nothing the wrapper does may reach the app's request (SPEC.md).
 function logFailure(err: unknown) {
@@ -40,6 +42,7 @@ export class CaliperRun {
   readonly #start: number;
   readonly #marks: Record<string, number> = {};
   readonly #problems: string[] = [];
+  #prompt: PromptMessageSize[] | null = null;
   readonly #store: TimingStore;
   readonly #defer: (p: Promise<void>) => void;
   #watchingStream = false;
@@ -58,6 +61,43 @@ export class CaliperRun {
       return;
     }
     this.#marks[name] = Date.now() - this.#start;
+  }
+
+  // Each message's role and UTF-8 size, never its text; reads the messages and never changes them.
+  // Call it just before the model call. A later call replaces an earlier one. Never throws.
+  prompt(messages: unknown) {
+    try {
+      if (!Array.isArray(messages)) {
+        this.#problem("prompt not recorded: run.prompt() takes a list of { role, content } messages");
+        return;
+      }
+      const sizes: PromptMessageSize[] = [];
+      const kept = Math.min(messages.length, MAX_PROMPT_MESSAGES);
+      for (let i = 0; i < kept; i++) sizes.push(this.#size(messages[i], i + 1));
+      if (messages.length > kept) {
+        this.#problem(`prompt: ${messages.length - kept} more messages not recorded (only the first ${MAX_PROMPT_MESSAGES} are kept)`);
+      }
+      this.#prompt = sizes;
+    } catch {
+      this.#problem("prompt not recorded: reading the messages failed");
+    }
+  }
+
+  // Problems name the message by number only: its role or text could be anything.
+  #size(message: unknown, n: number): PromptMessageSize {
+    let role: unknown;
+    let content: unknown;
+    try {
+      ({ role, content } = (message ?? {}) as { role?: unknown; content?: unknown });
+    } catch {
+      this.#problem(`prompt message ${n}: reading it failed; recorded as "?" with no size`);
+      return { role: "?", bytes: null };
+    }
+    if (!isValidRole(role)) {
+      this.#problem(`prompt message ${n}: role isn't a lowercase name of up to 32 letters or _ (e.g. system, user, assistant); recorded as "?"`);
+    }
+    if (typeof content !== "string") this.#problem(`prompt message ${n}: content isn't a string; size not measured`);
+    return { role: isValidRole(role) ? role : "?", bytes: typeof content === "string" ? utf8.encode(content).length : null };
   }
 
   // Each problem once; after MAX_PROBLEMS, one line says the rest were dropped.
@@ -99,6 +139,7 @@ export class CaliperRun {
         status: this.status,
         marks: { ...this.#marks },
         ...(this.#problems.length && { problems: [...this.#problems] }),
+        ...(this.#prompt && { prompt: { messages: this.#prompt.map((m) => ({ ...m })) } }),
       };
       saved = Promise.resolve(this.#store.put(this.id, record)).catch(logFailure);
     } catch (err) {

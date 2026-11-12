@@ -6,8 +6,10 @@ export {
   RECORD_TTL_MS,
   isValidRunId,
   isValidMarkName,
+  isValidRole,
   type TimingRecord,
   type TimingStore,
+  type PromptMessageSize,
 } from "./protocol.ts";
 export { CaliperRun, type RunOptions } from "./run.ts";
 export { MemoryStore } from "./memoryStore.ts";

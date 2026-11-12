@@ -70,11 +70,24 @@ A mark is a name and the number of milliseconds since the server's route receive
 | `status` | the response status, or `null` when it isn't known (e.g. the client left before headers were sent) |
 | `marks` | name → ms, as above; may be empty |
 | `runtime` | optional, see below |
+| `prompt` | optional, added in caliper-timings 0.2.0: the sizes of the prompt's messages, see [Prompt sizes](#prompt-sizes). Leave it out when the app didn't report a prompt. |
 | `problems` | optional: a list of strings, in words, saying what the implementation skipped or couldn't do for this request. The reference writes `mark name "db-start" rejected — use a letter, then up to 63 letters, digits or _ (e.g. dbStart)`, keeps each one once and at most 20, then adds one line saying more were dropped. Leave the field out when there's nothing to report. Caliper prints each one as given, with control characters escaped and anything past 200 characters cut. A `problems` that isn't a list of strings makes Caliper reject the record. |
 
 **When it's saved:** for a streamed response, at the first chunk with bytes, so marks made after that aren't in the record. For any other response, when it finishes or the connection closes.
 
 Records should expire. The reference keeps them for 10 minutes after the last write.
+
+### Prompt sizes
+
+`prompt` is `{ "messages": [ { "role": "system", "bytes": 2310 }, { "role": "user", "bytes": 5874 } ] }`: one entry per message the app passed to the model, in order, as the app reported them just before the model call.
+
+- **`role`** is the message's role when it matches `^[a-z][a-z_]{0,31}$` (`system`, `user`, `assistant`, `tool`, …), and `"?"` otherwise, so text can never reach the record through it.
+- **`bytes`** is the length of the message's text in UTF-8, or `null` when the text wasn't a string (a list of parts, an image). It's never estimated. It's the size of the text, not of the request to the model, and not tokens.
+- **Never the text.** No part of a message's content is recorded, and `problems` about the prompt name a message by its number only (`prompt message 2: …`), never by its role or text.
+- At most 1000 messages are recorded; `problems` then says how many weren't.
+- When the app passes something that isn't a list, there's no `prompt`, and `problems` says so.
+
+Older readers ignore the field, and a record without it is still valid: v1 is unchanged for servers that don't report a prompt.
 
 ### `runtime`
 

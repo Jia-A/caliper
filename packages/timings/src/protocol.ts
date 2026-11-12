@@ -14,7 +14,14 @@ export type TimingRecord = {
   marks: Record<string, number>;
   // What the wrapper skipped or couldn't do, in words (a rejected mark name); absent when nothing.
   problems?: string[];
+  // Sizes of the messages the app passed to run.prompt(), in order; absent when it wasn't called.
+  // Never the text.
+  prompt?: { messages: PromptMessageSize[] };
 };
+
+// role: a lowercase name, or "?" when the app's wasn't one. bytes: the content's UTF-8 length,
+// or null when the content wasn't a string.
+export type PromptMessageSize = { role: string; bytes: number | null };
 
 export interface TimingStore {
   put(id: string, record: TimingRecord): Promise<void>;
@@ -30,3 +37,8 @@ export const isValidRunId = (id: string) => RUN_ID.test(id);
 // are reserved for the model call.
 const MARK_NAME = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
 export const isValidMarkName = (name: unknown): name is string => typeof name === "string" && MARK_NAME.test(name);
+
+// Lowercase letters and _, up to 32: system, user, assistant, tool, function_call. Anything else
+// could be text, so it's never recorded.
+const ROLE = /^[a-z][a-z_]{0,31}$/;
+export const isValidRole = (role: unknown): role is string => typeof role === "string" && ROLE.test(role);
