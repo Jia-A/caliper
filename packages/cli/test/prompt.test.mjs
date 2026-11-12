@@ -69,7 +69,7 @@ const check = (ok, what) => {
 try {
   const report = join(mkdtempSync(join(tmpdir(), "caliper-prompt-")), "report.html");
   const args = [cli, "audit", `${origin}/`, "--measure", "^generate$", "--output", "#out", "--runs", "2", "--settle-ms", "500",
-    "--timeout", "15000", "--server-timings", origin, "--server-runs", "1", "--report", report];
+    "--timeout", "15000", "--server-timings", origin, "--server-runs", "2", "--report", report];
   let out;
   try {
     out = await execFileAsync(process.execPath, args, { timeout: 120_000, env: { ...process.env, CALIPER_TOKEN: TOKEN } });
@@ -82,7 +82,7 @@ try {
     html = readFileSync(report, "utf8");
   } catch {}
   const lines = out.stdout.split("\n");
-  const at = lines.indexOf("  prompt sizes (marked visit 1) — UTF-8 bytes of each message's text as your app passed it to run.prompt(); not tokens");
+  const at = lines.indexOf("  prompt sizes (the same in marked visits 1, 2) — UTF-8 bytes of each message's text as your app passed it to run.prompt(); not tokens");
   // LEAKY_MESSAGES: 42 bytes of system text, 25 bytes under a role that's really text, a list of
   // parts (not measured), 13 bytes of history, and the marker three times (72 bytes).
   const want = [
@@ -95,13 +95,13 @@ try {
   ];
 
   check(out.code === 0, `exits 0 (got ${out.code})`);
-  check(at !== -1, "prints the prompt sizes heading");
+  check(at !== -1, "prints the prompt sizes heading: the same in both marked visits");
   check(JSON.stringify(lines.slice(at + 1, at + 7)) === JSON.stringify(want),
     `the rows: system, ? (a role that was text), user not measured, assistant, user, total of 4 measured (got:\n${lines.slice(at + 1, at + 7).join("\n")})`);
   check(!out.stdout.includes(SECRET), "the marker isn't in the terminal output");
   check(!out.stderr.includes(SECRET), "the marker isn't in stderr");
   check(html.length > 0, "the report was written");
-  check(html.includes("<h3>Prompt sizes (marked visit 1)</h3>") && html.includes('<tr><th scope="row">5 user</th><td class="num">72</td><td>47%</td></tr>'),
+  check(html.includes("<h3>Prompt sizes (the same in marked visits 1, 2)</h3>") && html.includes('<tr><th scope="row">5 user</th><td class="num">72</td><td>47%</td></tr>'),
     "the HTML report has the prompt sizes table, with the terminal's numbers");
   check(!html.includes(SECRET), "the marker isn't in the HTML report");
   if (failed) console.log(`${out.stdout}\n${out.stderr}`.replace(/^/gm, "     | "));

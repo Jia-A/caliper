@@ -140,11 +140,12 @@ export interface ServerBlock {
   prompt: PromptView;
 }
 
-// Prompt sizes from the first visit that recorded them, and a "?" line per visit that sent unreadable ones.
+// The visits whose prompt sizes are compared: those with the same messages (count and roles) as
+// the first one that recorded any. The rest each get a line: none recorded, different messages,
+// or unreadable.
 interface PromptBlock {
-  visit: number | null; // null when no visit's sizes could be shown
-  messages: PromptSize[];
-  unreadable: string[]; // "marked visit <n>: <why>"
+  compared: { visit: number; messages: PromptSize[] }[];
+  lines: string[];
   none: boolean; // no visit recorded a prompt at all
 }
 
@@ -211,12 +212,20 @@ export function serverBlock(visits: { visit: number; record: ServerRecord }[], n
 }
 
 function promptBlock(visits: { visit: number; record: ServerRecord }[]): PromptBlock {
-  const shown = visits.find((v) => Array.isArray(v.record.prompt));
+  const recorded = visits.flatMap(({ visit, record: { prompt } }) => (Array.isArray(prompt) ? [{ visit, messages: prompt }] : []));
+  const shape = (m: PromptSize[]) => m.map((x) => x.role).join(" ");
+  const first = recorded[0];
+  const compared = recorded.filter((r) => shape(r.messages) === shape(first!.messages));
+  const anyRecorded = visits.some((v) => v.record.prompt !== null);
   return {
-    visit: shown?.visit ?? null,
-    messages: (shown?.record.prompt as PromptSize[] | undefined) ?? [],
-    unreadable: visits.flatMap(({ visit, record: { prompt } }) => (prompt && !Array.isArray(prompt) ? [`marked visit ${visit}: ${prompt.unreadable}`] : [])),
-    none: visits.every((v) => v.record.prompt === null),
+    compared,
+    lines: visits.flatMap(({ visit, record: { prompt } }) => {
+      if (prompt === null) return anyRecorded ? [`prompt sizes: none recorded in marked visit ${visit}`] : [];
+      if (!Array.isArray(prompt)) return [`prompt sizes ? — marked visit ${visit}: ${prompt.unreadable}`];
+      if (compared.some((c) => c.visit === visit)) return [];
+      return [`prompt sizes: marked visit ${visit} sent different messages (${prompt.length}: ${prompt.map((m) => m.role).join(", ")}), so it isn't compared`];
+    }),
+    none: !anyRecorded,
   };
 }
 
@@ -224,34 +233,73 @@ function promptBlock(visits: { visit: number; record: ServerRecord }[]): PromptB
 export interface PromptView {
   heading: string | null; // "prompt sizes (marked visit 1)", null when no visit's sizes can be shown
   note: string;
-  rows: { label: string; bytes: string; tail: string }[]; // tail: the share ("28%"), "not measured (…)", or ""
+  visits: number[]; // one column each; a single column when one visit, or all the same
+  rows: { label: string; values: string[]; stats: [min: number, median: number, max: number] | null; tail: string }[];
   none: string | null; // the line when no visit recorded a prompt
-  unreadable: string[]; // "prompt sizes ? — marked visit <n>: <why>"
+  lines: string[]; // a visit with none, different messages, or unreadable sizes
 }
 
-// Each message's bytes and its share of the measured total (none when the total is 0), then the
-// total, labelled with how many were measured when not all were.
-function promptView({ visit, messages, unreadable, none }: PromptBlock): PromptView {
-  const view = { heading: null, note: SIZES_NOTE, rows: [], none: none ? NO_SIZES : null, unreadable: unreadable.map((u) => `prompt sizes ? — ${u}`) };
-  if (none || visit === null) return view;
-  const measured = messages.filter((m) => m.bytes !== null).map((m) => m.bytes!);
-  const total = measured.reduce((a, b) => a + b, 0);
-  const share = (bytes: number) => (total > 0 ? `${Math.round((bytes / total) * 100)}%` : "");
+const listed = (visits: number[]) => visits.join(", ");
+
+// One column: each message's bytes and its share of the measured total (none when the total is
+// 0), then the total, labelled with how many were measured when not all were. Several visits with
+// different sizes: a column per visit, min · median · max per row, and no share.
+function promptView({ compared, lines, none }: PromptBlock): PromptView {
+  const view: PromptView = { heading: null, note: SIZES_NOTE, visits: [], rows: [], none: none ? NO_SIZES : null, lines };
+  if (none || compared.length === 0) return view;
+  const all = compared.map((c) => c.visit);
+  const same = compared.every((c) => c.messages.every((m, i) => m.bytes === compared[0]!.messages[i]!.bytes));
+  const roles = compared[0]!.messages.map((m) => m.role);
+  if (roles.length === 0) return { ...view, heading: `prompt sizes (${all.length === 1 ? "marked visit" : "the same in marked visits"} ${listed(all)})` };
+  const totals = compared.map((c) => c.messages.reduce((a, m) => a + (m.bytes ?? 0), 0));
+
+  if (same) {
+    const { messages } = compared[0]!;
+    const measured = messages.filter((m) => m.bytes !== null).length;
+    const share = (bytes: number) => (totals[0]! > 0 ? `${Math.round((bytes / totals[0]!) * 100)}%` : "");
+    return {
+      ...view,
+      heading: all.length === 1 ? `prompt sizes (marked visit ${all[0]})` : `prompt sizes (the same in marked visits ${listed(all)})`,
+      visits: [all[0]!],
+      rows: [
+        ...messages.map((m, i) => ({ label: `${i + 1} ${m.role}`, values: [m.bytes === null ? "–" : String(m.bytes)], stats: null, tail: m.bytes === null ? "not measured (content wasn't a string)" : share(m.bytes) })),
+        { label: measured < messages.length ? `total (${measured} of ${messages.length} measured)` : "total", values: [String(totals[0])], stats: null, tail: "" },
+      ],
+    };
+  }
+
+  const stats = (values: (number | null)[]) => {
+    const got = values.filter((v): v is number => v !== null);
+    return got.length > 1 ? ([Math.min(...got), median(got)!, Math.max(...got)] as [number, number, number]) : null;
+  };
+  const anyNull = compared.some((c) => c.messages.some((m) => m.bytes === null));
   return {
     ...view,
-    heading: `prompt sizes (marked visit ${visit})`,
-    rows: messages.length === 0 ? [] : [
-      ...messages.map((m, i) => ({ label: `${i + 1} ${m.role}`, bytes: m.bytes === null ? "–" : String(m.bytes), tail: m.bytes === null ? "not measured (content wasn't a string)" : share(m.bytes) })),
-      { label: measured.length < messages.length ? `total (${measured.length} of ${messages.length} measured)` : "total", bytes: String(total), tail: "" },
+    heading: `prompt sizes (marked visits ${listed(all)})`,
+    visits: all,
+    rows: [
+      ...roles.map((role, i) => {
+        const values = compared.map((c) => c.messages[i]!.bytes);
+        const missing = compared.filter((c) => c.messages[i]!.bytes === null).map((c) => c.visit);
+        const tail = missing.length === 0 ? "" : missing.length === all.length ? "not measured (content wasn't a string)" : `not measured in marked visit${missing.length > 1 ? "s" : ""} ${listed(missing)} (content wasn't a string)`;
+        return { label: `${i + 1} ${role}`, values: values.map((v) => (v === null ? "–" : String(v))), stats: stats(values), tail };
+      }),
+      { label: anyNull ? "total (measured only)" : "total", values: totals.map(String), stats: stats(totals), tail: "" },
     ],
   };
 }
 
-function promptLines({ heading, note, rows, none, unreadable }: PromptView): string[] {
+function promptLines({ heading, note, visits, rows, none, lines }: PromptView): string[] {
   if (none) return [`  ${none}`];
+  const row = ({ label, values, stats, tail }: PromptView["rows"][number]) =>
+    `    ${label.padEnd(LABEL_WIDTH)}${values.map((v) => v.padStart(6)).join("")}${stats ? `   min ${stats[0]} · median ${stats[1]} · max ${stats[2]}` : ""} bytes${tail ? `   ${tail}` : ""}`;
   return [
-    ...(heading ? [`  ${heading} — ${note}`, ...(rows.length ? rows.map((r) => `    ${r.label.padEnd(LABEL_WIDTH)}${r.bytes.padStart(6)} bytes${r.tail ? `   ${r.tail}` : ""}`) : ["    no messages"])] : []),
-    ...unreadable.map((u) => `  ${u}`),
+    ...(heading ? [
+      `  ${heading} — ${note}`,
+      ...(visits.length > 1 ? [`    ${"marked visit".padEnd(LABEL_WIDTH)}${visits.map((v) => String(v).padStart(6)).join("")}`] : []),
+      ...(rows.length ? rows.map(row) : ["    no messages"]),
+    ] : []),
+    ...lines.map((l) => `  ${l}`),
   ];
 }
 

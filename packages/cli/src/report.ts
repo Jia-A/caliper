@@ -393,19 +393,26 @@ export function serverSection({ lines, block }: ServerReport): string {
   </section>`;
 }
 
-// Prompt sizes: the terminal's rows as a table (bytes, then the share or why there's no size),
-// or the line saying none were recorded; a line per visit whose sizes couldn't be read.
-function promptHtml({ heading, note, rows, none, unreadable }: PromptView): string {
-  const lines = [...(none ? [none] : []), ...unreadable];
+// Prompt sizes: the terminal's rows as a table (bytes, then the share or why there's no size; with
+// several visits that differ, a column per visit and min, median, max), or the line saying none
+// were recorded; a line per visit that isn't compared.
+function promptHtml({ heading, note, visits, rows, none, lines }: PromptView): string {
+  const many = visits.length > 1;
+  const head = many
+    ? `${visits.map((v) => `<th scope="col" class="num">visit ${v} (bytes)</th>`).join("")}<th scope="col" class="num">min</th><th scope="col" class="num">median</th><th scope="col" class="num">max</th><th scope="col">note</th>`
+    : `<th scope="col" class="num">bytes</th><th scope="col">share</th>`;
+  const cells = ({ values, stats, tail }: PromptView["rows"][number]) =>
+    [...values, ...(many ? (stats ?? ["", "", ""]).map(String) : [])].map((v) => `<td class="num">${esc(v)}</td>`).join("") + `<td>${esc(tail)}</td>`;
+  const notes = [...(none ? [none] : []), ...lines];
   return `${heading ? `<h3>${esc(heading[0]!.toUpperCase() + heading.slice(1))}</h3>
       <p class="muted">${esc(note[0]!.toUpperCase() + note.slice(1))}.</p>
       ${rows.length ? `<div class="table-wrap">
       <table>
-        <thead><tr><th scope="col">message</th><th scope="col" class="num">bytes</th><th scope="col">share</th></tr></thead>
-        <tbody>${rows.map((r) => `<tr><th scope="row">${esc(r.label)}</th><td class="num">${esc(r.bytes)}</td><td>${esc(r.tail)}</td></tr>`).join("")}</tbody>
+        <thead><tr><th scope="col">message</th>${head}</tr></thead>
+        <tbody>${rows.map((r) => `<tr><th scope="row">${esc(r.label)}</th>${cells(r)}</tr>`).join("")}</tbody>
       </table>
       </div>` : `<p>no messages</p>`}` : ""}
-      ${lines.length ? `<ul class="notes">${lines.map((l) => `<li>${esc(l)}</li>`).join("")}</ul>` : ""}`;
+      ${notes.length ? `<ul class="notes">${notes.map((l) => `<li>${esc(l)}</li>`).join("")}</ul>` : ""}`;
 }
 
 // The first hint in full (evidence, basis, things to check, disclaimer), the rest one line each.

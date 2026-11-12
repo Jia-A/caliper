@@ -350,3 +350,65 @@ test("HTML: none recorded, no messages, and an unreadable prompt each get their 
   assert.ok(bad.includes("prompt sizes ? — marked visit 1: the prompt field isn't { messages: [...] }"), bad);
   assert.ok(!bad.includes("<h3>Prompt sizes"), bad);
 });
+
+// Prompt sizes over several marked visits.
+const sizes = (...bytes: (number | null)[]) => ({ messages: bytes.map((b, i) => ({ role: i === 0 ? "system" : "user", bytes: b })) });
+
+test("prompt sizes, several visits, the same in each: one table, and the heading says so", () => {
+  const p = sizes(2310, 5874);
+  const block = text(visits({ marks: QUILL_MARKS, prompt: p }, { marks: QUILL_MARKS, prompt: p }, { marks: QUILL_MARKS, prompt: p }), 3);
+  assert.deepEqual(promptLines(block), [
+    "  prompt sizes (the same in marked visits 1, 2, 3) — UTF-8 bytes of each message's text as your app passed it to run.prompt(); not tokens",
+    "    1 system                          2310 bytes   28%",
+    "    2 user                            5874 bytes   72%",
+    "    total                             8184 bytes",
+  ]);
+});
+
+test("prompt sizes, several visits, same messages but different sizes: a column per visit, then min · median · max", () => {
+  const block = text(visits({ marks: QUILL_MARKS, prompt: sizes(2310, 5874) }, { marks: QUILL_MARKS, prompt: sizes(2310, 5900) }, { marks: QUILL_MARKS, prompt: sizes(2310, 5850) }), 3);
+  const at = lines(block).findIndex((l) => l.startsWith("  prompt sizes"));
+  assert.deepEqual(lines(block).slice(at, at + 5), [
+    "  prompt sizes (marked visits 1, 2, 3) — UTF-8 bytes of each message's text as your app passed it to run.prompt(); not tokens",
+    "    marked visit                         1     2     3",
+    "    1 system                          2310  2310  2310   min 2310 · median 2310 · max 2310 bytes",
+    "    2 user                            5874  5900  5850   min 5850 · median 5874 · max 5900 bytes",
+    "    total                             8184  8210  8160   min 8160 · median 8184 · max 8210 bytes",
+  ]);
+});
+
+test("prompt sizes, several visits: a message not measured in some shows –, and the total says measured only", () => {
+  const block = text(visits({ marks: QUILL_MARKS, prompt: sizes(100, 300) }, { marks: QUILL_MARKS, prompt: sizes(100, null) }), 2);
+  const at = lines(block).findIndex((l) => l.startsWith("  prompt sizes"));
+  assert.deepEqual(lines(block).slice(at + 2, at + 5), [
+    "    1 system                           100   100   min 100 · median 100 · max 100 bytes",
+    "    2 user                             300     – bytes   not measured in marked visit 2 (content wasn't a string)",
+    "    total (measured only)              400   100   min 100 · median 250 · max 400 bytes",
+  ]);
+});
+
+test("prompt sizes, several visits with different messages: the first visit's table, and a line per visit that differs", () => {
+  const other = { messages: [{ role: "system", bytes: 2310 }, { role: "user", bytes: 10 }, { role: "user", bytes: 20 }] };
+  const block = text(visits({ marks: QUILL_MARKS, prompt: sizes(2310, 5874) }, { marks: QUILL_MARKS, prompt: other }), 2);
+  assert.deepEqual(promptLines(block), [
+    "  prompt sizes (marked visit 1) — UTF-8 bytes of each message's text as your app passed it to run.prompt(); not tokens",
+    "    1 system                          2310 bytes   28%",
+    "    2 user                            5874 bytes   72%",
+    "    total                             8184 bytes",
+    "  prompt sizes: marked visit 2 sent different messages (3: system, user, user), so it isn't compared",
+  ]);
+});
+
+test("prompt sizes, several visits, one without any: compared over the others, and a line names it", () => {
+  const block = text(visits({ marks: QUILL_MARKS, prompt: sizes(1, 2) }, { marks: QUILL_MARKS }, { marks: QUILL_MARKS, prompt: sizes(1, 2) }), 3);
+  assert.equal(promptLines(block)[0], "  prompt sizes (the same in marked visits 1, 3) — UTF-8 bytes of each message's text as your app passed it to run.prompt(); not tokens");
+  assert.ok(lines(block).includes("  prompt sizes: none recorded in marked visit 2"), block);
+});
+
+test("HTML: prompt sizes over several visits that differ: a column per visit, then min, median, max", () => {
+  const html = serverSection(report(visits({ marks: QUILL_MARKS, prompt: sizes(2310, 5874) }, { marks: QUILL_MARKS, prompt: sizes(2310, 5900) }), 2));
+  assert.ok(html.includes("<h3>Prompt sizes (marked visits 1, 2)</h3>"), html);
+  const rows = htmlRows(html);
+  assert.deepEqual(rows.get("2 user"), ["5874", "5900", "5874", "5887", "5900", ""]);
+  assert.deepEqual(rows.get("total"), ["8184", "8210", "8184", "8197", "8210", ""]);
+});
