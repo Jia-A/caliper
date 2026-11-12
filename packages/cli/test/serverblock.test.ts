@@ -412,3 +412,84 @@ test("HTML: prompt sizes over several visits that differ: a column per visit, th
   assert.deepEqual(rows.get("2 user"), ["5874", "5900", "5874", "5887", "5900", ""]);
   assert.deepEqual(rows.get("total"), ["8184", "8210", "8184", "8197", "8210", ""]);
 });
+
+// Named parts under a message (caliper-timings 0.4.0): name, bytes, found.
+const withParts = (parts: unknown, userBytes = 3328) => ({ messages: [{ role: "system", bytes: 2499 }, { role: "user", bytes: userBytes, parts }] });
+const QUILL_PARTS = [
+  { name: "author", bytes: 11, found: true },
+  { name: "title", bytes: 21, found: true },
+  { name: "code_snippet", bytes: 56, found: true },
+  { name: "article", bytes: 3232, found: true },
+];
+
+test("parts: one row per part under its message, then the rest of the message", () => {
+  const all = lines(text(visits({ marks: QUILL_MARKS, prompt: withParts(QUILL_PARTS) }), 1));
+  const at = all.indexOf("    1 system                          2499 bytes   43%");
+  assert.deepEqual(all.slice(at, at + 8), [
+    "    1 system                          2499 bytes   43%",
+    "    2 user                            3328 bytes   57%",
+    "        author                          11 bytes",
+    "        title                           21 bytes",
+    "        code_snippet                    56 bytes",
+    "        article                       3232 bytes",
+    "        rest of message 2                8 bytes",
+    "    total                             5827 bytes",
+  ]);
+});
+
+test("parts: not found, not checked, or not measured each say so, and then there's no rest", () => {
+  const block = text(visits({ marks: QUILL_MARKS, prompt: withParts([
+    { name: "title", bytes: 21, found: true },
+    { name: "summary", bytes: 40, found: false },
+  ]) }), 1);
+  assert.ok(lines(block).includes("        summary                          – bytes   not found in message 2 (the text given isn't in it)"), block);
+  assert.ok(lines(block).includes("        no rest of message 2: not every part was found in it"), block);
+  const unchecked = text(visits({ marks: QUILL_MARKS, prompt: withParts([{ name: "title", bytes: 21, found: null }, { name: "article", bytes: null, found: null }]) }), 1);
+  assert.ok(lines(unchecked).includes("        title                           21 bytes   not checked (the server couldn't compare it with the message)"), unchecked);
+  assert.ok(lines(unchecked).includes("        article                          – bytes   not measured (its text wasn't a string)"), unchecked);
+  assert.ok(lines(unchecked).includes("        no rest of message 2: not every part was found in it"), unchecked);
+});
+
+test("parts that add up to more than the message: they overlap or repeat, and no rest is shown", () => {
+  const block = text(visits({ marks: QUILL_MARKS, prompt: withParts([{ name: "a", bytes: 30, found: true }, { name: "b", bytes: 30, found: true }], 50) }), 1);
+  assert.ok(lines(block).includes("        no rest of message 2: the parts add up to 60 bytes, more than the message (they overlap or repeat)"), block);
+});
+
+test("parts: a malformed parts field makes only that message's parts unreadable; never shows a name that could be text", () => {
+  const cases: [unknown, string][] = [
+    ["x", "parts isn't a list"],
+    [[{ name: "You are secret text", bytes: 1, found: true }], "part 1's name isn't a lowercase name of up to 32 letters or _ (or \"?\")"],
+    [[{ name: "a", bytes: -1, found: true }], "part 1's bytes isn't a whole number ≥ 0 or null"],
+    [[{ name: "a", bytes: 1, found: "yes" }], "part 1's found isn't true, false or null"],
+    [[null], "part 1 isn't { name, bytes, found }"],
+  ];
+  for (const [parts, why] of cases) {
+    const block = text(visits({ marks: QUILL_MARKS, prompt: withParts(parts) }), 1);
+    assert.ok(lines(block).includes("    2 user                            3328 bytes   57%"), block);
+    assert.ok(lines(block).includes(`        parts ? — ${why}`), `${JSON.stringify(parts)}\n${block}`);
+    assert.ok(!block.includes("secret text"), block);
+  }
+});
+
+test("parts, several visits the same: one table with the parts; different parts sizes: a column per visit", () => {
+  const p = withParts(QUILL_PARTS);
+  const same = text(visits({ marks: QUILL_MARKS, prompt: p }, { marks: QUILL_MARKS, prompt: p }), 2);
+  assert.ok(lines(same).includes("        article                       3232 bytes"), same);
+  const other = withParts([...QUILL_PARTS.slice(0, 3), { name: "article", bytes: 3000, found: true }], 3096);
+  const diff = text(visits({ marks: QUILL_MARKS, prompt: p }, { marks: QUILL_MARKS, prompt: other }), 2);
+  assert.ok(lines(diff).includes("        article                       3232  3000   min 3000 · median 3116 · max 3232 bytes"), diff);
+  assert.ok(lines(diff).includes("        rest of message 2                8     8   min 8 · median 8 · max 8 bytes"), diff);
+});
+
+test("parts: visits whose parts have different names aren't compared", () => {
+  const other = withParts([{ name: "body", bytes: 3320, found: true }]);
+  const block = text(visits({ marks: QUILL_MARKS, prompt: withParts(QUILL_PARTS) }, { marks: QUILL_MARKS, prompt: other }), 2);
+  assert.ok(lines(block).includes("  prompt sizes: marked visit 2 named different parts, so it isn't compared"), block);
+});
+
+test("HTML: parts rows under their message, with the terminal's cells", () => {
+  const html = serverSection(report(visits({ marks: QUILL_MARKS, prompt: withParts([{ name: "title", bytes: 21, found: true }, { name: "summary", bytes: 40, found: false }]) }), 1));
+  assert.ok(html.includes('<tr class="part"><th scope="row">title</th><td class="num">21</td><td></td></tr>'), html);
+  assert.ok(html.includes(`<tr class="part"><th scope="row">summary</th><td class="num">–</td><td>not found in message 2 (the text given isn't in it)</td></tr>`), html);
+  assert.ok(html.includes('<tr class="part note"><th scope="row" colspan="3">no rest of message 2: not every part was found in it</th></tr>'), html);
+});

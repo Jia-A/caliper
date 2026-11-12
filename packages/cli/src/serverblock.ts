@@ -38,6 +38,29 @@ const NO_SIZES = "prompt sizes: none recorded (needs caliper-timings 0.2.0 or la
 export interface PromptSize {
   role: string;
   bytes: number | null;
+  parts?: PromptPart[] | { unreadable: string }; // the app's named parts (caliper-timings 0.4.0)
+}
+
+/** A named part of a message: its size, and whether the server found its text inside the message. */
+export interface PromptPart {
+  name: string;
+  bytes: number | null;
+  found: boolean | null;
+}
+
+// A message's parts, or why they can't be shown. Only that message's parts: its size stands.
+function parseParts(parts: unknown): PromptPart[] | { unreadable: string } {
+  if (!Array.isArray(parts)) return { unreadable: "parts isn't a list" };
+  const out: PromptPart[] = [];
+  for (const [j, p] of parts.entries()) {
+    if (typeof p !== "object" || p === null) return { unreadable: `part ${j + 1} isn't { name, bytes, found }` };
+    const { name, bytes, found } = p as { name?: unknown; bytes?: unknown; found?: unknown };
+    if (typeof name !== "string" || !ROLE.test(name)) return { unreadable: `part ${j + 1}'s name isn't a lowercase name of up to 32 letters or _ (or "?")` };
+    if (bytes !== null && !(Number.isInteger(bytes) && (bytes as number) >= 0)) return { unreadable: `part ${j + 1}'s bytes isn't a whole number ≥ 0 or null` };
+    if (found !== true && found !== false && found !== null) return { unreadable: `part ${j + 1}'s found isn't true, false or null` };
+    out.push({ name, bytes: bytes as number | null, found });
+  }
+  return out;
 }
 
 // The record's prompt sizes, or why they can't be shown. Never fails the record: the timings stand.
@@ -47,10 +70,10 @@ function parsePrompt(prompt: unknown): PromptSize[] | { unreadable: string } {
   const sizes: PromptSize[] = [];
   for (const [i, m] of messages.entries()) {
     if (typeof m !== "object" || m === null) return { unreadable: `message ${i + 1} isn't { role, bytes }` };
-    const { role, bytes } = m as { role?: unknown; bytes?: unknown };
+    const { role, bytes, parts } = m as { role?: unknown; bytes?: unknown; parts?: unknown };
     if (typeof role !== "string" || !ROLE.test(role)) return { unreadable: `message ${i + 1}'s role isn't a lowercase name of up to 32 letters or _ (or "?"), so the prompt isn't shown` };
     if (bytes !== null && !(Number.isInteger(bytes) && (bytes as number) >= 0)) return { unreadable: `message ${i + 1}'s bytes isn't a whole number ≥ 0 or null` };
-    sizes.push({ role, bytes: bytes as number | null });
+    sizes.push({ role, bytes: bytes as number | null, ...(parts !== undefined && { parts: parseParts(parts) }) });
   }
   return sizes;
 }
@@ -213,7 +236,9 @@ export function serverBlock(visits: { visit: number; record: ServerRecord }[], n
 
 function promptBlock(visits: { visit: number; record: ServerRecord }[]): PromptBlock {
   const recorded = visits.flatMap(({ visit, record: { prompt } }) => (Array.isArray(prompt) ? [{ visit, messages: prompt }] : []));
-  const shape = (m: PromptSize[]) => m.map((x) => x.role).join(" ");
+  const roles = (m: PromptSize[]) => m.map((x) => x.role).join(" ");
+  const partNames = (m: PromptSize) => (m.parts === undefined ? "" : Array.isArray(m.parts) ? `[${m.parts.map((p) => p.name).join(" ")}]` : "[?]");
+  const shape = (m: PromptSize[]) => m.map((x) => `${x.role}${partNames(x)}`).join(" ");
   const first = recorded[0];
   const compared = recorded.filter((r) => shape(r.messages) === shape(first!.messages));
   const anyRecorded = visits.some((v) => v.record.prompt !== null);
@@ -223,10 +248,20 @@ function promptBlock(visits: { visit: number; record: ServerRecord }[]): PromptB
       if (prompt === null) return anyRecorded ? [`prompt sizes: none recorded in marked visit ${visit}`] : [];
       if (!Array.isArray(prompt)) return [`prompt sizes ? — marked visit ${visit}: ${prompt.unreadable}`];
       if (compared.some((c) => c.visit === visit)) return [];
+      if (roles(prompt) === roles(first!.messages)) return [`prompt sizes: marked visit ${visit} named different parts, so it isn't compared`];
       return [`prompt sizes: marked visit ${visit} sent different messages (${prompt.length}: ${prompt.map((m) => m.role).join(", ")}), so it isn't compared`];
     }),
     none: !anyRecorded,
   };
+}
+
+/** One row of the prompt sizes: a message (or the total), one of its named parts, or a note under them. */
+export interface PromptRow {
+  kind: "message" | "part" | "note";
+  label: string; // for a note, the whole line
+  values: string[]; // one per column: bytes, or "–"
+  stats: [min: number, median: number, max: number] | null;
+  tail: string; // the share, or why there's no size
 }
 
 /** Prompt sizes as shown, shared by the terminal and the HTML report. */
@@ -234,65 +269,112 @@ export interface PromptView {
   heading: string | null; // "prompt sizes (marked visit 1)", null when no visit's sizes can be shown
   note: string;
   visits: number[]; // one column each; a single column when one visit, or all the same
-  rows: { label: string; values: string[]; stats: [min: number, median: number, max: number] | null; tail: string }[];
+  rows: PromptRow[];
   none: string | null; // the line when no visit recorded a prompt
-  lines: string[]; // a visit with none, different messages, or unreadable sizes
+  lines: string[]; // a visit with none, different messages or parts, or unreadable sizes
 }
 
 const listed = (visits: number[]) => visits.join(", ");
+const inVisits = (visits: number[]) => `in marked visit${visits.length > 1 ? "s" : ""} ${listed(visits)}`;
+
+const NOT_FOUND = (n: number) => `not found in message ${n} (the text given isn't in it)`;
+const NOT_MEASURED_PART = "not measured (its text wasn't a string)";
+const NOT_CHECKED = "not checked (the server couldn't compare it with the message)";
 
 // One column: each message's bytes and its share of the measured total (none when the total is
-// 0), then the total, labelled with how many were measured when not all were. Several visits with
-// different sizes: a column per visit, min · median · max per row, and no share.
+// 0), its named parts under it, then the total, labelled with how many were measured when not all
+// were. Several visits with different sizes: a column per visit, min · median · max per row, and
+// no share.
 function promptView({ compared, lines, none }: PromptBlock): PromptView {
   const view: PromptView = { heading: null, note: SIZES_NOTE, visits: [], rows: [], none: none ? NO_SIZES : null, lines };
   if (none || compared.length === 0) return view;
   const all = compared.map((c) => c.visit);
-  const same = compared.every((c) => c.messages.every((m, i) => m.bytes === compared[0]!.messages[i]!.bytes));
+  const sameParts = (a: PromptSize["parts"], b: PromptSize["parts"]) => JSON.stringify(a) === JSON.stringify(b);
+  const same = compared.every((c) => c.messages.every((m, i) => m.bytes === compared[0]!.messages[i]!.bytes && sameParts(m.parts, compared[0]!.messages[i]!.parts)));
+  const shown = same ? [compared[0]!] : compared; // the columns
+  const many = shown.length > 1;
   const roles = compared[0]!.messages.map((m) => m.role);
-  if (roles.length === 0) return { ...view, heading: `prompt sizes (${all.length === 1 ? "marked visit" : "the same in marked visits"} ${listed(all)})` };
-  const totals = compared.map((c) => c.messages.reduce((a, m) => a + (m.bytes ?? 0), 0));
-
-  if (same) {
-    const { messages } = compared[0]!;
-    const measured = messages.filter((m) => m.bytes !== null).length;
-    const share = (bytes: number) => (totals[0]! > 0 ? `${Math.round((bytes / totals[0]!) * 100)}%` : "");
-    return {
-      ...view,
-      heading: all.length === 1 ? `prompt sizes (marked visit ${all[0]})` : `prompt sizes (the same in marked visits ${listed(all)})`,
-      visits: [all[0]!],
-      rows: [
-        ...messages.map((m, i) => ({ label: `${i + 1} ${m.role}`, values: [m.bytes === null ? "–" : String(m.bytes)], stats: null, tail: m.bytes === null ? "not measured (content wasn't a string)" : share(m.bytes) })),
-        { label: measured < messages.length ? `total (${measured} of ${messages.length} measured)` : "total", values: [String(totals[0])], stats: null, tail: "" },
-      ],
-    };
-  }
-
+  const heading = !many ? (all.length === 1 ? `prompt sizes (marked visit ${all[0]})` : `prompt sizes (the same in marked visits ${listed(all)})`) : `prompt sizes (marked visits ${listed(all)})`;
+  if (roles.length === 0) return { ...view, heading };
+  const totals = shown.map((c) => c.messages.reduce((a, m) => a + (m.bytes ?? 0), 0));
   const stats = (values: (number | null)[]) => {
     const got = values.filter((v): v is number => v !== null);
-    return got.length > 1 ? ([Math.min(...got), median(got)!, Math.max(...got)] as [number, number, number]) : null;
+    return many && got.length > 1 ? ([Math.min(...got), median(got)!, Math.max(...got)] as [number, number, number]) : null;
   };
-  const anyNull = compared.some((c) => c.messages.some((m) => m.bytes === null));
+  const cells = (values: (number | null)[]) => values.map((v) => (v === null ? "–" : String(v)));
+  // A tail per column's status: the same reason in every column, or each reason with its visits.
+  const tailOf = (statuses: string[]) => {
+    const reasons = [...new Set(statuses.filter(Boolean))];
+    if (!many || reasons.length === 0) return reasons[0] ?? "";
+    // "not found in message 2 in marked visit 3 (the text given isn't in it)": the visits before the reason in brackets.
+    const where = (r: string, w: string) => (r.includes(" (") ? `${r.slice(0, r.indexOf(" ("))} ${w}${r.slice(r.indexOf(" ("))}` : `${r} ${w}`);
+    return reasons.map((r) => (statuses.every((s) => s === r) ? r : where(r, inVisits(shown.filter((_, k) => statuses[k] === r).map((c) => c.visit))))).join("; ");
+  };
+  const share = (bytes: number) => (!many && totals[0]! > 0 ? `${Math.round((bytes / totals[0]!) * 100)}%` : "");
+  const note = (label: string): PromptRow => ({ kind: "note", label, values: [], stats: null, tail: "" });
+
+  const partRows = (i: number): PromptRow[] => {
+    const n = i + 1;
+    const parts = shown.map((c) => c.messages[i]!.parts);
+    if (parts[0] === undefined) return [];
+    if (!Array.isArray(parts[0])) return [note(`parts ? — ${parts[0].unreadable}`)];
+    const rows: PromptRow[] = parts[0].map((p, j) => {
+      const each = parts.map((ps) => (ps as PromptPart[])[j]!);
+      const values = each.map((q) => (q.found === false || q.bytes === null ? null : q.bytes));
+      const statuses = each.map((q) => (q.found === false ? NOT_FOUND(n) : q.bytes === null ? NOT_MEASURED_PART : q.found === null ? NOT_CHECKED : ""));
+      return { kind: "part", label: p.name, values: cells(values), stats: stats(values), tail: tailOf(statuses) };
+    });
+    // The rest of the message: only when every part was found and they fit inside it.
+    const rests = shown.map((c) => {
+      const m = c.messages[i]!;
+      const ps = m.parts as PromptPart[];
+      if (!ps.every((q) => q.found === true && q.bytes !== null)) return { why: "not every part was found in it" };
+      if (m.bytes === null) return { why: "the message's size wasn't measured" };
+      const sum = ps.reduce((a, q) => a + q.bytes!, 0);
+      return sum > m.bytes ? { why: `the parts add up to ${sum} bytes, more than the message (they overlap or repeat)` } : { rest: m.bytes - sum };
+    });
+    if (rests.every((r) => "rest" in r)) {
+      const values = rests.map((r) => (r as { rest: number }).rest);
+      rows.push({ kind: "part", label: `rest of message ${n}`, values: cells(values), stats: stats(values), tail: "" });
+    } else {
+      const whys = [...new Set(rests.flatMap((r) => ("why" in r ? [r.why] : [])))];
+      const where = many ? ` ${inVisits(shown.filter((_, k) => "why" in rests[k]!).map((c) => c.visit))}` : "";
+      rows.push(note(`no rest of message ${n}${where}: ${whys.join("; ")}`));
+    }
+    return rows;
+  };
+
+  const anyNull = shown.some((c) => c.messages.some((m) => m.bytes === null));
+  const measured = shown[0]!.messages.filter((m) => m.bytes !== null).length;
   return {
     ...view,
-    heading: `prompt sizes (marked visits ${listed(all)})`,
-    visits: all,
+    heading,
+    visits: shown.map((c) => c.visit),
     rows: [
-      ...roles.map((role, i) => {
-        const values = compared.map((c) => c.messages[i]!.bytes);
-        const missing = compared.filter((c) => c.messages[i]!.bytes === null).map((c) => c.visit);
-        const tail = missing.length === 0 ? "" : missing.length === all.length ? "not measured (content wasn't a string)" : `not measured in marked visit${missing.length > 1 ? "s" : ""} ${listed(missing)} (content wasn't a string)`;
-        return { label: `${i + 1} ${role}`, values: values.map((v) => (v === null ? "–" : String(v))), stats: stats(values), tail };
+      ...roles.flatMap((role, i) => {
+        const values = shown.map((c) => c.messages[i]!.bytes);
+        const statuses = values.map((v) => (v === null ? "not measured (content wasn't a string)" : ""));
+        const message: PromptRow = { kind: "message", label: `${i + 1} ${role}`, values: cells(values), stats: stats(values), tail: many ? tailOf(statuses) : values[0] === null ? statuses[0]! : share(values[0]!) };
+        return [message, ...partRows(i)];
       }),
-      { label: anyNull ? "total (measured only)" : "total", values: totals.map(String), stats: stats(totals), tail: "" },
+      {
+        kind: "message",
+        label: many ? (anyNull ? "total (measured only)" : "total") : measured < roles.length ? `total (${measured} of ${roles.length} measured)` : "total",
+        values: totals.map(String),
+        stats: stats(totals),
+        tail: "",
+      },
     ],
   };
 }
 
 function promptLines({ heading, note, visits, rows, none, lines }: PromptView): string[] {
   if (none) return [`  ${none}`];
-  const row = ({ label, values, stats, tail }: PromptView["rows"][number]) =>
-    `    ${label.padEnd(LABEL_WIDTH)}${values.map((v) => v.padStart(6)).join("")}${stats ? `   min ${stats[0]} · median ${stats[1]} · max ${stats[2]}` : ""} bytes${tail ? `   ${tail}` : ""}`;
+  const row = ({ kind, label, values, stats, tail }: PromptRow) => {
+    if (kind === "note") return `        ${label}`;
+    const head = kind === "part" ? `        ${label.padEnd(LABEL_WIDTH - 4)}` : `    ${label.padEnd(LABEL_WIDTH)}`;
+    return `${head}${values.map((v) => v.padStart(6)).join("")}${stats ? `   min ${stats[0]} · median ${stats[1]} · max ${stats[2]}` : ""} bytes${tail ? `   ${tail}` : ""}`;
+  };
   return [
     ...(heading ? [
       `  ${heading} — ${note}`,

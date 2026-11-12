@@ -248,6 +248,19 @@ After the timed runs, Caliper builds a match key from the AI request each run pi
       total                             8184 bytes
   ```
 
+  **Named parts.** When the server also recorded named parts of a message (caliper-timings 0.4.0's `run.prompt(messages, { parts })`), each part is a row under its message, then what's left of the message:
+
+  ```txt
+      2 user                            3328 bytes   57%
+          author                          11 bytes
+          title                           21 bytes
+          code_snippet                    56 bytes
+          article                       3232 bytes
+          rest of message 2                8 bytes
+  ```
+
+  The rest is shown only when every part was found in the message and they fit inside it. Otherwise a line says why: `no rest of message 2: not every part was found in it`, or `the parts add up to 60 bytes, more than the message (they overlap or repeat)`. A part the server didn't find in its message shows `– bytes   not found in message 2 (the text given isn't in it)`; one whose text wasn't a string, `not measured`; one it couldn't compare, its bytes and `not checked`. A `parts` field Caliper can't read, or with a name that isn't a lowercase name, shows `parts ? — <why>` under that message only. Visits whose parts have different names aren't compared (`marked visit 2 named different parts`). Tested with `npm run test:serverblock` and end to end with `npm run test:prompt`, where a marker in a part's text and in its name never reaches the terminal or the HTML report; breaking both name guards makes that test fail.
+
   These are the sizes your app reported, not tokens and not the size of the request to the model. The text itself is never recorded or shown. A message the server couldn't measure (content that isn't a string) shows `–` and "not measured", and the total counts only the measured ones (`total (2 of 3 measured)`). With several marked visits, the visits with the same messages (count and roles) as the first one that recorded any are compared. If their sizes are the same, there's one table and the heading says so (`prompt sizes (the same in marked visits 1, 2, 3)`). If not, there's a column per visit, then min · median · max, and no share. A visit that recorded none, sent different messages, or sent sizes Caliper can't read gets its own line (`prompt sizes: marked visit 2 sent different messages (3: system, user, user), so it isn't compared`). Without any, one line says so: `prompt sizes: none recorded (needs caliper-timings 0.2.0 or later, and run.prompt(messages) before the model call)`. A `prompt` field Caliper can't read, including a role that isn't a lowercase name (it could be text), gets `prompt sizes ? — marked visit <i>: <why>`, and that visit's timings are still shown. A role of up to 32 lowercase letters or `_` is shown as it is, so if your app puts text there, that text is shown; anything else isn't. The HTML report shows the same rows as a table under the server bar and again in Details under the marks and spans, or the same "none recorded" or `?` line. Tested with fixture records (a fake wrapper) and end to end with caliper-timings itself (its source) on a local `node:http` app (`npm run test:prompt`): a marker put in the system text, in a role, in a list of parts and in an extra key shows up only as sizes, and is nowhere in the terminal output or the HTML report. Breaking both guards (the wrapper keeping a role that's text, and Caliper showing any role) makes that test fail.
 - **Their timing isn't reported.** Marked visits aren't timed runs and are left out of the medians, because they run with request interception on, which Playwright documents as turning off the HTTP cache.
 - **Requests made during page load are never stamped or counted.** Interception starts just before the click and ends with the run.

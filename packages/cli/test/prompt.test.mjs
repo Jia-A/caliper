@@ -13,7 +13,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { createTimings, MemoryStore } from "../../timings/src/node.ts";
-import { LEAKY_MESSAGES, SECRET } from "../../timings/test/leak.ts";
+import { LEAKY_MESSAGES, LEAKY_PARTS, SECRET } from "../../timings/test/leak.ts";
 
 const execFileAsync = promisify(execFile);
 const cli = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
@@ -45,7 +45,7 @@ const server = createServer(async (req, res) => {
     run?.mark("dbStart");
     await sleep(20);
     run?.mark("dbEnd");
-    run?.prompt(LEAKY_MESSAGES());
+    run?.prompt(LEAKY_MESSAGES(), { parts: LEAKY_PARTS() });
     run?.mark("modelCallSent");
     await sleep(100);
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
@@ -85,24 +85,34 @@ try {
   const at = lines.indexOf("  prompt sizes (the same in marked visits 1, 2) — UTF-8 bytes of each message's text as your app passed it to run.prompt(); not tokens");
   // LEAKY_MESSAGES: 42 bytes of system text, 25 bytes under a role that's really text, a list of
   // parts (not measured), 13 bytes of history, and the marker three times (72 bytes).
+  // Parts: the system message as intro + marker (adding up to it exactly), and in message 5 a
+  // part named with the marker (shown as "?") and one whose text isn't in it.
   const want = [
     "    1 system                            42 bytes   28%",
+    "        intro                           18 bytes",
+    "        marker                          24 bytes",
+    "        rest of message 1                0 bytes",
     "    2 ?                                 25 bytes   16%",
     "    3 user                               – bytes   not measured (content wasn't a string)",
     "    4 assistant                         13 bytes   9%",
     "    5 user                              72 bytes   47%",
+    "        ?                               24 bytes",
+    "        ghost                            – bytes   not found in message 5 (the text given isn't in it)",
+    "        no rest of message 5: not every part was found in it",
     "    total (4 of 5 measured)            152 bytes",
   ];
 
   check(out.code === 0, `exits 0 (got ${out.code})`);
   check(at !== -1, "prints the prompt sizes heading: the same in both marked visits");
-  check(JSON.stringify(lines.slice(at + 1, at + 7)) === JSON.stringify(want),
-    `the rows: system, ? (a role that was text), user not measured, assistant, user, total of 4 measured (got:\n${lines.slice(at + 1, at + 7).join("\n")})`);
+  check(JSON.stringify(lines.slice(at + 1, at + 1 + want.length)) === JSON.stringify(want),
+    `the rows: system, ? (a role that was text), user not measured, assistant, user, total of 4 measured (got:\n${lines.slice(at + 1, at + 1 + want.length).join("\n")})`);
   check(!out.stdout.includes(SECRET), "the marker isn't in the terminal output");
   check(!out.stderr.includes(SECRET), "the marker isn't in stderr");
   check(html.length > 0, "the report was written");
   check(html.includes("<h3>Prompt sizes (the same in marked visits 1, 2)</h3>") && html.includes('<tr><th scope="row">5 user</th><td class="num">72</td><td>47%</td></tr>'),
     "the HTML report has the prompt sizes table, with the terminal's numbers");
+  check(html.includes(`<tr class="part"><th scope="row">ghost</th><td class="num">–</td><td>not found in message 5 (the text given isn't in it)</td></tr>`),
+    "the HTML report has the parts, with the not-found one");
   check(!html.includes(SECRET), "the marker isn't in the HTML report");
   if (failed) console.log(`${out.stdout}\n${out.stderr}`.replace(/^/gm, "     | "));
 } finally {

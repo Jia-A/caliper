@@ -10,3 +10,12 @@ export const LEAKY_MESSAGES = () => [
   { role: "assistant", content: "earlier reply", [SECRET]: SECRET },
   { role: "user", content: `${SECRET}`.repeat(3) },
 ];
+
+// Named parts for LEAKY_MESSAGES: the system message split in two (so they add up to it exactly),
+// a part named with the marker, and a part whose text (carrying the marker) isn't in its message.
+export const LEAKY_PARTS = () => [
+  { message: 0, name: "intro", text: "You are a writer. " },
+  { message: 0, name: "marker", text: SECRET },
+  { message: 4, name: `named ${SECRET}`, text: SECRET },
+  { message: 4, name: "ghost", text: `${SECRET} is not here` },
+];

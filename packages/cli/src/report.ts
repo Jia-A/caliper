@@ -402,15 +402,20 @@ function promptHtml({ heading, note, visits, rows, none, lines }: PromptView): s
   const head = many
     ? `${visits.map((v) => `<th scope="col" class="num">visit ${v} (bytes)</th>`).join("")}<th scope="col" class="num">min</th><th scope="col" class="num">median</th><th scope="col" class="num">max</th><th scope="col">note</th>`
     : `<th scope="col" class="num">bytes</th><th scope="col">share</th>`;
+  const columns = 1 + visits.length + (many ? 3 : 0) + 1;
   const cells = ({ values, stats, tail }: PromptView["rows"][number]) =>
     [...values, ...(many ? (stats ?? ["", "", ""]).map(String) : [])].map((v) => `<td class="num">${esc(v)}</td>`).join("") + `<td>${esc(tail)}</td>`;
+  const row = (r: PromptView["rows"][number]) =>
+    r.kind === "note"
+      ? `<tr class="part note"><th scope="row" colspan="${columns}">${esc(r.label)}</th></tr>`
+      : `<tr${r.kind === "part" ? ' class="part"' : ""}><th scope="row">${esc(r.label)}</th>${cells(r)}</tr>`;
   const notes = [...(none ? [none] : []), ...lines];
   return `${heading ? `<h3>${esc(heading[0]!.toUpperCase() + heading.slice(1))}</h3>
       <p class="muted">${esc(note[0]!.toUpperCase() + note.slice(1))}.</p>
       ${rows.length ? `<div class="table-wrap">
       <table>
         <thead><tr><th scope="col">message</th>${head}</tr></thead>
-        <tbody>${rows.map((r) => `<tr><th scope="row">${esc(r.label)}</th>${cells(r)}</tr>`).join("")}</tbody>
+        <tbody>${rows.map(row).join("")}</tbody>
       </table>
       </div>` : `<p>no messages</p>`}` : ""}
       ${notes.length ? `<ul class="notes">${notes.map((l) => `<li>${esc(l)}</li>`).join("")}</ul>` : ""}`;
@@ -596,6 +601,8 @@ details.more h3 { font-size: 15px; margin: 24px 0 10px; }
 .axis span { position: absolute; transform: translateX(-50%); font-size: 12px; color: var(--muted); white-space: nowrap; }
 .axis span:first-child { transform: none; }
 .table-wrap + .table-wrap { margin-top: 12px; }
+tr.part th { padding-left: 1.5em; font-weight: normal; }
+tr.part.note th { color: var(--ink-2); }
 .table-wrap { overflow-x: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
 table { border-collapse: collapse; width: 100%; font-size: 13px; }
 th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--grid); vertical-align: top; }
