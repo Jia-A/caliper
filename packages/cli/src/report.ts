@@ -1,7 +1,7 @@
 // Self-contained HTML timeline for an audit: inline CSS/JS, no external requests.
 
 import type { Bar, BarPart, Hint, HintList } from "./hints.js";
-import type { ServerReport, ServerRow } from "./serverblock.js";
+import type { PromptView, ServerReport, ServerRow } from "./serverblock.js";
 import type {
   Breakdown,
   CanaryReport,
@@ -383,6 +383,7 @@ export function serverSection({ lines, block }: ServerReport): string {
       </table>
       </div>
       ${notes.length ? `<ul class="notes">${notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}
+      ${promptHtml(block.prompt)}
       ${block.problems.length ? `<h3>Problems reported by the server</h3>
       <ul class="notes">${block.problems.map((p) => `<li>${esc(p)}</li>`).join("")}</ul>` : ""}` : ""}
       <details${block ? "" : " open"}><summary>Run details</summary>
@@ -390,6 +391,21 @@ export function serverSection({ lines, block }: ServerReport): string {
       </details>
     </div>
   </section>`;
+}
+
+// Prompt sizes: the terminal's rows as a table (bytes, then the share or why there's no size),
+// or the line saying none were recorded; a line per visit whose sizes couldn't be read.
+function promptHtml({ heading, note, rows, none, unreadable }: PromptView): string {
+  const lines = [...(none ? [none] : []), ...unreadable];
+  return `${heading ? `<h3>${esc(heading[0]!.toUpperCase() + heading.slice(1))}</h3>
+      <p class="muted">${esc(note[0]!.toUpperCase() + note.slice(1))}.</p>
+      ${rows.length ? `<div class="table-wrap">
+      <table>
+        <thead><tr><th scope="col">message</th><th scope="col" class="num">bytes</th><th scope="col">share</th></tr></thead>
+        <tbody>${rows.map((r) => `<tr><th scope="row">${esc(r.label)}</th><td class="num">${esc(r.bytes)}</td><td>${esc(r.tail)}</td></tr>`).join("")}</tbody>
+      </table>
+      </div>` : `<p>no messages</p>`}` : ""}
+      ${lines.length ? `<ul class="notes">${lines.map((l) => `<li>${esc(l)}</li>`).join("")}</ul>` : ""}`;
 }
 
 // The first hint in full (evidence, basis, things to check, disclaimer), the rest one line each.

@@ -137,11 +137,11 @@ export interface ServerBlock {
   workers: string | null; // the note, when a record says runtime "workers"
   firstBytes: string | null; // what "first bytes sent" means, when a visit recorded firstChunk
   problems: string[]; // each distinct problem once, with the visits that reported it
-  prompt: PromptBlock;
+  prompt: PromptView;
 }
 
-/** Prompt sizes from the first visit that recorded them, and a "?" line per visit that sent unreadable ones. */
-export interface PromptBlock {
+// Prompt sizes from the first visit that recorded them, and a "?" line per visit that sent unreadable ones.
+interface PromptBlock {
   visit: number | null; // null when no visit's sizes could be shown
   messages: PromptSize[];
   unreadable: string[]; // "marked visit <n>: <why>"
@@ -206,7 +206,7 @@ export function serverBlock(visits: { visit: number; record: ServerRecord }[], n
     workers: visits.some((v) => v.record.runtime === "workers") ? WORKERS_NOTE : null,
     firstBytes: visits.some((v) => v.record.at.has("firstChunk")) ? FIRST_BYTES_NOTE : null,
     problems,
-    prompt: promptBlock(visits),
+    prompt: promptView(promptBlock(visits)),
   };
 }
 
@@ -220,23 +220,38 @@ function promptBlock(visits: { visit: number; record: ServerRecord }[]): PromptB
   };
 }
 
-// Each message's bytes and its share of the measured total; no share when the total is 0.
-function promptLines({ visit, messages, unreadable, none }: PromptBlock): string[] {
-  if (none) return [`  ${NO_SIZES}`];
-  const out = unreadable.map((u) => `  prompt sizes ? — ${u}`);
-  if (visit === null) return out;
+/** Prompt sizes as shown, shared by the terminal and the HTML report. */
+export interface PromptView {
+  heading: string | null; // "prompt sizes (marked visit 1)", null when no visit's sizes can be shown
+  note: string;
+  rows: { label: string; bytes: string; tail: string }[]; // tail: the share ("28%"), "not measured (…)", or ""
+  none: string | null; // the line when no visit recorded a prompt
+  unreadable: string[]; // "prompt sizes ? — marked visit <n>: <why>"
+}
+
+// Each message's bytes and its share of the measured total (none when the total is 0), then the
+// total, labelled with how many were measured when not all were.
+function promptView({ visit, messages, unreadable, none }: PromptBlock): PromptView {
+  const view = { heading: null, note: SIZES_NOTE, rows: [], none: none ? NO_SIZES : null, unreadable: unreadable.map((u) => `prompt sizes ? — ${u}`) };
+  if (none || visit === null) return view;
   const measured = messages.filter((m) => m.bytes !== null).map((m) => m.bytes!);
   const total = measured.reduce((a, b) => a + b, 0);
-  const share = (bytes: number) => (total > 0 ? `   ${Math.round((bytes / total) * 100)}%` : "");
-  const row = (label: string, bytes: number | null, tail: string) => `    ${label.padEnd(LABEL_WIDTH)}${(bytes === null ? "–" : String(bytes)).padStart(6)} bytes${tail}`;
-  const totalLabel = measured.length < messages.length ? `total (${measured.length} of ${messages.length} measured)` : "total";
+  const share = (bytes: number) => (total > 0 ? `${Math.round((bytes / total) * 100)}%` : "");
+  return {
+    ...view,
+    heading: `prompt sizes (marked visit ${visit})`,
+    rows: messages.length === 0 ? [] : [
+      ...messages.map((m, i) => ({ label: `${i + 1} ${m.role}`, bytes: m.bytes === null ? "–" : String(m.bytes), tail: m.bytes === null ? "not measured (content wasn't a string)" : share(m.bytes) })),
+      { label: measured.length < messages.length ? `total (${measured.length} of ${messages.length} measured)` : "total", bytes: String(total), tail: "" },
+    ],
+  };
+}
+
+function promptLines({ heading, note, rows, none, unreadable }: PromptView): string[] {
+  if (none) return [`  ${none}`];
   return [
-    `  prompt sizes (marked visit ${visit}) — ${SIZES_NOTE}`,
-    ...(messages.length === 0 ? ["    no messages"] : [
-      ...messages.map((m, i) => row(`${i + 1} ${m.role}`, m.bytes, m.bytes === null ? "   not measured (content wasn't a string)" : share(m.bytes))),
-      row(totalLabel, total, ""),
-    ]),
-    ...out,
+    ...(heading ? [`  ${heading} — ${note}`, ...(rows.length ? rows.map((r) => `    ${r.label.padEnd(LABEL_WIDTH)}${r.bytes.padStart(6)} bytes${r.tail ? `   ${r.tail}` : ""}`) : ["    no messages"])] : []),
+    ...unreadable.map((u) => `  ${u}`),
   ];
 }
 

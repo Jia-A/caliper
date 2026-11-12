@@ -101,6 +101,8 @@ try {
   check(!out.stdout.includes(SECRET), "the marker isn't in the terminal output");
   check(!out.stderr.includes(SECRET), "the marker isn't in stderr");
   check(html.length > 0, "the report was written");
+  check(html.includes("<h3>Prompt sizes (marked visit 1)</h3>") && html.includes('<tr><th scope="row">5 user</th><td class="num">72</td><td>47%</td></tr>'),
+    "the HTML report has the prompt sizes table, with the terminal's numbers");
   check(!html.includes(SECRET), "the marker isn't in the HTML report");
   if (failed) console.log(`${out.stdout}\n${out.stderr}`.replace(/^/gm, "     | "));
 } finally {
