@@ -87,6 +87,39 @@ A marked request succeeds or fails exactly as it would unmarked; that's the prot
 
 **Cleanup:** every `put` deletes every expired record first, and a `get` that finds an expired record deletes it. After a write, the store holds only records written in the last 10 minutes. If writes stop, what's left stays until the next `put` or `get`. That's bounded by the last 10 minutes of marked requests, not a growing leak. Only requests carrying the right token create records.
 
+## Fetch (`Request` / `Response`)
+
+For runtimes and frameworks that hand you a Web `Request` and take a `Response` back. The token is passed on every call, because on Cloudflare Workers the secret is only available inside a request (`env`).
+
+```js
+import { finish, handle, MemoryStore, start } from "caliper-timings/fetch";
+
+const store = new MemoryStore();
+
+export default {
+  async fetch(request, env, ctx) {
+    const options = { token: env.CALIPER_TOKEN, store };
+    const answered = await handle(request, options); // GET /__caliper/timings/:id; null for everything else
+    if (answered) return answered;
+
+    if (request.method === "POST" && new URL(request.url).pathname === "/api/generate") {
+      const run = await start(request, { ...options, defer: (p) => ctx.waitUntil(p) }); // null unless marked
+      run?.mark("modelCallSent");
+      const stream = await model.stream(/* … */);
+      const response = new Response(run ? run.watchFirstChunk(stream) : stream, { headers: { "content-type": "text/event-stream" } });
+      return run ? finish(run, response) : response;
+    }
+    return new Response("not found", { status: 404 });
+  },
+};
+```
+
+- **`handle(request, { token, store })`** answers `GET /__caliper/timings/:id` in SPEC.md's check order, with the same JSON bodies and `cache-control: no-store` as the Node adapter. For any other request it returns `null`. With no token (unset or empty) it returns `null` for every request, so your own 404 answers.
+- **`start(request, { token, store, defer })`** returns a `CaliperRun` only when the request carries a valid `x-caliper-run` and the right `x-caliper-token`. Otherwise it returns `null`, and the request runs unmarked. Marks are measured from this call. `defer` keeps a save alive after the response is returned (`ctx.waitUntil` on Workers); without it, the save still runs.
+- **`finish(run, response)`** notes the response's status and returns the same `Response`. A stream passed through `run.watchFirstChunk(stream)` is saved at its first chunk with bytes, with `firstChunk` marked then; any other reply is saved by `finish`, without `firstChunk`.
+- **Never throws.** `start()` returns `null` if anything inside it fails, `finish()` returns the response whatever happens, and a store failure on the endpoint answers 500.
+- On Workers, `MemoryStore` lives in one isolate only, so Caliper's read can miss the record. Use a shared store there.
+
 ## Core (`caliper-timings`)
 
 The core works in any runtime with Web Streams and `crypto.subtle`. It exports:
@@ -97,7 +130,7 @@ The core works in any runtime with Web Streams and `crypto.subtle`. It exports:
 - the header and path constants;
 - the `TimingRecord` and `PromptMessageSize` types.
 
-There's no framework adapter other than Node yet.
+The adapters are `caliper-timings/node` and `caliper-timings/fetch`.
 
 ## Measured cost
 
@@ -113,6 +146,7 @@ That is one app, one machine and 20 pairs each. Other runtimes, frameworks, stor
 
 `npm test` runs Node 22.18+ directly on the TypeScript source. It covers:
 
+- **The fetch adapter** (`Request`/`Response` built directly, no socket): the endpoint's check order and answers as below, `null` for other paths and methods and for every request without a token; a stamped streamed reply saved once at the first chunk with its status, and passed to `defer`; the same status, headers and bytes marked or not; no run for requests that don't qualify; `finish` saving a non-streamed reply with its status and no `firstChunk`, and only noting the status for a streamed one; `start` and `finish` never throwing. Each checked by breaking the code (a wrong token accepted, no try/catch in `finish`, `finish` saving streamed replies too, the store read before the token check).
 - **The endpoint's check order**, over a real socket on 127.0.0.1: 404 with no or empty token (the app's own), 401 for a missing, wrong or non-`Bearer` token before the store is read, 400 for malformed ids including Caliper's `caliper.precheck`, 404 for no record, 200 with the record, and `no-store` on every answer.
 - **Which requests qualify:** marked requests get the same status, headers and bytes as unmarked ones. Requests missing a header, with a wrong token or a malformed id, or on a server with no token, record nothing.
 - **When the record is saved:** at the first write with bytes (an empty write doesn't count), at close for `res.end(body)` replies, and at close with `status: null` when the client leaves before headers.
@@ -131,7 +165,7 @@ That is one app, one machine and 20 pairs each. Other runtimes, frameworks, stor
 - **Saved once, at the first chunk.** Marks made after the first chunk of a streamed reply aren't in the record.
 - **`res.end(body)` doesn't mark `firstChunk`.** A reply sent only that way gets no `firstChunk` mark; only `res.write` is watched.
 - **One process only.** `MemoryStore` is for single-process servers. There's no shared store for Node yet. The Durable Object store for Workers comes with the Hono adapter.
-- **Node only, so far.** Only the `node:http` adapter exists. Express or Fastify can use it through their raw `req`/`res`, but that hasn't been tested.
+- **Two adapters, so far:** `node:http` and fetch (`Request`/`Response`). Express or Fastify can use the Node one through their raw `req`/`res`, but that hasn't been tested. The fetch adapter is tested with `Request`/`Response` objects built in Node, not yet inside the Workers runtime or a framework.
 - **No cross-origin test yet.** Cross-origin APIs need the CORS preflight to allow `x-caliper-run` and `x-caliper-token`.
 - **Node 20: one end-to-end run, no test suite.** The packed package was installed into a fresh project and the [example server](https://github.com/Jia-A/caliper/tree/main/examples/node-memory) ran on Node 20.18.3 with Caliper's 3 marked visits. `npm test` runs on Node 22 only.
 - **ES module only.** Use `import`. `require("caliper-timings/node")` works on Node 22.22 but fails on Node 20.18.3 with `ERR_REQUIRE_ESM`. The type declarations were checked from an ES module with TypeScript 5.0, 5.9 and 7.0.

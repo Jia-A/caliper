@@ -1,7 +1,8 @@
 // node:http adapter. The app calls handle() first for every request (it answers only the
 // timings endpoint), and start() first thing in the route it wants timed.
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { isValidRunId, RUN_HEADER, TIMINGS_PATH, TOKEN_HEADER, type TimingRecord, type TimingStore } from "./protocol.ts";
+import { answerTimings, logFailure } from "./endpoint.ts";
+import { isValidRunId, RUN_HEADER, TOKEN_HEADER, type TimingStore } from "./protocol.ts";
 import { CaliperRun, hasBytes } from "./run.ts";
 import { tokenMatches } from "./token.ts";
 
@@ -37,42 +38,9 @@ export function createTimings({ token, store }: TimingsOptions): Timings {
     // response alone) for any other request, and for every request when no secret is set, so
     // the app answers it like any unknown route.
     async handle(req, res) {
-      if (!secret || req.method !== "GET") return false;
-      let path: string;
-      try {
-        path = new URL(req.url ?? "/", "http://localhost").pathname;
-      } catch {
-        return false; // a URL that doesn't parse is the app's to answer
-      }
-      if (!path.startsWith(TIMINGS_PATH)) return false;
-
-      // Checked before anything else, so an unauthenticated call never reads the store.
-      const bearer = /^Bearer (.+)$/.exec(header(req, "authorization") ?? "")?.[1];
-      if (bearer === undefined || !(await tokenMatches(bearer, secret))) {
-        return sendJson(res, 401, { error: { code: "UNAUTHORIZED", message: "Missing or invalid Caliper token" } });
-      }
-
-      let id = "";
-      try {
-        id = decodeURIComponent(path.slice(TIMINGS_PATH.length));
-      } catch {
-        // Not valid percent-encoding: rejected as malformed below.
-      }
-      if (!isValidRunId(id)) {
-        return sendJson(res, 400, {
-          error: { code: "INVALID_RUN_ID", message: "Run id must be 1-64 characters of A-Z, a-z, 0-9, _ or -" },
-        });
-      }
-
-      let record: TimingRecord | null;
-      try {
-        record = await store.get(id);
-      } catch (err) {
-        logFailure("Caliper timing record not read", err);
-        return sendJson(res, 500, { error: { code: "STORE_ERROR", message: "The timing store failed; see the server log" } });
-      }
-      if (!record) return sendJson(res, 404, { error: { code: "NOT_FOUND", message: "No timing record for this run id" } });
-      return sendJson(res, 200, record);
+      const answer = await answerTimings(req.method ?? "", req.url ?? "/", header(req, "authorization"), secret, store);
+      if (!answer) return false;
+      return sendJson(res, answer.status, answer.body);
     },
 
     // A CaliperRun when the request carries a valid x-caliper-run and the right x-caliper-token,
@@ -97,14 +65,6 @@ export function createTimings({ token, store }: TimingsOptions): Timings {
       }
     },
   };
-}
-
-function logFailure(what: string, err: unknown) {
-  try {
-    console.error(what, err);
-  } catch {
-    // Not even the log: drop it.
-  }
 }
 
 // The record is saved once: at the first res.write with bytes (a streamed reply: firstChunk is
