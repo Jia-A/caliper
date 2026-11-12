@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Named parts in `run.prompt(messages, { parts })`:** each `{ message, name, text }` is recorded under its message as `{ name, bytes, found }`: the name (lowercase, else `"?"`), the text's UTF-8 size, and whether that text is really inside the message (`null` when it couldn't be checked). The text is never recorded. Problems name a part by number only. At most 50 parts per message. Optional `parts` field per message in SPEC v1; readers that don't know it ignore it. Measured: median 5.5 µs per call with 5 parts on a Quill-sized prompt, 3.0 µs without.
+- **Known limit:** `found` says the text is inside the message, not where; a piece repeated in the message is found once, and two parts with the same text are both found.
+
 ## 0.3.0 — 2026-11-12
 
 ### Added

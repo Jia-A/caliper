@@ -20,8 +20,14 @@ export type TimingRecord = {
 };
 
 // role: a lowercase name, or "?" when the app's wasn't one. bytes: the content's UTF-8 length,
-// or null when the content wasn't a string.
-export type PromptMessageSize = { role: string; bytes: number | null };
+// or null when the content wasn't a string. parts: the named parts the app gave for this message,
+// absent when none.
+export type PromptMessageSize = { role: string; bytes: number | null; parts?: PromptPartSize[] };
+
+// name: a lowercase name, or "?". bytes: the part text's UTF-8 length, or null when it wasn't a
+// string. found: whether that text is inside its message's content; null when either wasn't a
+// string, so it couldn't be checked.
+export type PromptPartSize = { name: string; bytes: number | null; found: boolean | null };
 
 export interface TimingStore {
   put(id: string, record: TimingRecord): Promise<void>;

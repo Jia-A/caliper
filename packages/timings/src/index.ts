@@ -10,6 +10,7 @@ export {
   type TimingRecord,
   type TimingStore,
   type PromptMessageSize,
+  type PromptPartSize,
 } from "./protocol.ts";
 export { CaliperRun, type RunOptions } from "./run.ts";
 export { MemoryStore } from "./memoryStore.ts";

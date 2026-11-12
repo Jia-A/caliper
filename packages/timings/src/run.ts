@@ -1,4 +1,4 @@
-import { isValidMarkName, isValidRole, type PromptMessageSize, type TimingRecord, type TimingStore } from "./protocol.ts";
+import { isValidMarkName, isValidRole, type PromptMessageSize, type PromptPartSize, type TimingRecord, type TimingStore } from "./protocol.ts";
 
 // Cloudflare documents navigator.userAgent === "Cloudflare-Workers" as the way
 // to tell code is running on Workers (global_navigator flag, on by default
@@ -22,6 +22,7 @@ export type RunOptions = {
 
 const MAX_PROBLEMS = 20;
 const MAX_PROMPT_MESSAGES = 1000;
+const MAX_PARTS_PER_MESSAGE = 50;
 const utf8 = new TextEncoder();
 
 // Logged, never thrown: nothing the wrapper does may reach the app's request (SPEC.md).
@@ -64,19 +65,27 @@ export class CaliperRun {
   }
 
   // Each message's role and UTF-8 size, never its text; reads the messages and never changes them.
-  // Call it just before the model call. A later call replaces an earlier one. Never throws.
-  prompt(messages: unknown) {
+  // options.parts names pieces of a message ({ message: its index, name, text }): each one's size,
+  // and whether its text is really inside that message, checked here and then dropped. Call it
+  // just before the model call. A later call replaces an earlier one. Never throws.
+  prompt(messages: unknown, options?: { parts?: unknown }) {
     try {
       if (!Array.isArray(messages)) {
         this.#problem("prompt not recorded: run.prompt() takes a list of { role, content } messages");
         return;
       }
       const sizes: PromptMessageSize[] = [];
+      const contents: unknown[] = []; // only for checking parts, during this call
       const kept = Math.min(messages.length, MAX_PROMPT_MESSAGES);
-      for (let i = 0; i < kept; i++) sizes.push(this.#size(messages[i], i + 1));
+      for (let i = 0; i < kept; i++) {
+        const [size, content] = this.#size(messages[i], i + 1);
+        sizes.push(size);
+        contents.push(content);
+      }
       if (messages.length > kept) {
         this.#problem(`prompt: ${messages.length - kept} more messages not recorded (only the first ${MAX_PROMPT_MESSAGES} are kept)`);
       }
+      this.#parts(options, sizes, contents);
       this.#prompt = sizes;
     } catch {
       this.#problem("prompt not recorded: reading the messages failed");
@@ -84,20 +93,74 @@ export class CaliperRun {
   }
 
   // Problems name the message by number only: its role or text could be anything.
-  #size(message: unknown, n: number): PromptMessageSize {
+  #size(message: unknown, n: number): [PromptMessageSize, unknown] {
     let role: unknown;
     let content: unknown;
     try {
       ({ role, content } = (message ?? {}) as { role?: unknown; content?: unknown });
     } catch {
       this.#problem(`prompt message ${n}: reading it failed; recorded as "?" with no size`);
-      return { role: "?", bytes: null };
+      return [{ role: "?", bytes: null }, undefined];
     }
     if (!isValidRole(role)) {
       this.#problem(`prompt message ${n}: role isn't a lowercase name of up to 32 letters or _ (e.g. system, user, assistant); recorded as "?"`);
     }
     if (typeof content !== "string") this.#problem(`prompt message ${n}: content isn't a string; size not measured`);
-    return { role: isValidRole(role) ? role : "?", bytes: typeof content === "string" ? utf8.encode(content).length : null };
+    return [{ role: isValidRole(role) ? role : "?", bytes: typeof content === "string" ? utf8.encode(content).length : null }, content];
+  }
+
+  // Named parts, added to their message's entry. Problems name a part by number only: its name
+  // or text could be anything. A part that can't be read, or names no message, isn't recorded.
+  #parts(options: unknown, sizes: PromptMessageSize[], contents: unknown[]) {
+    let parts: unknown;
+    try {
+      parts = (options as { parts?: unknown } | null | undefined)?.parts;
+      if (parts === undefined) return;
+      if (!Array.isArray(parts)) {
+        this.#problem("prompt parts not recorded: parts must be a list of { message, name, text }");
+        return;
+      }
+    } catch {
+      this.#problem("prompt parts not recorded: reading them failed");
+      return;
+    }
+    const dropped = new Map<number, number>(); // message index → parts over the limit
+    for (let i = 0; i < parts.length; i++) {
+      const n = i + 1;
+      let message: unknown, name: unknown, text: unknown;
+      try {
+        const part = parts[i];
+        if (typeof part !== "object" || part === null) {
+          this.#problem(`prompt part ${n}: isn't { message, name, text }; not recorded`);
+          continue;
+        }
+        ({ message, name, text } = part as { message?: unknown; name?: unknown; text?: unknown });
+      } catch {
+        this.#problem(`prompt part ${n}: reading it failed; not recorded`);
+        continue;
+      }
+      if (!Number.isInteger(message) || (message as number) < 0 || (message as number) >= sizes.length) {
+        this.#problem(`prompt part ${n}: message isn't the index of one of the messages (0 to ${sizes.length - 1}); not recorded`);
+        continue;
+      }
+      const at = message as number;
+      const entry = sizes[at]!;
+      if ((entry.parts?.length ?? 0) >= MAX_PARTS_PER_MESSAGE) {
+        dropped.set(at, (dropped.get(at) ?? 0) + 1);
+        continue;
+      }
+      if (!isValidRole(name)) this.#problem(`prompt part ${n}: name isn't a lowercase name of up to 32 letters or _; recorded as "?"`);
+      const content = contents[at];
+      let found: boolean | null = null;
+      if (typeof text !== "string") this.#problem(`prompt part ${n}: text isn't a string; size not measured and not checked`);
+      else if (typeof content !== "string") this.#problem(`prompt part ${n}: message ${at + 1}'s content isn't a string, so the part couldn't be checked`);
+      else found = content.includes(text);
+      const size: PromptPartSize = { name: isValidRole(name) ? name : "?", bytes: typeof text === "string" ? utf8.encode(text).length : null, found };
+      (entry.parts ??= []).push(size);
+    }
+    for (const [at, count] of dropped) {
+      this.#problem(`prompt message ${at + 1}: ${count} more parts not recorded (only the first ${MAX_PARTS_PER_MESSAGE} are kept)`);
+    }
   }
 
   // Each problem once; after MAX_PROBLEMS, one line says the rest were dropped.
@@ -139,7 +202,7 @@ export class CaliperRun {
         status: this.status,
         marks: { ...this.#marks },
         ...(this.#problems.length && { problems: [...this.#problems] }),
-        ...(this.#prompt && { prompt: { messages: this.#prompt.map((m) => ({ ...m })) } }),
+        ...(this.#prompt && { prompt: { messages: this.#prompt.map((m) => ({ ...m, ...(m.parts && { parts: m.parts.map((p) => ({ ...p })) }) })) } }),
       };
       saved = Promise.resolve(this.#store.put(this.id, record)).catch(logFailure);
     } catch (err) {
