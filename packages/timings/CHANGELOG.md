@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`caliper-timings/upstash`: Upstash Redis store** for serverless hosts (Vercel and others), over Upstash's REST API with plain `fetch`, no dependency. One key per record (`caliper:timings:<id>`, `SET … EX 600`); `UpstashStore.fromEnv(env)` reads `UPSTASH_REDIS_REST_URL`/`_TOKEN` or Vercel's `KV_REST_API_URL`/`_TOKEN`, and returns `null` without them. Each call gives up after 2 s; failures reject without the token or URL, and never reach the app's request. Tested against a fake Upstash REST server, not Upstash itself. Re-exports `caliper-timings/fetch`.
+
 ## 0.4.0 — 2026-11-12
 
 ### Added

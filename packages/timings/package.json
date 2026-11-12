@@ -35,6 +35,10 @@
     "./workers": {
       "types": "./dist/workers.d.ts",
       "default": "./dist/workers.js"
+    },
+    "./upstash": {
+      "types": "./dist/upstash.d.ts",
+      "default": "./dist/upstash.js"
     }
   },
   "files": [

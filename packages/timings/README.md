@@ -154,6 +154,22 @@ export default {
 - **No Cloudflare types needed.** The package declares the few methods it uses. Cloudflare's `DurableObjectNamespace`, `DurableObjectState` and `ExecutionContext` were checked to fit them, with TypeScript 5.9 and Wrangler's generated types.
 - Moved from Quill's backend, with the same class name and storage format, so an app that had Quill's version keeps its binding and migrations.
 
+## Serverless (Upstash Redis store)
+
+On serverless hosts such as Vercel, each instance has its own memory, so `MemoryStore` can't hold a record for Caliper to read later. `caliper-timings/upstash` has a store on Upstash Redis, over its REST API with plain `fetch` (no dependency), and re-exports everything from `caliper-timings/fetch`.
+
+```js
+import { MemoryStore, UpstashStore } from "caliper-timings/upstash";
+
+// UPSTASH_REDIS_REST_URL / _TOKEN, or the KV_REST_API_URL / _TOKEN names Vercel's integration sets.
+const store = UpstashStore.fromEnv(process.env) ?? new MemoryStore();
+```
+
+- **One key per record,** `caliper:timings:<run id>`, written with `SET … EX 600`, so Redis deletes it 10 minutes after the last write, like the other stores.
+- **`fromEnv(env)`** returns `null` when neither pair is complete, never throws. Pass the environment yourself (`process.env`, or Workers' `env`).
+- **Use the Standard REST token,** not the Read Only one: the store writes.
+- **Each call gives up after 2 s** (`timeoutMs` to change it). A refused, failed or timed-out call rejects with the command and the status or Upstash's error, never the token or the URL. `CaliperRun.save()` logs it and drops the record; the endpoint answers 500. Neither reaches your request.
+
 ## Core (`caliper-timings`)
 
 The core works in any runtime with Web Streams and `crypto.subtle`. It exports:
@@ -164,7 +180,7 @@ The core works in any runtime with Web Streams and `crypto.subtle`. It exports:
 - the header and path constants;
 - the `TimingRecord` and `PromptMessageSize` types.
 
-The adapters are `caliper-timings/node` and `caliper-timings/fetch`; `caliper-timings/workers` adds the Durable Object store.
+The adapters are `caliper-timings/node` and `caliper-timings/fetch`; `caliper-timings/workers` adds the Durable Object store, and `caliper-timings/upstash` the Upstash Redis store.
 
 ## Measured cost
 
@@ -181,6 +197,7 @@ That is one app, one machine and 20 pairs each. Other runtimes, frameworks, stor
 
 `npm test` runs Node 22.18+ directly on the TypeScript source. It covers:
 
+- **The Upstash store**, against a fake Upstash REST server on 127.0.0.1 (no external calls): a write then a read under `caliper:timings:<id>` with `EX 600`, the bearer token on every call; `null` for no record and after the expiry; a trailing slash on the URL; a 401 and a 500 rejecting with the status and never the token; an `{error}` answer, a body that isn't JSON and a stored value that isn't a record rejecting; a call that doesn't answer rejecting at the timeout; `save()` with a refused store only logging (without the token) and the endpoint answering 500; `fromEnv` with either pair of names, and `null` when one part is missing; a marked streamed request through the fetch adapter, saved through the store and read back at the endpoint. Each checked by breaking the code (no expiry, the token in the error, no timeout, any stored value accepted, the KV names ignored, `{error}` answers ignored).
 - **The Durable Object store**, with a fake object state, storage and namespace (not the Workers runtime): a write then a read through one object per run id; `null` for no record; the stored format (the record as a JSON string under `"record"`) and the alarm 10 minutes after the write, moved by a later write; the alarm deleting the record; `PUT` 204, `GET` 200 or 404, anything else 405; a refused write rejecting in the store while `save()` only logs it; a refused read making the endpoint answer 500; and a marked streamed request through the fetch adapter, saved through the object and read back at the endpoint. Each checked by breaking the code (no alarm, a parsed object stored instead of the string, an alarm that doesn't delete, a refused write ignored, 404 read as an error).
 - **The fetch adapter** (`Request`/`Response` built directly, no socket): the endpoint's check order and answers as below, `null` for other paths and methods and for every request without a token; a stamped streamed reply saved once at the first chunk with its status, and passed to `defer`; the same status, headers and bytes marked or not; no run for requests that don't qualify; `finish` saving a non-streamed reply with its status and no `firstChunk`, and only noting the status for a streamed one; `start` and `finish` never throwing. Each checked by breaking the code (a wrong token accepted, no try/catch in `finish`, `finish` saving streamed replies too, the store read before the token check).
 - **The endpoint's check order**, over a real socket on 127.0.0.1: 404 with no or empty token (the app's own), 401 for a missing, wrong or non-`Bearer` token before the store is read, 400 for malformed ids including Caliper's `caliper.precheck`, 404 for no record, 200 with the record, and `no-store` on every answer.
@@ -201,7 +218,8 @@ That is one app, one machine and 20 pairs each. Other runtimes, frameworks, stor
 - **Prompt sizes: a role can still carry a little text.** `run.prompt()` keeps a role that is up to 32 lowercase letters or `_` as it is, so an app that puts text there (`ignoreallpreviousinstructions`) has it recorded and shown. Anything with a space, a capital, a digit or punctuation is recorded as `"?"`. Message content is never recorded.
 - **Saved once, at the first chunk.** Marks made after the first chunk of a streamed reply aren't in the record.
 - **`res.end(body)` doesn't mark `firstChunk`.** A reply sent only that way gets no `firstChunk` mark; only `res.write` is watched.
-- **One process only.** `MemoryStore` is for single-process servers. There's no shared store for Node yet.
+- **One process only.** `MemoryStore` is for single-process servers. For several processes or serverless instances, use the Upstash store.
+- **The Upstash store hasn't run against Upstash itself in these tests,** only a fake that answers like its REST API. Caliper reads a record from a different process than the one that wrote it; Upstash's docs say a read can miss a recent write when a read replica answers it, so use a database without read replicas, or expect an occasional `404` for a record that was written.
 - **The Durable Object store hasn't run in the Workers runtime in these tests.** Its object, storage and alarm are fakes with the same methods.
 - **Two adapters, so far:** `node:http` and fetch (`Request`/`Response`). Express or Fastify can use the Node one through their raw `req`/`res`, but that hasn't been tested. The fetch adapter is tested with `Request`/`Response` objects built in Node, not yet inside the Workers runtime or a framework.
 - **No cross-origin test yet.** Cross-origin APIs need the CORS preflight to allow `x-caliper-run` and `x-caliper-token`.
