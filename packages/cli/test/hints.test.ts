@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { browserBar, browserHints, formatHints, serverBar, serverHints, verdictLines, type Bar, type HintList } from "../src/hints.ts";
+import { browserBar, browserHints, formatHints, serverBar, serverHints, streamingVerdict, verdictLines, type Bar, type HintList } from "../src/hints.ts";
 import { renderReport, serverTop, type ReportInput } from "../src/report.ts";
 import { parseServerRecord, serverBlock, type ServerRecord } from "../src/serverblock.ts";
 import type { Segment, SegmentKey } from "../src/types.ts";
@@ -401,4 +401,51 @@ test("HTML: the Data table has a row per segment and a column per run, so it fit
   }));
   const table = html.slice(html.indexOf('aria-labelledby="table-h"'));
   assert.ok(/<thead><tr>\s*<th scope="col">Segment \(ms\)<\/th><th scope="col" class="num">run&nbsp;1 \(cold\)<\/th><th scope="col" class="num">run&nbsp;2<\/th><th scope="col" class="num">run&nbsp;3<\/th>/.test(table), table.slice(0, 600));
+});
+
+// --- One value: never called a median ---
+
+test("one warm run: the verdict says \"in the one warm run\", not median", () => {
+  const browser = browserHints([run({ click: 10, ttfb: 100, streaming: 312 })]);
+  assert.equal(verdictLines({ median: 1197, warm: 1, browser, server: null })[0], "People waited 1197 ms for the first word in the one warm run.");
+});
+
+test("one warm run, one visit: the bar captions say \"the one\", not median", () => {
+  assert.equal(browserBar([{ run: 2, ...run({ click: 10, ttfb: 100, streaming: 300 }) }])!.title, "Run 2, the one warm run: 410 ms from click to first word");
+  const b = block({ marks: { postgresStart: 0, postgresEnd: 545, modelCallSent: 545, firstChunk: 1078 } });
+  assert.equal(serverBar(b)!.title, "Marked visit 1, the one visit: 1078 ms from arrival to server: first bytes sent");
+});
+
+test("streaming verdict: the streaming span, and how many warm runs it's from", () => {
+  assert.deepEqual(streamingVerdict(3618, 1), { status: "pass", verdict: "Streams — streaming span 3618 ms (the one warm run)." });
+  assert.deepEqual(streamingVerdict(3400, 3), { status: "pass", verdict: "Streams — streaming span 3400 ms (median of 3 warm runs)." });
+  assert.deepEqual(streamingVerdict(40, 2), {
+    status: "fail",
+    verdict: "Doesn't stream: users see nothing until the whole answer is ready — streaming span 40 ms (median of 2 warm runs).",
+    fix: "Fix: stream the response; users see the first word sooner, total time stays the same.",
+  });
+});
+
+test("HTML: one warm run: the tile says \"The one warm run\", and the streaming section doesn't say median", () => {
+  const html = renderReport(input(null, null, null, { streaming: { ...streamingVerdict(3618, 1), checks: [], notes: [] } }));
+  assert.ok(html.includes('<div class="tile-label">The one warm run</div>'), html);
+  assert.ok(!html.includes("Median (run 2)"), html);
+  assert.ok(html.includes("Streams — streaming span 3618 ms (the one warm run)."), html);
+  const streamingPart = html.slice(html.indexOf('aria-labelledby="streaming-h"'), html.indexOf("</section>", html.indexOf('aria-labelledby="streaming-h"')));
+  assert.ok(!/median/i.test(streamingPart), streamingPart);
+});
+
+test("HTML: the prompt sizes table is in the main server section, under the bar, and still in Details", () => {
+  const b = serverBlock(
+    [{ visit: 1, record: parseServerRecord({ id: "r1", status: 200, marks: { postgresStart: 0, postgresEnd: 545, modelCallSent: 545, firstChunk: 1078 }, prompt: { messages: [{ role: "system", bytes: 2499 }, { role: "user", bytes: 3328 }] } }, "r1") as ServerRecord }],
+    1,
+  );
+  const top = serverTop({ lines: [], block: b }, serverHints(b), serverBar(b));
+  const barAt = top.indexOf('class="bseg');
+  const promptAt = top.indexOf("<h3>Prompt sizes (marked visit 1)</h3>");
+  assert.ok(barAt !== -1 && promptAt > barAt, top);
+  assert.ok(top.includes('<tr><th scope="row">1 system</th><td class="num">2499</td><td>43%</td></tr>'), top);
+  assert.ok(promptAt < top.indexOf("Where to look — server"), "before where to look");
+  const html = renderReport(input(null, { lines: [], block: b }, serverHints(b), { bars: { browser: null, server: serverBar(b) } }));
+  assert.equal(html.split("<h3>Prompt sizes (marked visit 1)</h3>").length - 1, 2, "in the main section and in Details");
 });

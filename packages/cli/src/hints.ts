@@ -302,10 +302,24 @@ export function verdictLines({ median, warm, browser, server }: {
   return [
     median === null
       ? "No warm run was measured, so there's no median wait. Use --runs 2 or more."
-      : `People waited a median of ${median} ms for the first word (${warm} warm run${warm === 1 ? "" : "s"}).`,
+      : warm === 1
+        ? `People waited ${median} ms for the first word in the one warm run.`
+        : `People waited a median of ${median} ms for the first word (${warm} warm runs).`,
     side("In the browser", browser, "no warm run was measured"),
     ...(server ? [side("Inside the server", server.list, "no marked visit succeeded")] : []),
   ];
+}
+
+// A streaming span shorter than this means the answer arrived in one go.
+export const STREAMS_MIN_MS = 250;
+const STREAM_FIX = "Fix: stream the response; users see the first word sooner, total time stays the same.";
+
+/** The streaming check's verdict: the streaming span (first word → done) over the settled warm runs, and how many. */
+export function streamingVerdict(span: number, settled: number): { status: "pass" | "fail"; verdict: string; fix?: string } {
+  const measured = `streaming span ${span} ms (${settled === 1 ? "the one warm run" : `median of ${settled} warm runs`})`;
+  return span < STREAMS_MIN_MS
+    ? { status: "fail", verdict: `Doesn't stream: users see nothing until the whole answer is ready — ${measured}.`, fix: STREAM_FIX }
+    : { status: "pass", verdict: `Streams — ${measured}.` };
 }
 
 /** One drawn segment: where it starts and how long it is (ms), and whether it's over its limit. */
@@ -335,7 +349,9 @@ function nearestMedian(values: number[]): { at: number; median: number; exact: b
   return { at, median: m, exact: values[at] === m };
 }
 
-const which = (exact: boolean, what: string, m: number) => (exact ? `the median ${what}` : `the ${what} nearest the median (${m} ms)`);
+// With one value there's no median: it's "the one".
+const which = (n: number, exact: boolean, what: string, m: number) =>
+  n === 1 ? `the one ${what}` : exact ? `the median ${what}` : `the ${what} nearest the median (${m} ms)`;
 
 /** The browser bar: the warm run nearest the median total, its segments in order. */
 export function browserBar(warm: { run: number; total: number; segments: Segment[] }[]): Bar | null {
@@ -353,7 +369,7 @@ export function browserBar(warm: { run: number; total: number; segments: Segment
   }
   // What no segment explains (an unknown segment, or no request): drawn, never hinted.
   if (total - start > 0.5) parts.push({ label: "unattributed", ms: Math.round(total - start), start, over: false, limit: null });
-  return { title: `Run ${run}, ${which(exact, "warm run", m)}: ${total} ms from click to first word`, total, lanes: [parts] };
+  return { title: `Run ${run}, ${which(warm.length, exact, "warm run", m)}: ${total} ms from click to first word`, total, lanes: [parts] };
 }
 
 /** The server bar: the visit nearest the median first bytes sent, its spans on rows that don't overlap. */
@@ -391,5 +407,5 @@ export function serverBar(block: ServerBlock): Bar | null {
     else lanes.push([p]);
   }
   const to = firstBytes?.values[i] != null ? "server: first bytes sent" : "the end of its last span";
-  return { title: `Marked visit ${block.visits[i]}, ${which(exact, "visit", m)}: ${known[at]!.e} ms from arrival to ${to}`, total: known[at]!.e, lanes };
+  return { title: `Marked visit ${block.visits[i]}, ${which(known.length, exact, "visit", m)}: ${known[at]!.e} ms from arrival to ${to}`, total: known[at]!.e, lanes };
 }

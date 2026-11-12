@@ -8,7 +8,7 @@ import { launchChromium } from "./browser.js";
 import { combineImageRules, describeRule, imageRule, splitPolicies, type ImageRule } from "./csp.js";
 import { ButtonNotFoundError, CliError, messageOf, PageLoadError, UnidentifiedRequestError } from "./errors.js";
 import { buttonHints, buttonNames, expiredLoginCookies, loadFailureHints } from "./loadhints.js";
-import { browserBar, browserHints, formatHints, serverBar, serverHints, verdictLines, type HintList } from "./hints.js";
+import { browserBar, browserHints, formatHints, serverBar, serverHints, STREAMS_MIN_MS, streamingVerdict, verdictLines, type HintList } from "./hints.js";
 import { formatServerBlock, parseServerRecord, plural, serverBlock, type ServerRecord, type ServerReport } from "./serverblock.js";
 import { renderReport, type ReportReply } from "./report.js";
 import type {
@@ -1957,8 +1957,6 @@ function formatRun(i: number, ms: number): string {
 // Label column of a run's rows; fits "browser: response headers received".
 const LABEL_WIDTH = 36;
 
-// A streaming span shorter than this means the answer arrived in one go.
-const STREAMS_MIN_MS = 250;
 
 // What starts the timer, in labels: the --measure click, or a chat run's send (click or Enter).
 const startLabel = ({ chat }: RunResult) => (chat ? "send" : "click");
@@ -2508,19 +2506,15 @@ function formatSummaryBlock(entries: SummaryEntry[]): string {
   ].join("\n");
 }
 
-const STREAM_FIX = "Fix: stream the response; users see the first word sooner, total time stays the same.";
-
 // The streaming verdict over the warm runs, shared by the terminal summary and the report.
-function describeStreaming({ done, span, warm, unidentified }: DoneSummary): CheckReport {
+function describeStreaming({ done, span, warm, unsettled, unidentified }: DoneSummary): CheckReport {
   const report = (r: Pick<CheckReport, "status" | "verdict" | "fix">): CheckReport => ({ ...r, checks: [], notes: [] });
   if (warm === 0 && unidentified > 0) return report({ status: "unknown", verdict: "Inconclusive — AI request not identified in the warm runs" });
   if (warm === 0) return report({ status: "unknown", verdict: "Inconclusive — no warm runs for a median (use --runs 2 or more)" });
   if (done === null || span === null) {
     return report({ status: "unknown", verdict: `Inconclusive — no warm run settled within ${DONE_CAP_MS / 1000}s` });
   }
-  return span < STREAMS_MIN_MS
-    ? report({ status: "fail", verdict: verdict(span), fix: STREAM_FIX })
-    : report({ status: "pass", verdict: verdict(span) });
+  return report(streamingVerdict(span, warm - unsettled));
 }
 
 // A run's first body byte and pre-reply changes for the report, in ms after the click or send.
@@ -2608,7 +2602,9 @@ function formatSummary({ cold, coldUnidentified, median, worst, warm, warmFailed
   ].filter(Boolean);
   const lost = reasons.length ? ` (${reasons.join(", ")})` : "";
   if (median === null) return `${coldPart} · worst ${worst} ms (no warm runs for a median${lost})`;
-  const used = lost ? ` · median of ${warm} warm run${warm === 1 ? "" : "s"}${lost}` : "";
+  // With one warm run there's no median: its own number, said as such.
+  if (warm === 1) return `${coldPart} · warm ${median} ms (the one warm run${lost}) · worst ${worst} ms`;
+  const used = lost ? ` · median of ${warm} warm runs${lost}` : "";
   return `${coldPart} · median ${median} ms · worst ${worst} ms${used}`;
 }
 
@@ -2616,5 +2612,6 @@ function formatDoneSummary({ done, span, warm, unsettled }: DoneSummary, streami
   if (warm === 0) return "done: no warm runs for a median, so no verdict";
   const skipped = unsettled ? ` (${unsettled} of ${warm} warm runs did not settle; left out)` : "";
   if (done === null || span === null) return `done: no warm run settled within ${DONE_CAP_MS / 1000}s, so no verdict`;
-  return `done: median ${done} ms · span median ${span} ms${skipped}\n${streaming.verdict}${streaming.fix ? `\n${streaming.fix}` : ""}`;
+  const values = warm - unsettled === 1 ? `done: ${done} ms · streaming span ${span} ms (the one warm run)` : `done: median ${done} ms · span median ${span} ms`;
+  return `${values}${skipped}\n${streaming.verdict}${streaming.fix ? `\n${streaming.fix}` : ""}`;
 }

@@ -337,7 +337,7 @@ function streamingSection({ verdict, fix, checks, notes }: CheckReport): string 
   return `<section aria-labelledby="streaming-h">
     <h2 id="streaming-h">Streaming</h2>
     <div class="stop">
-      <p class="muted">Median streaming span (first word → done) over the warm runs</p>
+      <p class="muted">Streaming span: first word → done, in the warm runs</p>
       ${checksBody({ verdict, fix, checks, notes })}
     </div>
   </section>`;
@@ -349,6 +349,7 @@ export function serverTop({ block }: ServerReport, hints: HintList | null, bar: 
     <h2 id="server-top-h">Inside the server</h2>
     <p class="muted">From separate marked runs, on the server's clock. Never added to the browser timings above: different runs, different clocks.</p>
     ${bar ? `${barHtml(bar)}<p class="muted">Empty parts of a row are time no span covers.</p>` : `<p>${block ? "No spans to draw." : "No marked visit succeeded: see Run details under Details."}</p>`}
+    ${block ? promptHtml(block.prompt) : ""}
     ${hints ? `<h3>Where to look — server</h3><div class="stop">${hintsBody(hints)}</div>` : ""}
   </section>`;
 }
@@ -470,7 +471,8 @@ const runName = (n: number) => `run&nbsp;${n}${n === 1 ? " (cold)" : ""}`;
 
 function medianLabel({ warm, warmFailed, warmUnidentified }: Summary, total: number): string {
   const lost = [warmFailed ? `${warmFailed} failed to load` : "", warmUnidentified ? `${warmUnidentified} AI request not identified` : ""].filter(Boolean);
-  if (lost.length) return `Median (${warm} warm run${warm === 1 ? "" : "s"}, ${lost.join(", ")})`;
+  if (lost.length) return warm === 1 ? `The one warm run (${lost.join(", ")})` : `Median (${warm} warm runs, ${lost.join(", ")})`;
+  if (warm === 1) return "The one warm run";
   return total > 2 ? `Median (runs 2–${total})` : total === 2 ? "Median (run 2)" : "Median (needs 2+ runs)";
 }
 

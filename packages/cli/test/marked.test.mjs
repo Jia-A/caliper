@@ -506,11 +506,15 @@ try {
     check(j.line === `Server timings ? — AI request goes to ${host}, not ${named}; token not sent.`, `(j, ${what}) names both origins (got: ${j.line ?? "nothing"})`, j.out);
   }
 
-  // The user-timing summary is the 2 timed runs only: cold is run 1, median is run 2.
+  // The user-timing summary is the 2 timed runs only: cold is run 1, and run 2 is the one warm
+  // run, so nothing is called a median.
   const runMs = [...a.out.stdout.matchAll(/^run \d.*?\s(\d+) ms$/gm)].map((r) => Number(r[1]));
-  const summary = a.out.stdout.match(/^cold (\d+) ms · median (\d+) ms/m);
+  const summary = a.out.stdout.match(/^cold (\d+) ms · warm (\d+) ms \(the one warm run\) · worst \d+ ms$/m);
   check(!!summary && Number(summary[1]) === runMs[0] && Number(summary[2]) === runMs[1],
     `(a) the summary is the timed runs only (runs ${runMs.join(", ")}; got: ${summary?.[0] ?? "nothing"})`, a.out);
+  check(/^done: \d+ ms · streaming span \d+ ms \(the one warm run\)$/m.test(a.out.stdout), '(a) the done line says "the one warm run", not median', a.out);
+  check(/^    ✓ streaming   Streams — streaming span \d+ ms \(the one warm run\)\.$/m.test(a.out.stdout), "(a) the streaming check shows the streaming span", a.out);
+  check(!/median/.test(a.out.stdout.slice(0, a.out.stdout.indexOf("Server timings"))), "(a) no \"median\" in the browser part with one warm run", a.out);
 
   // Server-side failures after the stamp: no fetch for a visit that wasn't valid.
   for (const [label, c] of [["d", d], ["e", e], ["g", g]]) {
@@ -666,7 +670,7 @@ try {
   const m = await runCase("m, 3 visits by default", "m", { serverRuns: null, args: reportArgs("m") });
   checkVisits(m, 3, [1, 2, 3]);
   const mRunMs = [...m.out.stdout.matchAll(/^run \d.*?\s(\d+) ms$/gm)].map((r) => Number(r[1]));
-  const mSummary = m.out.stdout.match(/^cold (\d+) ms · median (\d+) ms/m);
+  const mSummary = m.out.stdout.match(/^cold (\d+) ms · warm (\d+) ms \(the one warm run\)/m);
   // The HTML report: the same rows and numbers as the terminal block, and the pre-check line.
   const mHtml = readReport("m");
   const mServer = serverPart(mHtml);
@@ -683,7 +687,7 @@ try {
   }
   const mTiles = [...(mHtml ?? "").matchAll(/<div class="tile-value">([\d,]+)<small>/g)].map((t) => Number(t[1].replace(/,/g, "")));
   check(!!mSummary && mTiles[0] === Number(mSummary[1]) && mTiles[1] === Number(mSummary[2]),
-    `(m) the HTML tiles are the timed runs' cold and median (want ${mSummary?.[1]}, ${mSummary?.[2]}; got ${mTiles.join(", ")})`, m.out);
+    `(m) the HTML tiles are the timed runs' cold and the one warm run (want ${mSummary?.[1]}, ${mSummary?.[2]}; got ${mTiles.join(", ")})`, m.out);
   check(!!mSummary && Number(mSummary[1]) === mRunMs[0] && Number(mSummary[2]) === mRunMs[1],
     `(m) the browser summary is the 2 timed runs only (runs ${mRunMs.join(", ")}; got: ${mSummary?.[0] ?? "nothing"})`, m.out);
   // Spans inside each visit first: with these marks the median span isn't median(end) − median(start).
