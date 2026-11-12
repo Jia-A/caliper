@@ -127,6 +127,7 @@ That is one app, one machine and 20 pairs each. Other runtimes, frameworks, stor
 
 ## Known limits
 
+- **Prompt sizes: a role can still carry a little text.** `run.prompt()` keeps a role that is up to 32 lowercase letters or `_` as it is, so an app that puts text there (`ignoreallpreviousinstructions`) has it recorded and shown. Anything with a space, a capital, a digit or punctuation is recorded as `"?"`. Message content is never recorded.
 - **Saved once, at the first chunk.** Marks made after the first chunk of a streamed reply aren't in the record.
 - **`res.end(body)` doesn't mark `firstChunk`.** A reply sent only that way gets no `firstChunk` mark; only `res.write` is watched.
 - **One process only.** `MemoryStore` is for single-process servers. There's no shared store for Node yet. The Durable Object store for Workers comes with the Hono adapter.

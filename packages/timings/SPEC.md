@@ -84,6 +84,7 @@ Records should expire. The reference keeps them for 10 minutes after the last wr
 
 - **`role`** is the message's role when it matches `^[a-z][a-z_]{0,31}$` (`system`, `user`, `assistant`, `tool`, …), and `"?"` otherwise, so text can never reach the record through it.
 - **`bytes`** is the length of the message's text in UTF-8, or `null` when the text wasn't a string (a list of parts, an image). It's never estimated. It's the size of the text, not of the request to the model, and not tokens.
+- **A role can still carry a little text.** A role is recorded when it matches the pattern above, so up to 32 lowercase letters or `_` that the app puts in a role (`ignoreallpreviousinstructions`) are recorded and shown as they are. Anything with a space, a capital, a digit or punctuation becomes `"?"`.
 - **Never the text.** No part of a message's content is recorded, and `problems` about the prompt name a message by its number only (`prompt message 2: …`), never by its role or text.
 - At most 1000 messages are recorded; `problems` then says how many weren't.
 - When the app passes something that isn't a list, there's no `prompt`, and `problems` says so.
