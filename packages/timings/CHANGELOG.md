@@ -7,6 +7,8 @@
 - **`run.prompt(messages)`: prompt sizes.** Records each message's role and the size of its text in bytes (UTF-8), in order, in the record's new optional `prompt` field (`{ "messages": [{ "role": "system", "bytes": 2310 }, …] }`). Never the text: a role that isn't a lowercase name of up to 32 letters or `_` is recorded as `"?"`, content that isn't a string gets `bytes: null` (never estimated), and problems name the message by number only. At most 1000 messages. Never throws.
 - **SPEC v1: optional `prompt` field** ([Prompt sizes](SPEC.md#prompt-sizes)). Not breaking: a record without it is unchanged. caliper-ai 0.4.0's record reader (from the release commit) was run once on a record with `prompt`: it read the marks and ignored the field.
 - `isValidRole` and the `PromptMessageSize` type are exported.
+- **Tests that `run.prompt()` never carries text or changes the app** (a marker in every part of a prompt; a Proxy that records writes; lists that throw when read; byte-identical responses over HTTP; no reads when unmarked), each checked by breaking the code.
+- **Measured cost of `run.prompt()`:** median 2.5 µs per call for a Quill-sized prompt (8184 bytes), 10.0 µs for 40 messages, on Node 22.22 (Apple M2).
 
 ## 0.1.0 — 2026-11-04
 

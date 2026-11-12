@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { CaliperRun } from "../src/run.ts";
 import { MemoryStore } from "../src/memoryStore.ts";
+import { LEAKY_MESSAGES, SECRET } from "./leak.ts";
 
 async function recordAfter(fn: (run: CaliperRun) => void) {
   const store = new MemoryStore();
@@ -107,4 +108,83 @@ test("at most 1000 messages are recorded, then a problem says how many weren't",
   const record = await recordAfter((run) => run.prompt(Array.from({ length: 1003 }, () => ({ role: "user", content: "x" }))));
   assert.equal(record.prompt!.messages.length, 1000);
   assert.deepEqual(record.problems, ["prompt: 3 more messages not recorded (only the first 1000 are kept)"]);
+});
+
+// ---- What run.prompt() must never do (SPEC: never change the app; never the text) ----
+
+test("never the text: the marker is nowhere in the record, its problems or the error log", async (t) => {
+  const error = t.mock.method(console, "error", () => {});
+  const record = await recordAfter((run) => run.prompt(LEAKY_MESSAGES()));
+  assert.ok(!JSON.stringify(record).includes(SECRET), JSON.stringify(record));
+  assert.ok(!JSON.stringify(error.mock.calls.map((c) => c.arguments.map(String))).includes(SECRET));
+  // The sizes are still there: the marker only ever shows up as bytes.
+  assert.deepEqual(record.prompt!.messages.map((m) => m.role), ["system", "?", "user", "assistant", "user"]);
+  assert.equal(record.prompt!.messages[4]!.bytes, SECRET.length * 3);
+});
+
+// Every write a Proxy could see, on the list and every message, deeply: none may happen.
+function watched<T extends object>(value: T, writes: string[], path = "messages"): T {
+  return new Proxy(value, {
+    get: (target, key, receiver) => {
+      const v = Reflect.get(target, key, receiver);
+      return typeof v === "object" && v !== null ? watched(v, writes, `${path}.${String(key)}`) : v;
+    },
+    set: (_t, key) => (writes.push(`set ${path}.${String(key)}`), true),
+    defineProperty: (_t, key) => (writes.push(`defineProperty ${path}.${String(key)}`), true),
+    deleteProperty: (_t, key) => (writes.push(`delete ${path}.${String(key)}`), true),
+    setPrototypeOf: () => (writes.push(`setPrototypeOf ${path}`), true),
+    preventExtensions: () => (writes.push(`preventExtensions ${path}`), false),
+  });
+}
+
+test("never changes the messages: no write of any kind, and the same list afterwards", async () => {
+  const messages = LEAKY_MESSAGES();
+  const before = JSON.stringify(messages);
+  const writes: string[] = [];
+  const record = await recordAfter((run) => run.prompt(watched(messages, writes)));
+  assert.deepEqual(writes, []);
+  assert.equal(JSON.stringify(messages), before);
+  assert.equal(record.prompt!.messages.length, 5);
+});
+
+test("never changes them, frozen: a deeply frozen list is read without an error", async () => {
+  const freeze = <T>(v: T): T => (typeof v === "object" && v !== null ? (Object.values(v).forEach(freeze), Object.freeze(v)) : v);
+  const record = await recordAfter((run) => assert.doesNotThrow(() => run.prompt(freeze(LEAKY_MESSAGES()))));
+  assert.equal(record.prompt!.messages.length, 5);
+});
+
+// Lists that throw when read: none of it may reach the app.
+const hostile = (): [string, unknown][] => {
+  const revoked = Proxy.revocable([], {});
+  revoked.revoke();
+  const cyclic: unknown[] = [];
+  const self: Record<string, unknown> = { role: "user", content: "x" };
+  self.self = self;
+  cyclic.push(self, cyclic);
+  const throwing = (what: string) => () => {
+    throw new Error(`${what} throws`);
+  };
+  return [
+    ["a revoked Proxy (Array.isArray throws)", revoked.proxy],
+    ["a list whose length throws", new Proxy([], { get: (t, k) => (k === "length" ? throwing("length")() : Reflect.get(t, k)) })],
+    ["a list whose items throw", new Proxy([{ role: "user", content: "x" }], { get: (t, k) => (k === "0" ? throwing("item")() : Reflect.get(t, k)) })],
+    ["a message whose role throws", [Object.defineProperty({ content: "x" }, "role", { get: throwing("role"), enumerable: true })]],
+    ["a message whose content throws", [Object.defineProperty({ role: "user" }, "content", { get: throwing("content"), enumerable: true })]],
+    ["a list containing itself and a message containing itself", cyclic],
+    ["content whose toString throws", [{ role: "user", content: { toString: throwing("toString") } }]],
+    ["100,000 messages", Array.from({ length: 100_000 }, () => ({ role: "user", content: "x" }))],
+  ];
+};
+
+test("never throws: lists and messages that throw when read are caught, and the record still saves", async () => {
+  for (const [what, messages] of hostile()) {
+    const store = new MemoryStore();
+    const run = new CaliperRun("run_a", store);
+    run.mark("dbStart");
+    assert.doesNotThrow(() => run.prompt(messages), what);
+    await assert.doesNotReject(run.save(), what);
+    const record = (await store.get("run_a"))!;
+    assert.deepEqual(Object.keys(record.marks), ["dbStart"], what);
+    assert.ok((record.problems ?? []).length > 0 || record.prompt, `${what}: noted in problems, or recorded`);
+  }
 });

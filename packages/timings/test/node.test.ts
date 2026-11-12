@@ -8,6 +8,7 @@ import type { AddressInfo } from "node:net";
 import { after, test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { createTimings, MemoryStore, type CaliperRun, type TimingRecord } from "../src/node.ts";
+import { LEAKY_MESSAGES, SECRET } from "./leak.ts";
 
 const TOKEN = "node-adapter-test-token";
 const BEARER = { authorization: `Bearer ${TOKEN}` };
@@ -309,4 +310,52 @@ test("a request URL the wrapper can't parse is left to the app", async () => {
   });
   assert.equal(body, "app 404");
   assert.deepEqual(escaped, []);
+});
+
+// ---- run.prompt() over HTTP: never the text, never a different response, nothing when unmarked ----
+
+// generate, after passing `messages()` to run?.prompt, as an app would just before the model call.
+const withPrompt = (messages: () => unknown): Route => async (run, req, res) => {
+  run?.prompt(messages());
+  await generate(run, req, res);
+};
+
+test("prompt: the endpoint's answer has the sizes and never the text", async () => {
+  const app = await startApp({ route: withPrompt(LEAKY_MESSAGES) });
+  await (await post(app.url, STAMP("run_leak"))).text();
+  const raw = await (await timingsFor(app.url, "run_leak")).text();
+  assert.ok(!raw.includes(SECRET), raw);
+  assert.deepEqual((JSON.parse(raw) as TimingRecord).prompt!.messages.map((m) => m.role), ["system", "?", "user", "assistant", "user"]);
+});
+
+// The same lists the core is tested with, over a real socket.
+const revokedList = () => {
+  const r = Proxy.revocable([], {});
+  r.revoke();
+  return r.proxy;
+};
+const throwingRole = () => [Object.defineProperty({ content: "x" }, "role", { get: () => { throw new Error("role throws"); }, enumerable: true })];
+
+for (const [what, messages] of [["the leaky messages", LEAKY_MESSAGES], ["a revoked Proxy", revokedList], ["a message whose role throws", throwingRole]] as const) {
+  test(`prompt (${what}): a marked request gets the same status, headers and bytes as an unmarked one, and nothing escapes`, async () => {
+    escaped.length = 0;
+    const app = await startApp({ route: withPrompt(messages) });
+    const plain = await snapshot(await post(app.url));
+    const marked = await snapshot(await post(app.url, STAMP("run_same")));
+    assert.deepEqual(marked, plain);
+    assert.equal(plain.body, CHUNKS.join(""));
+    await sleep(20);
+    assert.deepEqual(escaped, []);
+    assert.equal(app.store.puts, 1, "the marked request's record was saved");
+  });
+}
+
+test("prompt: an unmarked request never reads the messages; a marked one does", async () => {
+  let reads = 0;
+  const counted = () => new Proxy(LEAKY_MESSAGES(), { get: (t, k, r) => (reads++, Reflect.get(t, k, r)) });
+  const app = await startApp({ route: withPrompt(counted) });
+  await (await post(app.url)).text();
+  assert.equal(reads, 0, "unmarked: run is null, so run?.prompt is never called");
+  await (await post(app.url, STAMP("run_reads"))).text();
+  assert.ok(reads > 0, `marked: the messages were read (${reads} reads)`);
 });
