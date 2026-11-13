@@ -202,6 +202,35 @@ export function browserHints(warm: { total: number; segments: Segment[] }[]): Hi
   return list("browser", scope, hints);
 }
 
+/** One segment that was slower on the first run than the warm runs' median by more than its limit. */
+export interface ColdGap {
+  label: string;
+  cold: number; // the first run's value, as printed (whole ms)
+  warm: number | null; // the warm runs' median, as printed; null when no warm run had this segment
+  gap: number; // cold − warm (cold when no warm run had it)
+  limit: number;
+  basis: string; // the limit's source, without CAVEAT
+}
+
+/**
+ * The segments where the first run (a fresh browser) was slower than the warm runs by more than
+ * that segment's own limit. Values as the terminal prints them; a segment no warm run had counts
+ * in full. Unattributed time has no limit and is never compared.
+ */
+export function coldGaps(cold: { segments: Segment[] }, warm: { segments: Segment[] }[]): ColdGap[] {
+  if (!warm.length) return [];
+  const gaps: ColdGap[] = [];
+  for (const [key, layer] of Object.entries(BROWSER) as [SegmentKey, (typeof BROWSER)[SegmentKey] & {}][]) {
+    const first = cold.segments.find((s) => s.key === key);
+    if (!first || first.ms === null) continue;
+    const c = Math.round(first.ms);
+    const w = median(warm.flatMap(({ segments }) => segments.filter((s) => s.key === key && s.ms !== null).map((s) => Math.round(s.ms!))));
+    const gap = c - (w ?? 0);
+    if (gap > layer.limit.ms) gaps.push({ label: first.label, cold: c, warm: w, gap, limit: layer.limit.ms, basis: layer.limit.basis });
+  }
+  return gaps;
+}
+
 // The row's median over the visits that recorded it: the table's median, or its only value.
 const rowMedian = (row: ServerRow) => row.stats?.median ?? row.values.find((v) => v !== null)!;
 

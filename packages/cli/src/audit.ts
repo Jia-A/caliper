@@ -9,7 +9,7 @@ import { combineImageRules, describeRule, imageRule, splitPolicies, type ImageRu
 import { ButtonNotFoundError, CliError, messageOf, PageLoadError, UnidentifiedRequestError } from "./errors.js";
 import { buttonHints, buttonNames, expiredLoginCookies, loadFailureHints } from "./loadhints.js";
 import { adviceItems, formatAdvice } from "./advice.js";
-import { browserBar, browserHints, formatHints, serverBar, serverHints, STREAMS_MIN_MS, streamingVerdict, verdictLines, type HintList } from "./hints.js";
+import { browserBar, browserHints, coldGaps, formatHints, serverBar, serverHints, STREAMS_MIN_MS, streamingVerdict, verdictLines, type HintList } from "./hints.js";
 import { formatServerBlock, parseServerRecord, plural, serverBlock, type ServerRecord, type ServerReport } from "./serverblock.js";
 import { renderReport, type ReportReply } from "./report.js";
 import type {
@@ -337,6 +337,13 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
       streaming: doneSummary.span !== null && settled > 0 ? { span: doneSummary.span, settled } : null,
       firstWord: summary && summary.median !== null ? { median: summary.median, warm: summary.warm } : null,
       prompt: serverReport?.block?.prompt ?? null,
+      // The first run against the warm runs, as the summary line and the browser hints use them.
+      cold: (() => {
+        const first = loaded.find((r) => r.run === 1);
+        const warmRuns = loaded.filter((r) => r.run > 1);
+        if (!first || !summary || summary.cold === null || summary.median === null || !warmRuns.length) return null;
+        return { total: summary.cold, warmMedian: summary.median, warm: summary.warm, gaps: coldGaps(first.parts, warmRuns.map((r) => r.parts)) };
+      })(),
     });
     console.log(formatAdvice(advice));
     console.log(formatSummaryBlock(entries));

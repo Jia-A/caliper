@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { browserBar, browserHints, formatHints, serverBar, serverHints, STREAMS_MIN_MS, streamingVerdict, verdictLines, type Bar, type HintList } from "../src/hints.ts";
+import { browserBar, browserHints, coldGaps, formatHints, serverBar, serverHints, STREAMS_MIN_MS, streamingVerdict, verdictLines, type Bar, type HintList } from "../src/hints.ts";
 import { adviceItems, formatAdvice, STREAMS_MIN_MS as ADVICE_STREAMS_MIN_MS } from "../src/advice.ts";
 import { renderReport, serverTop, type ReportInput } from "../src/report.ts";
 import { formatServerBlock, parseServerRecord, serverBlock, type ServerRecord } from "../src/serverblock.ts";
@@ -490,6 +490,7 @@ test("HTML: the prompt sizes table is in the main server section, under the bar,
 // --- Advice: next steps, each from a number this run measured ---
 
 const OWASP = "https://genai.owasp.org/llmrisk/llm01-prompt-injection/";
+const NO_DATA = { streaming: null, firstWord: null, prompt: null, cold: null };
 // The prompt view of one visit whose record has these messages (bytes and parts as the wrapper records them).
 function promptView(messages: unknown[]) {
   return block({ marks: { modelCallSent: 0, firstChunk: 100 }, prompt: { messages } } as never).prompt;
@@ -534,19 +535,77 @@ test("advice, outside: names each part your app labelled outside, with its bytes
 });
 
 test("advice, outside: a part labelled outside in only some marked visits isn't named", () => {
-  const visit = (source: string) => ({ marks: { modelCallSent: 0, firstChunk: 100 }, prompt: { messages: [{ role: "user", bytes: 87, parts: [{ name: "comments", bytes: 87, found: true, source }] }] } });
+  const visit = (source: string) => ({ marks: { modelCallSent: 0, firstChunk: 100 }, prompt: { messages: [{ role: "user", bytes: 300, parts: [{ name: "comments", bytes: 87, found: true, source }] }] } });
   const prompt = block(visit("outside") as never, visit("user") as never).prompt;
   assert.equal(prompt.rows.find((r) => r.label === "comments")?.source?.kind, "mixed");
   assert.deepEqual(adviceItems({ streaming: null, firstWord: null, prompt }), []);
 });
 
-test("advice: Quill's Nov 13 prompt (all labelled, nothing outside) and a run without server timings give no prompt advice", () => {
-  assert.deepEqual(adviceItems({ streaming: null, firstWord: null, prompt: promptView(QUILL_PROMPT) }), []);
-  assert.deepEqual(adviceItems({ streaming: null, firstWord: null, prompt: null }), []);
+test("advice: Quill's Nov 13 prompt (all labelled, nothing outside) gives only the dominant-part fact; no server timings, no prompt advice", () => {
+  assert.deepEqual(adviceItems({ ...NO_DATA, prompt: promptView(QUILL_PROMPT) }).map((a) => a.text), ["article is 55% of the prompt (3207 of 5827 bytes, labelled user)."]);
+  assert.deepEqual(adviceItems(NO_DATA), []);
+});
+
+// Rule 1: one named part is half the prompt or more — a fact, no trim advice.
+const DOMINANT_BASIS = "Caliper's own threshold: one named part is 50% or more of the prompt's measured bytes, more than all the rest together. These are bytes your app reported, not tokens; Caliper didn't measure what trimming it would change.";
+test("advice, dominant part: Quill's article and the demo's rules, as facts with their bytes and source", () => {
+  assert.deepEqual(adviceItems({ ...NO_DATA, prompt: promptView(QUILL_PROMPT) }), [{ text: "article is 55% of the prompt (3207 of 5827 bytes, labelled user).", basis: DOMINANT_BASIS, link: null }]);
+  const demo = [
+    { role: "system", bytes: 282, parts: [{ name: "persona", bytes: 102, found: true, source: "app" }, { name: "rules", bytes: 178, found: true, source: "app" }] },
+    { role: "user", bytes: 26, parts: [{ name: "visitor", bytes: 26, found: true, source: "user" }] },
+  ];
+  assert.deepEqual(adviceItems({ ...NO_DATA, prompt: promptView(demo) }).map((a) => a.text), ["rules is 58% of the prompt (178 of 308 bytes, labelled app)."]);
+});
+
+test("advice, dominant part: under 50%, a part not named, or a total not fully measured: nothing", () => {
+  const even = [{ role: "user", bytes: 100, parts: [{ name: "a", bytes: 49, found: true, source: "user" }, { name: "b", bytes: 49, found: true, source: "user" }] }];
+  assert.deepEqual(adviceItems({ ...NO_DATA, prompt: promptView(even) }), []);
+  const noParts = [{ role: "system", bytes: 900 }, { role: "user", bytes: 100 }];
+  assert.deepEqual(adviceItems({ ...NO_DATA, prompt: promptView(noParts) }), []);
+  const partial = [{ role: "system", bytes: null }, { role: "user", bytes: 100, parts: [{ name: "a", bytes: 90, found: true, source: "user" }] }];
+  assert.deepEqual(adviceItems({ ...NO_DATA, prompt: promptView(partial) }), []);
+});
+
+test("advice, dominant part over several visits that differ: only when it's 50% or more in each, with the range", () => {
+  const visit = (article: number, total: number) => ({ marks: { modelCallSent: 0, firstChunk: 100 }, prompt: { messages: [
+    { role: "system", bytes: total - article, parts: [{ name: "instructions", bytes: total - article, found: true, source: "app" }] },
+    { role: "user", bytes: article, parts: [{ name: "article", bytes: article, found: true, source: "user" }] },
+  ] } });
+  const both = block(visit(3207, 5827) as never, visit(3300, 5900) as never).prompt;
+  assert.deepEqual(adviceItems({ ...NO_DATA, prompt: both }).map((a) => a.text), ["article is 55–56% of the prompt in each of 2 marked visits (3207–3300 bytes, labelled user)."]);
+  const one = block(visit(3207, 5827) as never, visit(2000, 5827) as never).prompt;
+  assert.deepEqual(adviceItems({ ...NO_DATA, prompt: one }), []);
+});
+
+// Rule 5: a segment much slower on the first run than warm — by more than its own limit.
+test("cold gaps: the demo's 02:01 run fires on response headers (+3473 ms, over 600); Quill's Nov 13 run fires nothing", () => {
+  const demoCold = run({ click: 9.6, ttfb: 5196.3, streaming: 14.7 });
+  const demoWarm = run({ click: 1.8, ttfb: 1723.0, streaming: 12.6 });
+  assert.deepEqual(coldGaps(demoCold, [demoWarm]).map(({ label, cold, warm, gap, limit }) => ({ label, cold, warm, gap, limit })),
+    [{ label: "browser: response headers received", cold: 5196, warm: 1723, gap: 3473, limit: 600 }]);
+  assert.deepEqual(coldGaps(run({ click: 3, preflight: 89, ttfb: 904, streaming: 269 }), [run({ click: 4, ttfb: 900, streaming: 325 })]), []);
+});
+
+test("cold gaps: a segment only on the first run counts in full; under its limit, nothing", () => {
+  const gaps = coldGaps(run({ click: 3, preflight: 300, ttfb: 100 }), [run({ click: 3, ttfb: 100 }), run({ click: 3, ttfb: 100 })]);
+  assert.deepEqual(gaps.map(({ label, cold, warm, gap }) => ({ label, cold, warm, gap })), [{ label: "CORS preflight", cold: 300, warm: null, gap: 300 }]);
+});
+
+test("advice, first run: the demo's 02:01 numbers, each segment over its limit with its values, and no cause claimed", () => {
+  const gaps = coldGaps(run({ click: 9.6, ttfb: 5196.3, streaming: 14.7 }), [run({ click: 1.8, ttfb: 1723.0, streaming: 12.6 })]);
+  const items = adviceItems({ ...NO_DATA, cold: { total: 5221, warmMedian: 1737, warm: 1, gaps } });
+  assert.deepEqual(items.map((a) => a.text), [
+    "The first run (a fresh browser) waited 3484 ms longer for the first word than the one warm run (5221 vs 1737 ms). browser: response headers received: 5196 ms on the first run, 1723 ms warm (+3473 ms, more than its 600 ms limit). Caliper can't tell why from timings alone.",
+  ]);
+  assert.equal(items[0]!.basis, "Caliper's own reasoning: each segment's Where-to-look limit, applied to the gap between the first run and the warm runs, from 1 first run and 1 warm run. 600 ms: Lighthouse's \"Reduce server response time\" audit fails above 600 ms.");
+  const preflight = coldGaps(run({ click: 3, preflight: 300, ttfb: 100 }), [run({ click: 3, ttfb: 100 }), run({ click: 3, ttfb: 100 })]);
+  assert.ok(adviceItems({ ...NO_DATA, cold: { total: 403, warmMedian: 103, warm: 2, gaps: preflight } })[0]!.text
+    .includes("than the median of 2 warm runs (403 vs 103 ms). CORS preflight: 300 ms on the first run, not in the warm runs (+300 ms, more than its 100 ms limit)."));
+  assert.deepEqual(adviceItems({ ...NO_DATA, cold: { total: 1265, warmMedian: 1229, warm: 1, gaps: [] } }), []);
 });
 
 test("advice, unlabelled: the fix line moves here, word for word, and leaves the prompt sizes", () => {
-  const messages = [{ role: "user", bytes: 100, parts: [{ name: "article", bytes: 60, found: true }, { name: "title", bytes: 20, found: true, source: "user" }] }];
+  const messages = [{ role: "user", bytes: 200, parts: [{ name: "article", bytes: 60, found: true }, { name: "title", bytes: 20, found: true, source: "user" }] }];
   const fix = '1 part not labelled (article): add source: "app", "user" or "outside" to each in run.prompt() — needs caliper-timings 0.6.0; see its README, "Choosing a source"';
   assert.deepEqual(adviceItems({ streaming: null, firstWord: null, prompt: promptView(messages) }), [{ text: fix, basis: null, link: null }]);
   const b = block({ marks: { modelCallSent: 0, firstChunk: 100 }, prompt: { messages } } as never);
@@ -555,7 +614,7 @@ test("advice, unlabelled: the fix line moves here, word for word, and leaves the
 
 test("advice in the terminal: one item per rule that fired with its basis, or a line saying there's nothing", () => {
   assert.equal(formatAdvice([]), "Advice — nothing to suggest from this run's numbers.");
-  const items = adviceItems({ streaming: { span: 212, settled: 1 }, firstWord: { median: 730, warm: 1 }, prompt: promptView([{ role: "user", bytes: 87, parts: [{ name: "comments", bytes: 87, found: true, source: "outside" }] }]) });
+  const items = adviceItems({ streaming: { span: 212, settled: 1 }, firstWord: { median: 730, warm: 1 }, prompt: promptView([{ role: "user", bytes: 300, parts: [{ name: "comments", bytes: 87, found: true, source: "outside" }] }]) });
   const lines = formatAdvice(items).split("\n");
   assert.equal(lines[0], "Advice — from this run's numbers");
   assert.ok(lines[1]!.startsWith("    - Doesn't stream: the whole answer appeared within 212 ms"), lines.join("\n"));
@@ -565,7 +624,7 @@ test("advice in the terminal: one item per rule that fired with its basis, or a 
 });
 
 test("HTML: Advice comes after the server section and before Checks, with the basis and a link; the streaming section has no Fix line", () => {
-  const advice = adviceItems({ streaming: { span: 212, settled: 1 }, firstWord: { median: 730, warm: 1 }, prompt: promptView([{ role: "user", bytes: 87, parts: [{ name: "comments", bytes: 87, found: true, source: "outside" }] }]) });
+  const advice = adviceItems({ streaming: { span: 212, settled: 1 }, firstWord: { median: 730, warm: 1 }, prompt: promptView([{ role: "user", bytes: 300, parts: [{ name: "comments", bytes: 87, found: true, source: "outside" }] }]) });
   const b = block({ marks: { modelCallSent: 0, firstChunk: 700 } });
   const html = renderReport(input(null, { lines: [], block: b }, serverHints(b), { advice, streaming: { ...streamingVerdict(212, 1), checks: [], notes: [] } }));
   const at = html.indexOf('<section aria-labelledby="advice-h"');
