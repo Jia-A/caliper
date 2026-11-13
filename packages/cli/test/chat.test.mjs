@@ -69,6 +69,12 @@ try {
     const placeholder = changes.find((c) => c.text === PLACEHOLDER);
     check(!!placeholder && placeholder.at < firstByte, `${name}: "${PLACEHOLDER}" listed as a pre-reply change, before the first byte`);
     check(!changes.some((c) => c.text === PROMPT), `${name}: your own message isn't counted`);
+    // "explains X of N" counts every change; the share line only those from the first body byte
+    // on. The first line says how many came before, so the two denominators add up.
+    const chosen = block.match(/explains (\d+) of (\d+) output changes \(body bytes ≤ 250 ms before each; (\d+) came before its first body byte\)/);
+    const share = block.match(/share: \d+ of (\d+) output changes from its first body byte/);
+    check(!!chosen && !!share && Number(chosen[3]) === changes.length && Number(chosen[2]) - Number(chosen[3]) === Number(share[1]),
+      `${name}: "explains X of N" says how many changes came before the first body byte (${changes.length}), and N minus those is the share's count (got: ${chosen?.[0] ?? "no such line"} | ${share?.[0] ?? "no share line"})`);
     // The headers-received segment says what it measures (it used to read "request → first byte").
     check(msOf(block, "browser: response headers received") !== null && !block.includes("request → first byte"),
       `${name}: the breakdown has a "browser: response headers received" row`);

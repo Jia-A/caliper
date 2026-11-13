@@ -150,7 +150,7 @@ function textRows(block: string): Map<string, string[]> {
   return rows;
 }
 const report = (v: ReturnType<typeof visits>, n: number, lines: string[] = []): ServerReport => ({ lines, block: serverBlock(v, n) });
-const PRECHECK = "Server timings — pre-check: feature on, token accepted (400 on caliper.precheck)";
+const PRECHECK = "Server timings — pre-check: feature on, token accepted (expected 400 on the test id caliper.precheck)";
 
 test("HTML: every mark and span row has the terminal's numbers, per visit and min · median · max", () => {
   const v = visits(

@@ -79,7 +79,7 @@ const MODEL_SPAN = "model call → first bytes sent";
 const markLabel = (name) => RESERVED[name] ?? name;
 const PAIR = /^([A-Za-z][A-Za-z0-9_]*)(Start|End)$/;
 const PRECHECK_LINE = /^Server timings (\? )?— pre-check: /;
-const PRECHECK_OK = "Server timings — pre-check: feature on, token accepted (400 on caliper.precheck)";
+const PRECHECK_OK = "Server timings — pre-check: feature on, token accepted (expected 400 on the test id caliper.precheck)";
 const NOTE = "    Workers time waits only — a span with only computation inside (no I/O) can read 0 ms.";
 
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

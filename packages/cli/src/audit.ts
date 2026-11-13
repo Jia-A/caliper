@@ -659,7 +659,9 @@ function correlate(changes: ContainerChange[], requests: RequestTiming[], wire: 
   const candidates = [candidate(winner), ...others];
   const ambiguous = candidates[0]!.points < SHARE_MIN * counted.length || others.some((c) => c.could >= rivalAt);
 
-  const reasons = [`explains ${top[1]} of ${changes.length} output changes (body bytes ≤ ${CORRELATION_MS} ms before each)`];
+  // Every change, so the count before the winner's first body byte (the share line leaves them out).
+  const before = changes.length - counted.length;
+  const reasons = [`explains ${top[1]} of ${changes.length} output changes (body bytes ≤ ${CORRELATION_MS} ms before each${before ? `; ${before} came before its first body byte` : ""})`];
   reasons.push(next ? `next: ${next[0].method} ${new URL(next[0].url).pathname} with ${next[1]}` : "no other request explains any");
   return {
     pick: { request, reasons, from: requests.length, score: top[1] },
@@ -852,7 +854,7 @@ async function markedVisits(
   if (pre.status === 401) return unknown(`pre-check: token rejected (401 ${on}): wrong, expired or rotated; no marked visit.`);
   if (pre.status === 404) return unknown(`pre-check: feature off (404 ${on}): no Caliper wrapper at ${origin}, or CALIPER_TOKEN not set on the server; no marked visit.`);
   if (pre.status !== 400) return unknown(`pre-check: got HTTP ${pre.status} ${on} from ${precheckUrl}; no marked visit.`);
-  say(`Server timings — pre-check: feature on, token accepted (400 ${on})`);
+  say(`Server timings — pre-check: feature on, token accepted (expected 400 on the test id ${PRECHECK_ID})`);
 
   const succeeded: { visit: number; record: ServerRecord }[] = [];
   for (let visit = 1; visit <= runs; visit++) {

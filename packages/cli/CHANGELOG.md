@@ -34,6 +34,8 @@
 
 ### Changed
 
+- **"explains 13 of 14" and "13 of 13" now add up.** The chosen-request line counts every output change after the click; the share line only those from the reply's first body byte. When some came before (a "Thinking…" placeholder), the first line now says how many: `explains 13 of 14 output changes (body bytes ≤ 250 ms before each; 1 came before its first body byte)`. Tested with `npm run test:chat`.
+- **The pre-check's success line no longer reads like an error:** `Server timings — pre-check: feature on, token accepted (expected 400 on the test id caliper.precheck)` (was `… token accepted (400 on caliper.precheck)`). Tested with `npm run test:marked`.
 - **Nothing measured once is called a median.** With one warm run: the verdict reads `People waited <X> ms for the first word in the one warm run.`, the summary `cold <X> ms · warm <Y> ms (the one warm run) · worst <Z> ms`, the done line `done: <X> ms · streaming span <Y> ms (the one warm run)`, the tile `The one warm run`, and the browser bar `Run 2, the one warm run: …`. With one marked visit, the server bar reads `Marked visit 1, the one visit: …`. Two or more are still a median. Tested with `npm run test:hints` and `npm run test:marked`.
 - **`--request` also takes `"METHOD /path"`** (`--request "POST /generate"`): that method and exactly that path, on any origin, with any query string. Anything else is a case-insensitive regex on the URL, as before.
 - **A `--request` no request matches fails that run, not the whole audit.** The run is reported as `AI request not identified` with `no request matches --request "…" (seen: …)`, and the other runs go on. The Stop, double-send and canary checks still stop the audit with `No request matching --request "…"`.
