@@ -100,6 +100,16 @@ Every audit that finishes writes `caliper-report.html` in the current directory.
 
 It follows the system's light or dark theme, and the layout works down to phone width. Tested with `npm run test:hints` (unit), and with `npm run test:marked` and `npm run test:auth` (end to end).
 
+## Upgrading from 0.5.0
+
+These change where things appear in the output. Check them if a script reads Caliper's terminal output or the HTML report.
+
+- **The terminal verdict is followed by Advice.** When advice fires, the `verdict` lines end with `<n> things to look at ↓`, then come the `Advice — …` lines, then `report: …` (still the last line). With nothing to suggest: `Advice — nothing to suggest from this run's numbers.` before the report line. In 0.5.0 the report line came right after the verdict.
+- **The streaming `Fix:` line is gone** (`Fix: stream the response; users see the first word sooner, total time stays the same.`). What to do is in Advice, with the measured span.
+- **The "parts not labelled" line moved** from under the prompt sizes to Advice.
+- **HTML report:** Advice sits right under the Verdict; the Streaming section is gone (its Checks line links to Advice); the Request Map appears once, under the server bar, and no longer in Details.
+- **Server "Where to look":** the full hint for an app-named step that ended before the model call was sent has one more line saying so.
+
 ## Upgrading from 0.4.0
 
 These change what an existing command does. Check them if you run Caliper in a script or CI, or read its output with a script.
@@ -417,10 +427,32 @@ Right after the verdict, Caliper lists next steps: in the terminal after the `ve
 - **Doesn't stream** (the streaming span under 250 ms, Caliper's own threshold): `Doesn't stream: the whole answer appeared within 212 ms of the first word (streaming span, the one warm run), and people waited 730 ms for the first word. Stream the response end to end: the server's writes, any proxy in between, and how the page reads it. Caliper can't tell how much sooner the first word would appear.`
 - **The first run much slower in one segment** (with 2 or more runs): a segment whose first-run value is more than its own [Where to look](#where-to-look) limit above the warm runs' median. Applying a limit to a difference is Caliper's own reasoning, and with one or two warm runs it's thin evidence, so the basis says how many runs it compared. A segment no warm run had (a CORS preflight that's cached later, say) counts in full. `The first run (a fresh browser) waited 3484 ms longer for the first word than the one warm run (5221 vs 1737 ms). browser: response headers received: 5196 ms on the first run, 1723 ms warm (+3473 ms, more than its 600 ms limit). Caliper can't tell why from timings alone.` It doesn't say "cold start": the first run is the first in a fresh browser, not a first-ever visit, and Caliper can't see a server's cold start.
 - **One part is half the prompt or more** (with `--server-timings` and named parts; Caliper's own threshold: more than all the rest together): a fact, with no advice to trim, because Caliper didn't measure what trimming would change. `article is 55% of the prompt (3207 of 5827 bytes, labelled user).` Only when every message was measured; with several marked visits that differ, only when it's half or more in each (`55–56% … in each of 2 marked visits`). Bytes, not tokens.
-- **Text from outside in the prompt** (any part your app labelled `outside`, with `--server-timings`): `comments (87 bytes): your app labelled it outside, and it's in the prompt your app reported to run.prompt(). Text from outside can carry instructions (indirect prompt injection). Keep it apart from your own instructions and mark where it starts and ends. Caliper doesn't detect injection; this is a risk, not a finding.` Basis: [OWASP Top 10 for LLM Applications 2025, LLM01 Prompt Injection](https://genai.owasp.org/llmrisk/llm01-prompt-injection/), "Segregate and identify external content." The label is your app's; Caliper doesn't check it. A part labelled `outside` in only some marked visits isn't named here (its source column shows each visit's).
+- **Text from outside in the prompt** (any part your app labelled `outside`, with `--server-timings`): `comments (87 bytes) is outside text sent to the model — a prompt-injection risk.` Under "why": your app labelled it outside and it's in the prompt your app reported to `run.prompt()`; text from outside can carry instructions (indirect prompt injection); keep it apart from your own instructions and mark where it starts and ends; Caliper doesn't detect injection, so this is a risk, not a finding. Basis: [OWASP Top 10 for LLM Applications 2025, LLM01 Prompt Injection](https://genai.owasp.org/llmrisk/llm01-prompt-injection/), "Segregate and identify external content." The label is your app's; Caliper doesn't check it. A part labelled `outside` in only some marked visits isn't named here (its source column shows each visit's).
 - **Parts not labelled**: the line that names them and how to label them (it used to sit under the prompt sizes).
 
 In the terminal each item is one line (`- …`) with `basis: …` indented on the next. In the report each item is one bold line with its measured number (`Doesn't stream: the whole answer arrived at once (0 ms between first and last word, median of 2 warm runs), and people waited 349 ms for the first word.`), and a collapsed "why" with the rest of the text and `Basis: …` with its link. A streaming span of 0 ms reads "arrived at once (0 ms between first and last word, …)". Tested with `npm run test:hints` (each rule firing and not firing, on the numbers of Quill's Nov 13 run, where only the 55% part fires, and the demo's), and end to end with `npm run test:prompt`.
+
+A real example, from a run on a local test app built to trip every rule (its server held only the first reply 1.8 s and sent the reply in one write), Nov 14, 2026, terminal from the verdict on:
+
+```
+verdict
+    People waited a median of 349 ms for the first word (2 warm runs).
+    In the browser: nothing over its limit.
+    Inside the server: nothing over its limit.
+    5 things to look at ↓
+Advice — from this run's numbers
+    - Doesn't stream: the whole answer arrived at once (0 ms between first and last word, median of 2 warm runs), and people waited 349 ms for the first word. Stream the response end to end: the server's writes, any proxy in between, and how the page reads it. Caliper can't tell how much sooner the first word would appear.
+      basis: Caliper's own threshold: a streaming span under 250 ms. No outside source.
+    - The first run (a fresh browser) waited 1519 ms longer for the first word than the median of 2 warm runs (1868 vs 349 ms). browser: response headers received: 1838 ms on the first run, 335 ms warm (+1503 ms, more than its 600 ms limit). Caliper can't tell why from timings alone.
+      basis: Caliper's own reasoning: each segment's Where-to-look limit, applied to the gap between the first run and the warm runs, from 1 first run and 2 warm runs. 600 ms: Lighthouse's "Reduce server response time" audit fails above 600 ms.
+    - article is 92% of the prompt (2000 of 2170 bytes, labelled user).
+      basis: Caliper's own threshold: one named part is 50% or more of the prompt's measured bytes, more than all the rest together. These are bytes your app reported, not tokens; Caliper didn't measure what trimming it would change.
+    - comments (70 bytes) is outside text sent to the model — a prompt-injection risk. Your app labelled it outside, and it's in the prompt your app reported to run.prompt(). Text from outside can carry instructions (indirect prompt injection). Keep it apart from your own instructions and mark where it starts and ends. Caliper doesn't detect injection; this is a risk, not a finding.
+      basis: OWASP Top 10 for LLM Applications 2025, LLM01 Prompt Injection: "Segregate and identify external content." https://genai.owasp.org/llmrisk/llm01-prompt-injection/
+    - 1 part not labelled (notes): add source: "app", "user" or "outside" to each in run.prompt() — needs caliper-timings 0.6.0; see its README, "Choosing a source"
+```
+
+In the HTML report the same five items are five bold lines under the Verdict, with the rest of each folded under "why".
 
 ### Why these limits?
 

@@ -1,19 +1,26 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 — 2026-11-14
+
+Advice: what to look at next, from this run's numbers only. The report and the terminal output are reordered around it: see [Upgrading from 0.5.0](https://github.com/Jia-A/caliper/tree/main/packages/cli#upgrading-from-050). Tested on local fixtures and local apps only.
 
 ### Added
 
-- **Advice: next steps from this run's numbers.** A new section after the hints and checks (terminal: before the summary; HTML: after the server section, before Checks). Each item fires only from a number this run measured, quotes it, and gives the basis of its threshold, or says nothing: `Advice — nothing to suggest from this run's numbers.` First rules: the streaming span under 250 ms (Caliper's own threshold), with the span and the wait for the first word; any part the app labelled `outside`, named with its bytes, citing OWASP LLM01 (a risk, not a finding: Caliper doesn't detect injection); and parts not labelled. Tested with `npm run test:hints` and `npm run test:prompt`.
-
-- **Advice: two more rules.** The first run much slower in one segment: a segment whose first-run value is more than its own Where-to-look limit above the warm runs' median, with both values and the gap (`browser: response headers received: 5196 ms on the first run, 1723 ms warm (+3473 ms, more than its 600 ms limit)`); no cause claimed. And one named part 50% or more of the prompt (Caliper's own threshold), as a fact only: `article is 55% of the prompt (3207 of 5827 bytes, labelled user).` Thresholds checked first on Quill's and the demo's Nov 13 runs and the fixtures. Tested with `npm run test:hints`.
+- **Advice.** Right under the verdict, in the terminal and the HTML report. Each item fires only from a number this run measured, quotes it, and gives the basis of its threshold (a source with its link, or "Caliper's own threshold/reasoning"). When the data isn't there (no `--server-timings`, no warm run), there's no advice about it; when nothing fires, `Advice — nothing to suggest from this run's numbers.` The rules:
+  - **Doesn't stream** (streaming span under 250 ms, Caliper's own threshold): `Doesn't stream: the whole answer appeared within 212 ms of the first word (streaming span, the one warm run), and people waited 730 ms for the first word.` A span of 0 ms reads `the whole answer arrived at once (0 ms between first and last word, …)`. Then what to do, and that Caliper can't tell how much sooner the first word would appear.
+  - **The first run much slower in one segment**: a segment whose first-run value is more than its own Where-to-look limit above the warm runs' median (Caliper's own reasoning on top of that limit's source), with both values and the gap. No cause claimed: the first run is a fresh browser, not a server cold start.
+  - **One named part is half the prompt or more** (Caliper's own threshold), as a fact only: `article is 55% of the prompt (3207 of 5827 bytes, labelled user).` No advice to trim, since trimming wasn't measured.
+  - **Text from outside in the prompt**: `comments (87 bytes) is outside text sent to the model — a prompt-injection risk.` From your app's `source: "outside"` label. Basis: OWASP Top 10 for LLM Applications 2025, LLM01 Prompt Injection, "Segregate and identify external content". A risk, not a finding: Caliper doesn't detect injection.
+  - **Parts not labelled**: the line that names them and how to label them.
+  Thresholds for the two "Caliper's own" rules were checked first on the numbers of real runs (Quill's and the demo's on Nov 13) and the fixtures. Tested with `npm run test:hints`, `npm run test:serverblock` and end to end with `npm run test:prompt`.
 - **A server step that ran before the model call says so.** When an app-named span ended at or before `modelCallSent`, its full "Where to look" hint adds `It ended before the model call was sent (postgresEnd 547 ms, model call sent 547 ms), so all 547 ms of it came before the model call.`, or with several visits `in 2 of 3 marked visits`. An order of marks, not a cause. Terminal and HTML. Tested with `npm run test:hints`.
 
 ### Changed
 
-- **Report layout: Advice first, each thing once.** Advice sits right under the Verdict, which ends with `<n> things to look at ↓` (nothing when none fire); in the terminal, Advice comes right after the `verdict` lines, which end with the same count. In the HTML report each item is one bold line with its measured number, and the rest (what to do, caveats, basis) is folded under "why"; the terminal keeps one line per item with the basis indented under it. The separate Streaming section is gone: the Checks line says ✓ or ✗ with the span and, when it doesn't stream, links to the advice. The Request Map is shown once, under the server bar, not again in Details. A streaming span of 0 ms reads `the whole answer arrived at once (0 ms between first and last word, …)`. Tested with `npm run test:hints`, `npm run test:serverblock` and `npm run test:prompt`.
-- **The streaming check's "Fix:" line is gone**, and its claim (`users see the first word sooner, total time stays the same`) wasn't measured. What to do is in Advice, with the measured span and wait, and that Caliper can't tell how much sooner the first word would appear.
-- **The "parts not labelled" line moved** from under the prompt sizes to Advice, word for word.
+- **Report layout: Advice first, each thing once.** The HTML report goes Verdict (ending with `<n> things to look at ↓`, or nothing when no advice fires) → Advice → the browser and server bars with where to look → Checks → Details. Each advice item is one bold line with its measured number; what to do, the caveats and the basis are folded under "why". The separate Streaming section is gone: its Checks line says ✓ or ✗ with the span and, when it doesn't stream, links to the advice. The Request Map is shown once, under the server bar, not again in Details. Tested with `npm run test:hints` and `npm run test:serverblock`.
+- **Terminal order:** the `verdict` lines now end with `<n> things to look at ↓` when advice fired, then the Advice block, then the `report:` line (still last). Before, the verdict was directly followed by the report line. Tested with `npm run test:prompt` and `npm run test:marked`.
+- **The streaming "Fix:" line is gone** (`Fix: stream the response; users see the first word sooner, total time stays the same.`): its claim wasn't measured. What to do is in Advice.
+- **The "parts not labelled" line moved** from under the prompt sizes to Advice.
 
 ## 0.5.0 — 2026-11-13
 
