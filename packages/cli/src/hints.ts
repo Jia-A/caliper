@@ -331,13 +331,12 @@ export function verdictLines({ median, warm, browser, server }: {
 
 // A streaming span shorter than this means the answer arrived in one go.
 export const STREAMS_MIN_MS = 250;
-const STREAM_FIX = "Fix: stream the response; users see the first word sooner, total time stays the same.";
 
 /** The streaming check's verdict: the streaming span (first word → done) over the settled warm runs, and how many. */
-export function streamingVerdict(span: number, settled: number): { status: "pass" | "fail"; verdict: string; fix?: string } {
+export function streamingVerdict(span: number, settled: number): { status: "pass" | "fail"; verdict: string } {
   const measured = `streaming span ${span} ms (${settled === 1 ? "the one warm run" : `median of ${settled} warm runs`})`;
   return span < STREAMS_MIN_MS
-    ? { status: "fail", verdict: `Doesn't stream: users see nothing until the whole answer is ready — ${measured}.`, fix: STREAM_FIX }
+    ? { status: "fail", verdict: `Doesn't stream: users see nothing until the whole answer is ready — ${measured}.` }
     : { status: "pass", verdict: `Streams — ${measured}.` };
 }
 

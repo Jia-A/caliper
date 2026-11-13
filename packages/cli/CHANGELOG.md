@@ -4,7 +4,14 @@
 
 ### Added
 
+- **Advice: next steps from this run's numbers.** A new section after the hints and checks (terminal: before the summary; HTML: after the server section, before Checks). Each item fires only from a number this run measured, quotes it, and gives the basis of its threshold, or says nothing: `Advice — nothing to suggest from this run's numbers.` First rules: the streaming span under 250 ms (Caliper's own threshold), with the span and the wait for the first word; any part the app labelled `outside`, named with its bytes, citing OWASP LLM01 (a risk, not a finding: Caliper doesn't detect injection); and parts not labelled. Tested with `npm run test:hints` and `npm run test:prompt`.
+
 - **A server step that ran before the model call says so.** When an app-named span ended at or before `modelCallSent`, its full "Where to look" hint adds `It ended before the model call was sent (postgresEnd 547 ms, model call sent 547 ms), so all 547 ms of it came before the model call.`, or with several visits `in 2 of 3 marked visits`. An order of marks, not a cause. Terminal and HTML. Tested with `npm run test:hints`.
+
+### Changed
+
+- **The streaming check's "Fix:" line is gone**, and its claim (`users see the first word sooner, total time stays the same`) wasn't measured. What to do is in Advice, with the measured span and wait, and that Caliper can't tell how much sooner the first word would appear.
+- **The "parts not labelled" line moved** from under the prompt sizes to Advice, word for word.
 
 ## 0.5.0 — 2026-11-13
 

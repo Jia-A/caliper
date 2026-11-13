@@ -8,6 +8,7 @@ import { launchChromium } from "./browser.js";
 import { combineImageRules, describeRule, imageRule, splitPolicies, type ImageRule } from "./csp.js";
 import { ButtonNotFoundError, CliError, messageOf, PageLoadError, UnidentifiedRequestError } from "./errors.js";
 import { buttonHints, buttonNames, expiredLoginCookies, loadFailureHints } from "./loadhints.js";
+import { adviceItems, formatAdvice } from "./advice.js";
 import { browserBar, browserHints, formatHints, serverBar, serverHints, STREAMS_MIN_MS, streamingVerdict, verdictLines, type HintList } from "./hints.js";
 import { formatServerBlock, parseServerRecord, plural, serverBlock, type ServerRecord, type ServerReport } from "./serverblock.js";
 import { renderReport, type ReportReply } from "./report.js";
@@ -330,6 +331,14 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
       }] : []),
       ...(cspReport ? [{ name: "csp", report: cspReport }] : []),
     ];
+    // Advice: only from numbers this run measured; the streaming span as the verdict above uses it.
+    const settled = doneSummary.warm - doneSummary.unsettled;
+    const advice = adviceItems({
+      streaming: doneSummary.span !== null && settled > 0 ? { span: doneSummary.span, settled } : null,
+      firstWord: summary && summary.median !== null ? { median: summary.median, warm: summary.warm } : null,
+      prompt: serverReport?.block?.prompt ?? null,
+    });
+    console.log(formatAdvice(advice));
     console.log(formatSummaryBlock(entries));
     // The verdict, under the summary: the same lines as the report's top.
     const verdict = verdictLines({
@@ -366,6 +375,7 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
           browser: browserBar(loaded.filter((r) => r.run > 1).map(({ run, result, parts }) => ({ run, total: result.ms, segments: parts.segments }))),
           server: serverReport?.block ? serverBar(serverReport.block) : null,
         },
+        advice,
       });
       const existed = existsSync(reportPath);
       writeFileSync(reportPath, html);

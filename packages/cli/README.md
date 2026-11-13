@@ -94,8 +94,9 @@ Every audit that finishes writes `caliper-report.html` in the current directory.
    With one warm run or one marked visit, the caption says `the one warm run` or `the one visit`. Nothing measured once is called a median, in the report or the terminal: the summary line reads `cold <X> ms · warm <Y> ms (the one warm run) · worst <Z> ms`, the done line `done: <X> ms · streaming span <Y> ms (the one warm run)`, and the tile `The one warm run`.
    Each segment shows its name and ms. A segment over its limit is drawn in a warning colour with a hatch and labelled "over". A key under the bar repeats every segment in words (`… — 311 ms — over its 100 ms limit`). Time no segment explains is drawn as "unattributed" and is never "over".
 3. **Where to look.** The hints for that side ([Where to look](#where-to-look)), right under its bar.
-4. **Checks.** The summary block and each check's section (streaming, Stop, double-send, canary, CSP).
-5. **Details**, collapsed: the cold, median and worst tiles, the timeline per run, the Data table (one row per segment, one column per run, so it fits a narrow screen and scrolls inside its own box if it doesn't), request matching with the clock check, "Before the reply", and the server marks table with its run details.
+4. **Advice.** Next steps from this run's numbers, each with its basis ([Advice](#advice)), or `Nothing to suggest from this run's numbers.`
+5. **Checks.** The summary block and each check's section (streaming, Stop, double-send, canary, CSP).
+6. **Details**, collapsed: the cold, median and worst tiles, the timeline per run, the Data table (one row per segment, one column per run, so it fits a narrow screen and scrolls inside its own box if it doesn't), request matching with the clock check, "Before the reply", and the server marks table with its run details.
 
 It follows the system's light or dark theme, and the layout works down to phone width. Tested with `npm run test:hints` (unit), and with `npm run test:marked` and `npm run test:auth` (end to end).
 
@@ -302,7 +303,7 @@ After the timed runs, Caliper builds a match key from the AI request each run pi
 
   The rest is shown only when every part was found in the message and they fit inside it. Otherwise a line says why: `no rest of message 2: not every part was found in it`, or `the parts add up to 60 bytes, more than the message (they overlap or repeat)`. A part the server didn't find in its message shows `– bytes   not found in message 2 (the text given isn't in it)`; one whose text wasn't a string, `not measured`; one it couldn't compare, its bytes and `not checked`. A `parts` field Caliper can't read, or with a name that isn't a lowercase name, shows `parts ? — <why>` under that message only. Visits whose parts have different names aren't compared (`marked visit 2 named different parts`). Tested with `npm run test:serverblock` and end to end with `npm run test:prompt`, where a marker in a part's text and in its name never reaches the terminal or the HTML report; breaking both name guards makes that test fail.
 
-  **Who wrote each part.** When the prompt has named parts, each part says who wrote its text, as your app labelled it with `source` (caliper-timings 0.6.0): `app` (your own text), `user` (the person using the feature) or `outside` (anyone else: a database, the web, retrieved documents, other users' content), shown as `labelled by app`. Caliper never guesses a source: a part without one, the rest of a message, and a message with no parts named are `unknown`. A legend line under the heading says what the words mean. When some parts have no source, one line under the table names them and says how to label them: `2 parts not labelled (article, author): add source: "app", "user" or "outside" to each in run.prompt() — needs caliper-timings 0.6.0; see its README, "Choosing a source"`. A source that isn't one of the three makes that message's parts unreadable (`parts ? — part 1's source isn't "app", "user" or "outside"`), and is never shown. With several visits, a part whose source differs names each visit's. The HTML report has a source column with a coloured square and the word (blue app, yellow user, red outside, grey unknown). Prompts without named parts look as before. Tested with `npm run test:serverblock`, and end to end with `npm run test:prompt`, where a marker given as a part's source is dropped by the wrapper and reaches neither the terminal nor the HTML report. A source is the app's claim: Caliper shows it, it doesn't check it.
+  **Who wrote each part.** When the prompt has named parts, each part says who wrote its text, as your app labelled it with `source` (caliper-timings 0.6.0): `app` (your own text), `user` (the person using the feature) or `outside` (anyone else: a database, the web, retrieved documents, other users' content), shown as `labelled by app`. Caliper never guesses a source: a part without one, the rest of a message, and a message with no parts named are `unknown`. A legend line under the heading says what the words mean. When some parts have no source, one line in [Advice](#advice) names them and says how to label them: `2 parts not labelled (article, author): add source: "app", "user" or "outside" to each in run.prompt() — needs caliper-timings 0.6.0; see its README, "Choosing a source"`. A source that isn't one of the three makes that message's parts unreadable (`parts ? — part 1's source isn't "app", "user" or "outside"`), and is never shown. With several visits, a part whose source differs names each visit's. The HTML report has a source column with a coloured square and the word (blue app, yellow user, red outside, grey unknown). Prompts without named parts look as before. Tested with `npm run test:serverblock`, and end to end with `npm run test:prompt`, where a marker given as a part's source is dropped by the wrapper and reaches neither the terminal nor the HTML report. A source is the app's claim: Caliper shows it, it doesn't check it.
 
   **By source.** Under the total, the bytes each source wrote, with its share of the total:
 
@@ -409,6 +410,16 @@ The browser list follows the browser summary in the terminal. The server list fo
 
 Tested with `npm run test:hints` (unit) and `npm run test:marked` (end to end on the fixtures). It hasn't been tried on a real app yet.
 
+### Advice
+
+After the hints and checks, before the summary (in the HTML report, after the server section and before Checks), Caliper lists next steps. Each one fires only from a number this run measured, quotes it, and says the basis of its threshold: a source, or Caliper's own reasoning. When the data isn't there (for example no `--server-timings`, so no prompt sizes), there's no advice about it. With nothing to suggest: `Advice — nothing to suggest from this run's numbers.`
+
+- **Doesn't stream** (the streaming span under 250 ms, Caliper's own threshold): `Doesn't stream: the whole answer appeared within 212 ms of the first word (streaming span, the one warm run), and people waited 730 ms for the first word. Stream the response end to end: the server's writes, any proxy in between, and how the page reads it. Caliper can't tell how much sooner the first word would appear.`
+- **Text from outside in the prompt** (any part your app labelled `outside`, with `--server-timings`): `comments (87 bytes): your app labelled it outside, and it's in the prompt your app reported to run.prompt(). Text from outside can carry instructions (indirect prompt injection). Keep it apart from your own instructions and mark where it starts and ends. Caliper doesn't detect injection; this is a risk, not a finding.` Basis: [OWASP Top 10 for LLM Applications 2025, LLM01 Prompt Injection](https://genai.owasp.org/llmrisk/llm01-prompt-injection/), "Segregate and identify external content." The label is your app's; Caliper doesn't check it. A part labelled `outside` in only some marked visits isn't named here (its source column shows each visit's).
+- **Parts not labelled**: the line that names them and how to label them (it used to sit under the prompt sizes).
+
+Each item is followed by `basis: …` in the terminal and `Basis: …` in the report, with its link. Tested with `npm run test:hints` (each rule firing and not firing, Quill's Nov 13 prompt firing nothing), and end to end with `npm run test:prompt`.
+
 ### Why these limits?
 
 | Layer | Limit | Basis |
@@ -456,7 +467,7 @@ Every check ends in a verdict marked ✓ (pass), ⚠ (warning), ✗ (fail) or ? 
 | ✓ Streams | Text appears gradually. The warm-run median streaming span (first word → done) is 250 ms or more. |
 | ✗ Doesn't stream | The whole answer appears at once, so users see nothing until it's ready. |
 
-The verdict carries the number it's based on: `Streams — streaming span 3618 ms (the one warm run).`, or `(median of 3 warm runs)`.
+The verdict carries the number it's based on: `Streams — streaming span 3618 ms (the one warm run).`, or `(median of 3 warm runs)`. The 250 ms line is Caliper's own threshold, with no outside source. When it doesn't stream, what to do is in [Advice](#advice).
 
 ### Stop (`--stop`)
 

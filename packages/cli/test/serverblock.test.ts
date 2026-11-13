@@ -228,7 +228,7 @@ function input(server: ServerReport | null): ReportInput {
     summary: { cold: 500, coldUnidentified: false, median: null, worst: 500, warm: 0, warmFailed: 0, warmUnidentified: 0 },
     runs: [{ run: 1, total: 500, request: null, segments: [], clock: null, reply: { firstByte: null, preReply: [] } }],
     failed: [], unidentified: [], stop: null, double: null, canary: null, csp: null,
-    streaming: { status: "unknown", verdict: "Inconclusive", checks: [], notes: [] }, checks: [], server,
+    streaming: { status: "unknown", verdict: "Inconclusive", checks: [], notes: [] }, checks: [], server, advice: [],
     hints: { browser: null, server: null },
     verdict: ["People waited a median of 500 ms for the first word (1 warm run)."],
     bars: { browser: null, server: null },
@@ -558,14 +558,15 @@ test("source: outside is shown as outside", () => {
   assert.ok(lines(block).includes("        comments                      3328 bytes   source: outside (labelled by app)"), block);
 });
 
-test("source: unlabelled parts are unknown, and one line names them with the fix; a message without parts is unknown too", () => {
+test("source: unlabelled parts are unknown, and the view names them with the fix (shown in Advice, not here); a message without parts is unknown too", () => {
   const user = [{ name: "title", bytes: 21, found: true, source: "user" }, { name: "article", bytes: 3232, found: true }, { name: "author", bytes: 11, found: true }];
   const block = text(visits({ marks: QUILL_MARKS, prompt: { messages: [{ role: "system", bytes: 2499 }, { role: "user", bytes: 3328, parts: user }] } }), 1);
   assert.ok(lines(block).includes("    1 system                          2499 bytes   43%   source: unknown (no parts named)"), block);
   assert.ok(lines(block).includes("        article                       3232 bytes   source: unknown (not labelled)"), block);
-  assert.ok(lines(block).includes(FIX(2, "article, author")), block);
-  const one = text(visits({ marks: QUILL_MARKS, prompt: labelled(LABELLED, [{ name: "article", bytes: 3232, found: true }]) }), 1);
-  assert.ok(lines(one).includes(FIX(1, "article")), one);
+  assert.ok(!lines(block).some((l) => l.includes("not labelled (")), block);
+  const view = (prompt: unknown) => serverBlock(visits({ marks: QUILL_MARKS, prompt }), 1).prompt.unlabelled;
+  assert.equal(view({ messages: [{ role: "system", bytes: 2499 }, { role: "user", bytes: 3328, parts: user }] }), FIX(2, "article, author").trim());
+  assert.equal(view(labelled(LABELLED, [{ name: "article", bytes: 3232, found: true }])), FIX(1, "article").trim());
 });
 
 test("source: no parts anywhere, no source, no legend and no fix line (prompt sizes as before)", () => {
@@ -600,7 +601,7 @@ test("HTML: a source column with a swatch and the word, labelled by app or not l
   assert.ok(html.includes('<tr class="part"><th scope="row">article</th><td class="num">3232</td><td></td><td class="source"><span class="src src-unknown"></span>unknown <span class="muted">not labelled</span></td></tr>'), html);
   assert.ok(html.includes('<tr><th scope="row">total</th><td class="num">5827</td><td></td><td class="source"></td></tr>'), html);
   assert.ok(html.includes('<span class="src src-outside"></span>outside (anyone else)'), "legend");
-  assert.ok(html.includes(`<li>${FIX(1, "article").trim().replaceAll('"', "&quot;")}</li>`), html);
+  assert.ok(!html.includes("not labelled (article)"), html);
   const outside = serverSection(report(visits({ marks: QUILL_MARKS, prompt: labelled(LABELLED, [{ name: "comments", bytes: 3328, found: true, source: "outside" }]) }), 1));
   assert.ok(outside.includes('<td class="source"><span class="src src-outside"></span>outside <span class="muted">labelled by app</span></td>'), outside);
   const noParts = serverSection(report(visits({ marks: QUILL_MARKS, prompt: { messages: [{ role: "user", bytes: 10 }] } }), 1));

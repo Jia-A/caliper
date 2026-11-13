@@ -103,7 +103,6 @@ try {
     "        no rest of message 5: not every part was found in it",
     "    total (4 of 5 measured)            152 bytes",
     "        no by-source totals: message 3 wasn't measured",
-    '    1 part not labelled (ghost): add source: "app", "user" or "outside" to each in run.prompt() — needs caliper-timings 0.6.0; see its README, "Choosing a source"',
   ];
 
   check(out.code === 0, `exits 0 (got ${out.code})`);
@@ -112,6 +111,13 @@ try {
     `the rows: system, ? (a role that was text), user not measured, assistant, user, total of 4 measured (got:\n${lines.slice(at + 1, at + 1 + want.length).join("\n")})`);
   check(!out.stdout.includes(SECRET), "the marker isn't in the terminal output");
   check(!out.stderr.includes(SECRET), "the marker isn't in stderr");
+  // Advice: the unlabelled-part fix moved there, and the part labelled outside named with its bytes.
+  const adviceAt = lines.indexOf("Advice — from this run's numbers");
+  const advice = adviceAt === -1 ? [] : lines.slice(adviceAt + 1, lines.findIndex((l, i) => i > adviceAt && !l.startsWith("    ")));
+  check(advice.includes('    - 1 part not labelled (ghost): add source: "app", "user" or "outside" to each in run.prompt() — needs caliper-timings 0.6.0; see its README, "Choosing a source"'),
+    `Advice has the unlabelled-part line (got: ${advice.join(" | ") || "no Advice section"})`);
+  check(advice.some((l) => l.startsWith("    - marker (24 bytes): your app labelled it outside")), `Advice names the part labelled outside (got: ${advice.join(" | ") || "no Advice section"})`);
+  check(!out.stdout.split("\n").slice(at, adviceAt === -1 ? undefined : adviceAt).some((l) => l.includes("not labelled (ghost)")), "the unlabelled-part line isn't in the prompt sizes any more");
   check(at > 0 && lines[at - 1] === "  Request Map — what's inside each AI request (sizes only)", `the Request Map title is right above the prompt sizes (got: ${lines[at - 1] ?? "nothing"})`);
   check(html.length > 0, "the report was written");
   check(html.includes("<h3>Request Map — what's inside each AI request (sizes only)</h3>"), "the HTML report titles the section Request Map");

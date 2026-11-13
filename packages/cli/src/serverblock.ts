@@ -287,7 +287,7 @@ export interface PromptView {
   visits: number[]; // one column each; a single column when one visit, or all the same
   rows: PromptRow[];
   legend: string | null; // what source means; only when the prompt has named parts
-  unlabelled: string | null; // the parts with no source, and how to label them
+  unlabelled: string | null; // the parts with no source, and how to label them (shown in Advice)
   none: string | null; // the line when no visit recorded a prompt
   lines: string[]; // a visit with none, different messages or parts, or unreadable sizes
 }
@@ -441,7 +441,7 @@ function promptLines(view: PromptView): string[] {
   return shown.length ? [`  ${view.title}`, ...shown] : [];
 }
 
-function promptBody({ heading, note, visits, rows, legend, unlabelled, none, lines }: PromptView): string[] {
+function promptBody({ heading, note, visits, rows, legend, none, lines }: PromptView): string[] {
   if (none) return [`  ${none}`];
   const sourceText = (s: RowSource) => `   source: ${s.word}${s.note ? ` (${s.note})` : ""}`;
   const row = ({ kind, label, values, stats, tail, source }: PromptRow) => {
@@ -457,7 +457,6 @@ function promptBody({ heading, note, visits, rows, legend, unlabelled, none, lin
       ...(legend ? [`    ${legend}`] : []),
       ...(visits.length > 1 ? [`    ${"marked visit".padEnd(LABEL_WIDTH)}${visits.map((v) => String(v).padStart(6)).join("")}`] : []),
       ...(rows.length ? rows.map(row) : ["    no messages"]),
-      ...(unlabelled ? [`    ${unlabelled}`] : []),
     ] : []),
     ...lines.map((l) => `  ${l}`),
   ];

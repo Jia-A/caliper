@@ -1,5 +1,6 @@
 // Self-contained HTML timeline for an audit: inline CSS/JS, no external requests.
 
+import type { AdviceItem } from "./advice.js";
 import type { Bar, BarPart, Hint, HintList } from "./hints.js";
 import type { PromptView, RowSource, ServerReport, ServerRow } from "./serverblock.js";
 import type {
@@ -46,6 +47,7 @@ export interface ReportInput {
   hints: { browser: HintList | null; server: HintList | null }; // browser: null with no run measured; server: null without a server block
   verdict: string[]; // the median wait, then one line per side (hints.ts verdictLines)
   bars: { browser: Bar | null; server: Bar | null }; // null when there's nothing to draw
+  advice: AdviceItem[]; // advice.ts adviceItems; none fired is an empty list
 }
 
 // The button by name (as the regex it's matched with), or the CSS selector.
@@ -71,7 +73,7 @@ const SEGMENTS: { key: SegmentKey; legend: string }[] = [
 
 // Top to bottom: the verdict; each side's bar and where to look (browser, then the server, never
 // merged); the checks; then everything else in a collapsed Details.
-export function renderReport({ url, measure, chat, output, steps, startedAt, summary, runs, failed, unidentified, stop, double, canary, csp, streaming, checks, server, hints, verdict, bars }: ReportInput): string {
+export function renderReport({ url, measure, chat, output, steps, startedAt, summary, runs, failed, unidentified, stop, double, canary, csp, streaming, checks, server, hints, verdict, bars, advice }: ReportInput): string {
   const timeline: ChartRun[] = runs.map((run) => ({ ...run, bars: barSegments(run) }));
   const scale = Math.max(...runs.map((r) => r.total), 1);
   const ticks = niceTicks(scale);
@@ -120,6 +122,7 @@ export function renderReport({ url, measure, chat, output, steps, startedAt, sum
   </section>
   ${server ? serverTop(server, hints.server, bars.server) : ""}
 
+  ${adviceSection(advice)}
   ${summaryBlock(checks)}
   ${streamingSection(streaming)}
   ${stop ? stopSection(stop) : ""}
@@ -406,7 +409,7 @@ const SOURCE_LEGEND = `<p class="muted">Source: who wrote the text, as your app 
 // several visits that differ, a column per visit and min, median, max; who wrote each part when
 // the prompt has named parts), or the line saying none were recorded; a line per visit that isn't
 // compared.
-function promptHtml({ title, heading, note, visits, rows, legend, unlabelled, none, lines }: PromptView): string {
+function promptHtml({ title, heading, note, visits, rows, legend, none, lines }: PromptView): string {
   const many = visits.length > 1;
   const head = (many
     ? `${visits.map((v) => `<th scope="col" class="num">visit ${v} (bytes)</th>`).join("")}<th scope="col" class="num">min</th><th scope="col" class="num">median</th><th scope="col" class="num">max</th><th scope="col">note</th>`
@@ -418,7 +421,7 @@ function promptHtml({ title, heading, note, visits, rows, legend, unlabelled, no
     r.kind === "note"
       ? `<tr class="part note"><th scope="row" colspan="${columns}">${esc(r.label)}</th></tr>`
       : `<tr${r.kind === "part" ? ' class="part"' : r.kind === "source" ? ' class="by-source"' : ""}><th scope="row">${esc(r.label)}</th>${cells(r)}</tr>`;
-  const notes = [...(none ? [none] : []), ...(unlabelled ? [unlabelled] : []), ...lines];
+  const notes = [...(none ? [none] : []), ...lines];
   if (!heading && !notes.length) return "";
   return `<h3>${esc(title)}</h3>
       ${heading ? `<h4>${esc(heading[0]!.toUpperCase() + heading.slice(1))}</h4>
@@ -458,6 +461,15 @@ function shortHtml(h: Hint): string {
 }
 
 const linksHtml = (links: string[]) => links.map((l) => `<a href="${esc(l)}" rel="noopener noreferrer">${esc(l)}</a>`).join(" · ");
+
+// Advice: each item with its basis (and link) under it, or a line saying there's nothing.
+function adviceSection(items: AdviceItem[]): string {
+  return `<section aria-labelledby="advice-h" class="advice">
+    <h2 id="advice-h">Advice</h2>
+    ${items.length ? `<ul>${items.map(({ text, basis, link }) => `<li><p>${esc(text)}</p>${basis ? `<p class="muted">Basis: ${esc(basis)}${link ? ` ${linksHtml([link])}` : ""}</p>` : ""}</li>`).join("")}</ul>`
+      : "<p>Nothing to suggest from this run's numbers.</p>"}
+  </section>`;
+}
 
 const STATUS_MARK: Record<CheckStatus, string> = { pass: "✓", warn: "⚠", fail: "✗", unknown: "?" };
 
