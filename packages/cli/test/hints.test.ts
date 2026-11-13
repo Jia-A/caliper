@@ -442,10 +442,10 @@ test("HTML: the prompt sizes table is in the main server section, under the bar,
   );
   const top = serverTop({ lines: [], block: b }, serverHints(b), serverBar(b));
   const barAt = top.indexOf('class="bseg');
-  const promptAt = top.indexOf("<h3>Prompt sizes (marked visit 1)</h3>");
+  const promptAt = top.indexOf("<h4>Prompt sizes (marked visit 1)</h4>");
   assert.ok(barAt !== -1 && promptAt > barAt, top);
   assert.ok(top.includes('<tr><th scope="row">1 system</th><td class="num">2499</td><td>43%</td></tr>'), top);
   assert.ok(promptAt < top.indexOf("Where to look — server"), "before where to look");
   const html = renderReport(input(null, { lines: [], block: b }, serverHints(b), { bars: { browser: null, server: serverBar(b) } }));
-  assert.equal(html.split("<h3>Prompt sizes (marked visit 1)</h3>").length - 1, 2, "in the main section and in Details");
+  assert.equal(html.split("<h4>Prompt sizes (marked visit 1)</h4>").length - 1, 2, "in the main section and in Details");
 });

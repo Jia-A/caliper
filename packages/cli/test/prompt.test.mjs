@@ -112,8 +112,10 @@ try {
     `the rows: system, ? (a role that was text), user not measured, assistant, user, total of 4 measured (got:\n${lines.slice(at + 1, at + 1 + want.length).join("\n")})`);
   check(!out.stdout.includes(SECRET), "the marker isn't in the terminal output");
   check(!out.stderr.includes(SECRET), "the marker isn't in stderr");
+  check(at > 0 && lines[at - 1] === "  Request Map — what's inside each AI request (sizes only)", `the Request Map title is right above the prompt sizes (got: ${lines[at - 1] ?? "nothing"})`);
   check(html.length > 0, "the report was written");
-  check(html.includes("<h3>Prompt sizes (the same in marked visits 1, 2)</h3>") && html.includes('<tr><th scope="row">5 user</th><td class="num">72</td><td>47%</td><td class="source"></td></tr>'),
+  check(html.includes("<h3>Request Map — what's inside each AI request (sizes only)</h3>"), "the HTML report titles the section Request Map");
+  check(html.includes("<h4>Prompt sizes (the same in marked visits 1, 2)</h4>") && html.includes('<tr><th scope="row">5 user</th><td class="num">72</td><td>47%</td><td class="source"></td></tr>'),
     "the HTML report has the prompt sizes table, with the terminal's numbers");
   check(html.includes(`<tr class="part"><th scope="row">ghost</th><td class="num">–</td><td>not found in message 5 (the text given isn't in it)</td><td class="source"><span class="src src-unknown"></span>unknown <span class="muted">not labelled</span></td></tr>`),
     "the HTML report has the parts, with the not-found one");

@@ -18,6 +18,7 @@ const lines = (block: string) => block.split("\n");
 const text = (v: ReturnType<typeof visits>, n: number) => formatServerBlock(serverBlock(v, n));
 const FIRST_BYTES = "  first bytes sent = the server's first write to the browser. If your app writes anything before the model's reply (a heartbeat, an envelope), this is that write.";
 const SIZES_HEAD = (visit: number) => `  prompt sizes (marked visit ${visit}) — UTF-8 bytes of each message's text as your app passed it to run.prompt(); not tokens`;
+const TITLE = "  Request Map — what's inside each AI request (sizes only)";
 const NONE = "  prompt sizes: none recorded (needs caliper-timings 0.2.0 or later, and run.prompt(messages) before the model call)";
 
 test("one visit, Quill's record: marks in order, the postgres span and the model span", () => {
@@ -31,6 +32,7 @@ test("one visit, Quill's record: marks in order, the postgres span and the model
     "  spans",
     "    postgres                           300 ms   (postgresStart → postgresEnd)",
     "    model call → first bytes sent      101 ms",
+    TITLE,
     NONE,
     FIRST_BYTES,
   ].join("\n"));
@@ -38,11 +40,12 @@ test("one visit, Quill's record: marks in order, the postgres span and the model
 
 test("one visit: each pair without a valid span gets one line with the reason", () => {
   const block = text(visits({ marks: { cacheStart: 10, warmupEnd: 20, lockEnd: 58, lockStart: 63 } }), 1);
-  assert.deepEqual(lines(block).slice(-5), [
+  assert.deepEqual(lines(block).slice(-6), [
     "  spans",
     "    no cache span: cacheEnd wasn't recorded",
     "    no warmup span: warmupStart wasn't recorded",
     "    no lock span: lockEnd (58 ms) is before lockStart (63 ms)",
+    TITLE,
     NONE,
   ]);
 });
@@ -82,8 +85,9 @@ test("several visits, different reasons: one line, with each visit's reason", ()
 test("problems the server reported are printed, last, under their own heading", () => {
   const problem = 'mark name "db-start" rejected — use a letter, then up to 63 letters, digits or _ (e.g. dbStart)';
   const block = text(visits({ marks: { dbStart: 1, dbEnd: 301 }, runtime: "workers", problems: [problem] }), 1);
-  assert.deepEqual(lines(block).slice(-4), [
+  assert.deepEqual(lines(block).slice(-5), [
     "    Workers time waits only — a span with only computation inside (no I/O) can read 0 ms.",
+    TITLE,
     NONE,
     "  problems reported by the server",
     `    ${problem}`,
@@ -322,7 +326,7 @@ test("prompt sizes: a malformed prompt keeps the visit's timings and says why, n
 test("HTML: prompt sizes are a table with the terminal's rows: bytes and share per message, then the total", () => {
   const prompt = { messages: [{ role: "system", bytes: 2310 }, { role: "user", bytes: 5874 }] };
   const html = serverSection(report(visits({ marks: QUILL_MARKS, prompt }), 1));
-  assert.ok(html.includes("<h3>Prompt sizes (marked visit 1)</h3>"), html);
+  assert.ok(html.includes("<h4>Prompt sizes (marked visit 1)</h4>"), html);
   assert.ok(html.includes("UTF-8 bytes of each message's text as your app passed it to run.prompt(); not tokens"), html);
   const rows = htmlRows(html);
   assert.deepEqual(rows.get("1 system"), ["2310", "28%"]);
@@ -342,13 +346,34 @@ test("HTML: a message with no size, and the total of the measured ones", () => {
 test("HTML: none recorded, no messages, and an unreadable prompt each get their line, and no table", () => {
   const none = serverSection(report(visits({ marks: QUILL_MARKS }), 1));
   assert.ok(none.includes("prompt sizes: none recorded (needs caliper-timings 0.2.0 or later, and run.prompt(messages) before the model call)"), none);
-  assert.ok(!none.includes("<h3>Prompt sizes"), none);
+  assert.ok(!none.includes("<h4>Prompt sizes"), none);
   const empty = serverSection(report(visits({ marks: QUILL_MARKS, prompt: { messages: [] } }), 1));
-  assert.ok(empty.includes("<h3>Prompt sizes (marked visit 1)</h3>") && empty.includes("no messages"), empty);
+  assert.ok(empty.includes("<h4>Prompt sizes (marked visit 1)</h4>") && empty.includes("no messages"), empty);
   assert.ok(!htmlRows(empty).has("total"), empty);
   const bad = serverSection(report(visits({ marks: QUILL_MARKS, prompt: { messages: "x" } }), 1));
   assert.ok(bad.includes("prompt sizes ? — marked visit 1: the prompt field isn't { messages: [...] }"), bad);
-  assert.ok(!bad.includes("<h3>Prompt sizes"), bad);
+  assert.ok(!bad.includes("<h4>Prompt sizes"), bad);
+});
+
+// The Request Map: the prompt sizes' section title, once, right before what's there to show.
+const TITLE_HTML = "<h3>Request Map — what's inside each AI request (sizes only)</h3>";
+test("Request Map: the title comes once, right before the sizes, the none-recorded line or an unreadable prompt's line", () => {
+  const sized = lines(text(visits({ marks: QUILL_MARKS, prompt: { messages: [{ role: "system", bytes: 10 }] } }), 1));
+  const none = lines(text(visits({ marks: QUILL_MARKS }), 1));
+  const bad = lines(text(visits({ marks: QUILL_MARKS, prompt: { messages: "x" } }), 1));
+  for (const [what, block, next] of [["sizes", sized, SIZES_HEAD(1)], ["none", none, NONE], ["unreadable", bad, "  prompt sizes ? — marked visit 1: the prompt field isn't { messages: [...] }"]] as const) {
+    assert.equal(block.filter((l) => l === TITLE).length, 1, `${what}: one title\n${block.join("\n")}`);
+    assert.equal(block[block.indexOf(TITLE) + 1], next, `${what}: the title, then ${next}\n${block.join("\n")}`);
+  }
+});
+
+test("HTML: the Request Map is the h3, above the prompt sizes heading; also with none recorded or an unreadable prompt", () => {
+  const sized = serverSection(report(visits({ marks: QUILL_MARKS, prompt: { messages: [{ role: "system", bytes: 10 }] } }), 1));
+  assert.ok(sized.includes(TITLE_HTML) && sized.indexOf(TITLE_HTML) < sized.indexOf("<h4>Prompt sizes (marked visit 1)</h4>"), sized);
+  for (const prompt of [undefined, { messages: "x" }]) {
+    const html = serverSection(report(visits({ marks: QUILL_MARKS, prompt }), 1));
+    assert.ok(html.includes(TITLE_HTML) && html.indexOf(TITLE_HTML) < html.indexOf("prompt sizes"), html);
+  }
 });
 
 // Prompt sizes over several marked visits.
@@ -407,7 +432,7 @@ test("prompt sizes, several visits, one without any: compared over the others, a
 
 test("HTML: prompt sizes over several visits that differ: a column per visit, then min, median, max", () => {
   const html = serverSection(report(visits({ marks: QUILL_MARKS, prompt: sizes(2310, 5874) }, { marks: QUILL_MARKS, prompt: sizes(2310, 5900) }), 2));
-  assert.ok(html.includes("<h3>Prompt sizes (marked visits 1, 2)</h3>"), html);
+  assert.ok(html.includes("<h4>Prompt sizes (marked visits 1, 2)</h4>"), html);
   const rows = htmlRows(html);
   assert.deepEqual(rows.get("2 user"), ["5874", "5900", "5874", "5887", "5900", ""]);
   assert.deepEqual(rows.get("total"), ["8184", "8210", "8184", "8197", "8210", ""]);

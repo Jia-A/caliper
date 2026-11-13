@@ -73,7 +73,7 @@ Every audit that finishes writes `caliper-report.html` in the current directory.
 1. **Verdict.** Two plain sentences, only from measured numbers: `People waited a median of <X> ms for the first word (<n> warm runs).`, or with one warm run (`--runs 2`) `People waited <X> ms for the first word in the one warm run.`, then one line per side. For example, `In the browser: <top hint> — <R>× its limit, in <k> of <n> warm runs.` and, with `--server-timings`, `Inside the server: <top hint> — <R>× its limit, in <k> of <n> marked visits.` A side with no hint says `nothing over its limit.` The two sides are never merged or compared. The terminal prints the same lines under `verdict`, after the summary.
 2. **One bar per side.**
    - **Browser:** the warm run nearest the median total, its segments in order. With an odd number of warm runs, that's the median run.
-   - **Server:** the marked visit nearest the median "server: first bytes sent", its spans from arrival to first bytes sent. Spans that overlap or nest go on separate rows, never stacked. Under it, the prompt sizes table when the server recorded one (also kept in Details).
+   - **Server:** the marked visit nearest the median "server: first bytes sent", its spans from arrival to first bytes sent. Spans that overlap or nest go on separate rows, never stacked. Under it, the Request Map (the prompt sizes table) when the server recorded one (also kept in Details).
    With one warm run or one marked visit, the caption says `the one warm run` or `the one visit`. Nothing measured once is called a median, in the report or the terminal: the summary line reads `cold <X> ms · warm <Y> ms (the one warm run) · worst <Z> ms`, the done line `done: <X> ms · streaming span <Y> ms (the one warm run)`, and the tile `The one warm run`.
    Each segment shows its name and ms. A segment over its limit is drawn in a warning colour with a hatch and labelled "over". A key under the bar repeats every segment in words (`… — 311 ms — over its 100 ms limit`). Time no segment explains is drawn as "unattributed" and is never "over".
 3. **Where to look.** The hints for that side ([Where to look](#where-to-look)), right under its bar.
@@ -181,6 +181,7 @@ After the timed runs, Caliper builds a match key from the AI request each run pi
     spans
       postgres                            41    11    71   min 11 · median 41 · max 71 ms   (postgresStart → postgresEnd)
       model call → first bytes sent      301   302   301   min 301 · median 301 · max 302 ms
+    Request Map — what's inside each AI request (sizes only)
     prompt sizes: none recorded (needs caliper-timings 0.2.0 or later, and run.prompt(messages) before the model call)
     first bytes sent = the server's first write to the browser. If your app writes anything before the model's reply (a heartbeat, an envelope), this is that write.
   ```
@@ -214,6 +215,7 @@ After the timed runs, Caliper builds a match key from the AI request each run pi
       no cache span: cacheEnd wasn't recorded
       no warmup span: warmupStart wasn't recorded
       no lock span: lockEnd (58 ms) is before lockStart (64 ms)
+    Request Map — what's inside each AI request (sizes only)
     prompt sizes: none recorded (needs caliper-timings 0.2.0 or later, and run.prompt(messages) before the model call)
     problems reported by the server
       mark name "db-start" rejected — use a letter, then up to 63 letters, digits or _ (e.g. dbStart)
@@ -232,6 +234,7 @@ After the timed runs, Caliper builds a match key from the AI request each run pi
       postgres                            41 ms   (postgresStart → postgresEnd)
       model call → first bytes sent      301 ms
       Workers time waits only — a span with only computation inside (no I/O) can read 0 ms.
+    Request Map — what's inside each AI request (sizes only)
     prompt sizes: none recorded (needs caliper-timings 0.2.0 or later, and run.prompt(messages) before the model call)
     first bytes sent = the server's first write to the browser. If your app writes anything before the model's reply (a heartbeat, an envelope), this is that write.
   ```
@@ -239,9 +242,10 @@ After the timed runs, Caliper builds a match key from the AI request each run pi
   With several visits there's one "no span" line per pair. It says how many visits had no span and which ones when not all, then the reason once if it's the same in each, otherwise each visit's values or reason (`no lock span in 2 of 2 visits: lockEnd is before lockStart (visit 1: lockEnd 58 ms, lockStart 63 ms · visit 2: lockEnd 59 ms, lockStart 64 ms)`).
 
   **Problems the server reports.** A record's `problems` (for example a mark name the wrapper skipped) are printed last, under "problems reported by the server". Each distinct one is printed once, with the visits that reported it when there are several (`(2 of 3 visits: 1, 3)`). They're printed as the server wrote them, with control characters escaped and anything past 200 characters cut. A `problems` that isn't a list of strings makes that visit's record unusable, with the reason. The Workers note appears only when the record says `"runtime": "workers"`. Without that field, or with any other value, there's no note: Caliper doesn't guess where the server ran. Each mark is shown as the server recorded it, in ms after the request reached the route. A mark that isn't in the record isn't shown. A `404` prints `Server timings ? — token OK and wrapper present, but no record for run <id>.`; any other status, a record for another run id, or a mark that isn't a number prints `?` with the reason, and that visit is left out.
-  **Prompt sizes.** When the server records them (caliper-timings 0.2.0's `run.prompt(messages)`, called with the list the app sends to the model), the block shows each message's role and the size of its text in bytes, with its share of the total:
+  **Request Map — what's inside each AI request (sizes only).** A section of the block, after the spans, with this title in the terminal and as its heading in the HTML report. When the server records prompt sizes (caliper-timings 0.2.0's `run.prompt(messages)`, called with the list the app sends to the model), it shows each message's role and the size of its text in bytes, with its share of the total; then, with later caliper-timings, the named parts of each message, who wrote each part, and the bytes per source. Sizes only: the text is never recorded or shown. The title line is always there, above the sizes, the "none recorded" line or a `?` line:
 
   ```txt
+    Request Map — what's inside each AI request (sizes only)
     prompt sizes (marked visit 1) — UTF-8 bytes of each message's text as your app passed it to run.prompt(); not tokens
       1 system                          2310 bytes   28%
       2 user                            5874 bytes   72%

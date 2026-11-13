@@ -406,7 +406,7 @@ const SOURCE_LEGEND = `<p class="muted">Source: who wrote the text, as your app 
 // several visits that differ, a column per visit and min, median, max; who wrote each part when
 // the prompt has named parts), or the line saying none were recorded; a line per visit that isn't
 // compared.
-function promptHtml({ heading, note, visits, rows, legend, unlabelled, none, lines }: PromptView): string {
+function promptHtml({ title, heading, note, visits, rows, legend, unlabelled, none, lines }: PromptView): string {
   const many = visits.length > 1;
   const head = (many
     ? `${visits.map((v) => `<th scope="col" class="num">visit ${v} (bytes)</th>`).join("")}<th scope="col" class="num">min</th><th scope="col" class="num">median</th><th scope="col" class="num">max</th><th scope="col">note</th>`
@@ -419,7 +419,9 @@ function promptHtml({ heading, note, visits, rows, legend, unlabelled, none, lin
       ? `<tr class="part note"><th scope="row" colspan="${columns}">${esc(r.label)}</th></tr>`
       : `<tr${r.kind === "part" ? ' class="part"' : r.kind === "source" ? ' class="by-source"' : ""}><th scope="row">${esc(r.label)}</th>${cells(r)}</tr>`;
   const notes = [...(none ? [none] : []), ...(unlabelled ? [unlabelled] : []), ...lines];
-  return `${heading ? `<h3>${esc(heading[0]!.toUpperCase() + heading.slice(1))}</h3>
+  if (!heading && !notes.length) return "";
+  return `<h3>${esc(title)}</h3>
+      ${heading ? `<h4>${esc(heading[0]!.toUpperCase() + heading.slice(1))}</h4>
       <p class="muted">${esc(note[0]!.toUpperCase() + note.slice(1))}.</p>
       ${legend ? SOURCE_LEGEND : ""}
       ${rows.length ? `<div class="table-wrap">

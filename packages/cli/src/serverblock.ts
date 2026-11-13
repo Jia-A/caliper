@@ -31,7 +31,9 @@ type Span = { value: number } | { why: string; reversed?: [end: number, start: n
 // Prompt sizes (caliper-timings 0.2.0, run.prompt): each message's role and UTF-8 bytes, never its
 // text. A role that isn't a lowercase name (or the wrapper's "?") could be text, so it's never shown.
 const ROLE = /^([a-z][a-z_]{0,31}|\?)$/;
-const SIZES_NOTE = "UTF-8 bytes of each message's text as your app passed it to run.prompt(); not tokens";
+// The prompt sizes' section title, in the terminal and the report.
+const REQUEST_MAP = "Request Map — what's inside each AI request (sizes only)";
+const SIZES_NOTE ="UTF-8 bytes of each message's text as your app passed it to run.prompt(); not tokens";
 const NO_SIZES = "prompt sizes: none recorded (needs caliper-timings 0.2.0 or later, and run.prompt(messages) before the model call)";
 
 /** One message of the prompt: its role and size, or null when the server couldn't measure it. */
@@ -279,6 +281,7 @@ export interface PromptRow {
 
 /** Prompt sizes as shown, shared by the terminal and the HTML report. */
 export interface PromptView {
+  title: string; // the section's title, shown above whatever else is shown
   heading: string | null; // "prompt sizes (marked visit 1)", null when no visit's sizes can be shown
   note: string;
   visits: number[]; // one column each; a single column when one visit, or all the same
@@ -304,7 +307,7 @@ const sourceOf = (source: PartSource | null): RowSource => (source ? { kind: sou
 // were. Several visits with different sizes: a column per visit, min · median · max per row, and
 // no share.
 function promptView({ compared, lines, none }: PromptBlock): PromptView {
-  const view: PromptView = { heading: null, note: SIZES_NOTE, visits: [], rows: [], legend: null, unlabelled: null, none: none ? NO_SIZES : null, lines };
+  const view: PromptView = { title: REQUEST_MAP, heading: null, note: SIZES_NOTE, visits: [], rows: [], legend: null, unlabelled: null, none: none ? NO_SIZES : null, lines };
   if (none || compared.length === 0) return view;
   const all = compared.map((c) => c.visit);
   const sameParts = (a: PromptSize["parts"], b: PromptSize["parts"]) => JSON.stringify(a) === JSON.stringify(b);
@@ -433,7 +436,12 @@ function promptView({ compared, lines, none }: PromptBlock): PromptView {
   return { ...view, heading, visits: shown.map((c) => c.visit), rows, legend: sources ? LEGEND : null, unlabelled: fix };
 }
 
-function promptLines({ heading, note, visits, rows, legend, unlabelled, none, lines }: PromptView): string[] {
+function promptLines(view: PromptView): string[] {
+  const shown = promptBody(view);
+  return shown.length ? [`  ${view.title}`, ...shown] : [];
+}
+
+function promptBody({ heading, note, visits, rows, legend, unlabelled, none, lines }: PromptView): string[] {
   if (none) return [`  ${none}`];
   const sourceText = (s: RowSource) => `   source: ${s.word}${s.note ? ` (${s.note})` : ""}`;
   const row = ({ kind, label, values, stats, tail, source }: PromptRow) => {
