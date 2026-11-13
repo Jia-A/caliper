@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **A server step that ran before the model call says so.** When an app-named span ended at or before `modelCallSent`, its full "Where to look" hint adds `It ended before the model call was sent (postgresEnd 547 ms, model call sent 547 ms), so all 547 ms of it came before the model call.`, or with several visits `in 2 of 3 marked visits`. An order of marks, not a cause. Terminal and HTML. Tested with `npm run test:hints`.
+
 ## 0.5.0 — 2026-11-13
 
 Some changes alter what an existing 0.4.0 command does (the report on by default, asking on the first run, 2+ matches failing a run, renamed output lines): see [Upgrading from 0.4.0](https://github.com/Jia-A/caliper/tree/main/packages/cli#upgrading-from-040). Everything new here was tested on local fixtures and local apps only.

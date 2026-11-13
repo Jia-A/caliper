@@ -272,6 +272,43 @@ test("Quill-like numbers: postgres 532 ms (5.3× its 100) gets the full hint, no
   assert.equal(text.at(-1), "    model call → first bytes sent: median 552 ms — 1.2× its 450 ms limit, in 3 of 3 marked visits");
 });
 
+// A span that ended before the model call was sent: all of it came before the model call.
+const BEFORE_ONE = "It ended before the model call was sent (postgresEnd 547 ms, model call sent 547 ms), so all 547 ms of it came before the model call.";
+test("Quill's Nov 13 record: postgres ended at the model call, so the full hint says all of it came before the model call", () => {
+  const text = formatHints(serverHints(block({ marks: { postgresStart: 0, postgresEnd: 547, modelCallSent: 547, firstChunk: 1356 } }))).split("\n");
+  assert.equal(text[1], "    postgres: 547 ms — 5.5× its 100 ms limit, in 1 of 1 marked visits; 40% of the time to server: first bytes sent");
+  assert.equal(text[2], `    ${APP_SPAN}`);
+  assert.equal(text[3], `    ${BEFORE_ONE}`);
+});
+
+test("a span still running when the model call was sent gets no before-the-model line", () => {
+  const list = serverHints(block({ marks: { logStart: 0, logEnd: 900, modelCallSent: 300, firstChunk: 700 } }));
+  assert.equal(list.hints[0]!.label, "log");
+  assert.ok(!formatHints(list).includes("before the model call"), formatHints(list));
+});
+
+test("several visits: says in how many the span ended before the model call was sent", () => {
+  const list = serverHints(block(
+    { marks: { postgresStart: 0, postgresEnd: 500, modelCallSent: 500, firstChunk: 900 } },
+    { marks: { postgresStart: 0, postgresEnd: 520, modelCallSent: 520, firstChunk: 900 } },
+    { marks: { postgresStart: 0, postgresEnd: 540, modelCallSent: 300, firstChunk: 900 } },
+  ));
+  assert.equal(list.hints[0]!.label, "postgres");
+  assert.equal(list.hints[0]!.beforeModel, "It ended before the model call was sent in 2 of 3 marked visits, so in those visits all of it came before the model call.");
+});
+
+test("no model call sent recorded: no before-the-model line", () => {
+  const list = serverHints(block({ marks: { postgresStart: 0, postgresEnd: 547, firstChunk: 1356 } }));
+  assert.equal(list.hints[0]!.label, "postgres");
+  assert.equal(list.hints[0]!.beforeModel, undefined);
+});
+
+test("HTML: the full hint has the before-the-model line", () => {
+  const b = block({ marks: { postgresStart: 0, postgresEnd: 547, modelCallSent: 547, firstChunk: 1356 } });
+  const html = serverTop({ lines: [], block: b }, serverHints(b), serverBar(b));
+  assert.ok(html.includes(`<p>${BEFORE_ONE}</p>`), html);
+});
+
 test("just over its limit: two decimals, so it never reads 1.0×", () => {
   const [h] = browserHints([run({ ttfb: 620 }), run({ ttfb: 620 })]).hints;
   assert.ok(h!.evidence.startsWith("browser: response headers received: median 620 ms — 1.03× its 600 ms limit"), h!.evidence);

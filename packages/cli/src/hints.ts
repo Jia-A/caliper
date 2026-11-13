@@ -135,6 +135,7 @@ export interface Hint {
   share: number | null; // % of that side's total: the median of each run's own share
   shareOf: string; // what share is of, or why there's none
   about?: string; // the app-named span line
+  beforeModel?: string; // an app-named span that ended before the model call was sent
   checks: string[];
   links: string[]; // Learn more; none for server spans
   evidence: string; // the full hint's first line
@@ -232,12 +233,29 @@ export function serverHints(block: ServerBlock): HintList {
       share,
       shareOf: share !== null ? "the time to server: first bytes sent" : "server: first bytes sent wasn't recorded, so no share",
       ...(layer.about && { about: layer.about }),
+      ...(row.kind === "span" && beforeModelLine(block, row)),
       checks: layer.checks,
       links: [],
     });
   }
   const scope = `${k === 1 ? "1 marked visit" : `median of ${k} marked visits`}, on the server's clock; never compared with the browser`;
   return list("server", scope, hints);
+}
+
+// An app-named span that ended at or before modelCallSent, in the visits that recorded both: the
+// model call was sent only after all of it. Marks as the table shows them (rounded ms).
+function beforeModelLine(block: ServerBlock, row: ServerRow): { beforeModel: string } | Record<string, never> {
+  const end = block.marks.find((r) => r.name === `${row.name}End`);
+  const sent = block.marks.find((r) => r.name === "modelCallSent");
+  if (!end || !sent) return {};
+  const both = row.values.flatMap((v, i) => (v === null || end.values[i] == null || sent.values[i] == null ? [] : [{ v, end: end.values[i]!, sent: sent.values[i]! }]));
+  const before = both.filter((b) => b.end <= b.sent);
+  if (!before.length) return {};
+  if (both.length === 1) {
+    const [b] = before;
+    return { beforeModel: `It ended before the model call was sent (${row.name}End ${b!.end} ms, model call sent ${b!.sent} ms), so all ${b!.v} ms of it came before the model call.` };
+  }
+  return { beforeModel: `It ended before the model call was sent in ${before.length} of ${both.length} marked visits, so in those visits all of it came before the model call.` };
 }
 
 // "median" only when there's more than one value, like the server block.
@@ -272,6 +290,7 @@ export function formatHints({ side, scope, hints, none }: HintList): string {
   lines.push(
     `    ${first!.evidence}`,
     ...(first!.about ? [`    ${first!.about}`] : []),
+    ...(first!.beforeModel ? [`    ${first!.beforeModel}`] : []),
     `    Limit: ${first!.basis}`,
     "    Things to check:",
     ...first!.checks.map((c) => `      - could be ${c}`),

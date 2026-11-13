@@ -441,6 +441,7 @@ function hintsBody({ scope, hints, none, disclaimer }: HintList): string {
   return `${head}
       <p class="verdict-sm">${esc(first!.evidence)}</p>
       ${first!.about ? `<p>${esc(first!.about)}</p>` : ""}
+      ${first!.beforeModel ? `<p>${esc(first!.beforeModel)}</p>` : ""}
       <p class="muted">Limit: ${esc(first!.basis)}</p>
       <p>Things to check:</p>
       <ul class="notes">${first!.checks.map((c) => `<li>could be ${esc(c)}</li>`).join("")}</ul>
