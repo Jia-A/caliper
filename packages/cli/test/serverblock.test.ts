@@ -581,3 +581,59 @@ test("HTML: a source column with a swatch and the word, labelled by app or not l
   const noParts = serverSection(report(visits({ marks: QUILL_MARKS, prompt: { messages: [{ role: "user", bytes: 10 }] } }), 1));
   assert.ok(!noParts.includes("source"), noParts);
 });
+
+// By source: the bytes each source wrote, summed exactly from the parts, or why it can't be.
+const BY = (label: string, values: (number | string)[], tail = "") =>
+  `    ${`by source: ${label}`.padEnd(32)}${values.map((v) => String(v).padStart(6)).join("")} bytes${tail ? `   ${tail}` : ""}`;
+
+test("by source: after the total, app, user, outside and unknown add up to it, each with its share", () => {
+  const all = lines(text(visits({ marks: QUILL_MARKS, prompt: labelled() }), 1));
+  const at = all.indexOf("    total                             5827 bytes");
+  // app: instructions 2499 + code_snippet 56; user: 11 + 21 + 3232; unknown: the rests (0 + 8).
+  assert.deepEqual(all.slice(at + 1, at + 5), [BY("app", [2555], "44%"), BY("user", [3264], "56%"), BY("outside", [0], "0%"), BY("unknown", [8], "0%")]);
+});
+
+test("by source: unlabelled parts and a message with no parts named count as unknown", () => {
+  const user = [{ name: "title", bytes: 21, found: true, source: "user" }, { name: "comments", bytes: 300, found: true, source: "outside" }, { name: "article", bytes: 3000, found: true }];
+  const block = text(visits({ marks: QUILL_MARKS, prompt: { messages: [{ role: "system", bytes: 2499 }, { role: "user", bytes: 3328, parts: user }] } }), 1);
+  // unknown: the system message 2499 + article 3000 + rest 7.
+  for (const want of [BY("app", [0], "0%"), BY("user", [21], "0%"), BY("outside", [300], "5%"), BY("unknown", [5506], "94%")]) {
+    assert.ok(lines(block).includes(want), `${want}\n${block}`);
+  }
+});
+
+test("by source: not shown when a message's split isn't exact, and one line says why", () => {
+  const cases: [unknown, string][] = [
+    [{ messages: [{ role: "system", bytes: 2499 }, { role: "user", bytes: 3328, parts: [{ name: "a", bytes: 40, found: false, source: "user" }] }] }, "message 2: not every part was found in it"],
+    [{ messages: [{ role: "system", bytes: 50, parts: [{ name: "a", bytes: 30, found: true, source: "app" }, { name: "b", bytes: 30, found: true, source: "app" }] }] }, "message 1: the parts add up to more than the message"],
+    [{ messages: [{ role: "system", bytes: null }, { role: "user", bytes: 10, parts: [{ name: "a", bytes: 10, found: true, source: "user" }] }] }, "message 1 wasn't measured"],
+    [{ messages: [{ role: "system", bytes: 10, parts: "x" }, { role: "user", bytes: 10, parts: [{ name: "a", bytes: 10, found: true, source: "user" }] }] }, "message 1's parts couldn't be read"],
+  ];
+  for (const [prompt, why] of cases) {
+    const block = text(visits({ marks: QUILL_MARKS, prompt }), 1);
+    assert.ok(!block.includes("by source: app"), block);
+    assert.ok(lines(block).includes(`        no by-source totals: ${why}`), `${why}\n${block}`);
+  }
+});
+
+test("by source: none without named parts", () => {
+  const block = text(visits({ marks: QUILL_MARKS, prompt: { messages: [{ role: "system", bytes: 2310 }, { role: "user", bytes: 5874 }] } }), 1);
+  assert.ok(!block.includes("by source") && !block.includes("by-source"), block);
+});
+
+test("by source, several visits that differ: a column per visit, then min · median · max; a visit that can't be split is named", () => {
+  const other = labelled(LABELLED, QUILL_LABELLED.map((q) => (q.name === "article" ? { ...q, bytes: 3000 } : q)));
+  (other.messages[1] as { bytes: number }).bytes = 3096;
+  const block = text(visits({ marks: QUILL_MARKS, prompt: labelled() }, { marks: QUILL_MARKS, prompt: other }), 2);
+  assert.ok(lines(block).includes(BY("user", [3264, 3032]) .replace(" bytes", "   min 3032 · median 3148 · max 3264 bytes")), block);
+  assert.ok(lines(block).includes(BY("app", [2555, 2555]).replace(" bytes", "   min 2555 · median 2555 · max 2555 bytes")), block);
+  const lost = labelled(LABELLED, QUILL_LABELLED.map((q) => (q.name === "article" ? { ...q, found: false } : q)));
+  const one = text(visits({ marks: QUILL_MARKS, prompt: labelled() }, { marks: QUILL_MARKS, prompt: lost }), 2);
+  assert.ok(lines(one).includes("        no by-source totals: message 2: not every part was found in it (marked visit 2)"), one);
+});
+
+test("HTML: by-source rows after the total, with the swatch and the word in the source column", () => {
+  const html = serverSection(report(visits({ marks: QUILL_MARKS, prompt: labelled() }), 1));
+  assert.ok(html.includes('<tr class="by-source"><th scope="row">by source: user</th><td class="num">3264</td><td>56%</td><td class="source"><span class="src src-user"></span>user</td></tr>'), html);
+  assert.ok(html.indexOf("by source: app") > html.indexOf('<th scope="row">total</th>'), html);
+});

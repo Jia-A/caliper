@@ -102,6 +102,7 @@ try {
     "        ghost                            – bytes   not found in message 5 (the text given isn't in it)   source: unknown (not labelled)",
     "        no rest of message 5: not every part was found in it",
     "    total (4 of 5 measured)            152 bytes",
+    "        no by-source totals: message 3 wasn't measured",
     '    1 part not labelled (ghost): add source: "app", "user" or "outside" to each in run.prompt() — needs caliper-timings 0.6.0; see its README, "Choosing a source"',
   ];
 

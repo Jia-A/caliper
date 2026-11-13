@@ -269,7 +269,7 @@ export interface RowSource {
 
 /** One row of the prompt sizes: a message (or the total), one of its named parts, or a note under them. */
 export interface PromptRow {
-  kind: "message" | "part" | "note";
+  kind: "message" | "part" | "note" | "source"; // source: the bytes one source wrote, after the total
   label: string; // for a note, the whole line
   values: string[]; // one per column: bytes, or "–"
   stats: [min: number, median: number, max: number] | null;
@@ -373,6 +373,41 @@ function promptView({ compared, lines, none }: PromptBlock): PromptView {
     return rows;
   };
 
+  // The bytes each source wrote in one column: its parts' bytes, and unknown for unlabelled parts,
+  // each message's rest and messages with no parts named. Only when every message splits exactly.
+  const KINDS = ["app", "user", "outside", "unknown"] as const;
+  const split = (messages: PromptSize[]): Record<(typeof KINDS)[number], number> | string => {
+    const by = { app: 0, user: 0, outside: 0, unknown: 0 };
+    for (const [i, m] of messages.entries()) {
+      const n = i + 1;
+      if (m.bytes === null) return `message ${n} wasn't measured`;
+      if (m.parts === undefined) {
+        by.unknown += m.bytes;
+        continue;
+      }
+      if (!Array.isArray(m.parts)) return `message ${n}'s parts couldn't be read`;
+      if (!m.parts.every((q) => q.found === true && q.bytes !== null)) return `message ${n}: not every part was found in it`;
+      const sum = m.parts.reduce((a, q) => a + q.bytes!, 0);
+      if (sum > m.bytes) return `message ${n}: the parts add up to more than the message`;
+      for (const q of m.parts) by[q.source ?? "unknown"] += q.bytes!;
+      by.unknown += m.bytes - sum;
+    }
+    return by;
+  };
+  const bySource = (): PromptRow[] => {
+    const splits = shown.map((c) => split(c.messages));
+    const whys = splits.map((x) => (typeof x === "string" ? x : ""));
+    if (whys.some(Boolean)) {
+      const reasons = [...new Set(whys.filter(Boolean))];
+      const where = (r: string) => (many ? ` (${inVisits(shown.filter((_, k) => whys[k] === r).map((c) => c.visit)).replace(/^in /, "")})` : "");
+      return [note(`no by-source totals: ${reasons.map((r) => `${r}${where(r)}`).join("; ")}`)];
+    }
+    return KINDS.map((k) => {
+      const values = splits.map((x) => (x as Record<string, number>)[k]!);
+      return { kind: "source", label: `by source: ${k}`, values: cells(values), stats: stats(values), tail: share(values[0]!), source: { kind: k, word: k, note: "" } };
+    });
+  };
+
   const anyNull = shown.some((c) => c.messages.some((m) => m.bytes === null));
   const measured = shown[0]!.messages.filter((m) => m.bytes !== null).length;
   const rows: PromptRow[] = [
@@ -391,6 +426,7 @@ function promptView({ compared, lines, none }: PromptBlock): PromptView {
         tail: "",
       },
   ];
+  if (sources) rows.push(...bySource());
   const fix = unlabelled.length
     ? `${unlabelled.length} part${unlabelled.length > 1 ? "s" : ""} not labelled (${unlabelled.join(", ")}): add source: "app", "user" or "outside" to each in run.prompt() — needs caliper-timings 0.6.0; see its README, "Choosing a source"`
     : null;
@@ -403,7 +439,9 @@ function promptLines({ heading, note, visits, rows, legend, unlabelled, none, li
   const row = ({ kind, label, values, stats, tail, source }: PromptRow) => {
     if (kind === "note") return `        ${label}`;
     const head = kind === "part" ? `        ${label.padEnd(LABEL_WIDTH - 4)}` : `    ${label.padEnd(LABEL_WIDTH)}`;
-    return `${head}${values.map((v) => v.padStart(6)).join("")}${stats ? `   min ${stats[0]} · median ${stats[1]} · max ${stats[2]}` : ""} bytes${tail ? `   ${tail}` : ""}${source ? sourceText(source) : ""}`;
+    // A by-source row's label already names its source.
+    const said = source && kind !== "source" ? sourceText(source) : "";
+    return `${head}${values.map((v) => v.padStart(6)).join("")}${stats ? `   min ${stats[0]} · median ${stats[1]} · max ${stats[2]}` : ""} bytes${tail ? `   ${tail}` : ""}${said}`;
   };
   return [
     ...(heading ? [

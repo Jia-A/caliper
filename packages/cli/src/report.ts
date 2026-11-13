@@ -396,7 +396,7 @@ export function serverSection({ lines, block }: ServerReport): string {
 
 // Who wrote a row: a swatch and the word, then how it's known; each visit's in words when they differ.
 const sourceCell = (s: RowSource | undefined) =>
-  `<td class="source">${!s ? "" : s.kind === "mixed" ? esc(s.word) : `<span class="src src-${s.kind}"></span>${esc(s.word)} <span class="muted">${esc(s.note)}</span>`}</td>`;
+  `<td class="source">${!s ? "" : s.kind === "mixed" ? esc(s.word) : `<span class="src src-${s.kind}"></span>${esc(s.word)}${s.note ? ` <span class="muted">${esc(s.note)}</span>` : ""}`}</td>`;
 const SOURCE_LEGEND = `<p class="muted">Source: who wrote the text, as your app labelled it.</p>
       <ul class="legend">${([
   ["app", "your own text"], ["user", "the person using the feature"], ["outside", "anyone else"], ["unknown", "not labelled"],
@@ -417,7 +417,7 @@ function promptHtml({ heading, note, visits, rows, legend, unlabelled, none, lin
   const row = (r: PromptView["rows"][number]) =>
     r.kind === "note"
       ? `<tr class="part note"><th scope="row" colspan="${columns}">${esc(r.label)}</th></tr>`
-      : `<tr${r.kind === "part" ? ' class="part"' : ""}><th scope="row">${esc(r.label)}</th>${cells(r)}</tr>`;
+      : `<tr${r.kind === "part" ? ' class="part"' : r.kind === "source" ? ' class="by-source"' : ""}><th scope="row">${esc(r.label)}</th>${cells(r)}</tr>`;
   const notes = [...(none ? [none] : []), ...(unlabelled ? [unlabelled] : []), ...lines];
   return `${heading ? `<h3>${esc(heading[0]!.toUpperCase() + heading.slice(1))}</h3>
       <p class="muted">${esc(note[0]!.toUpperCase() + note.slice(1))}.</p>
@@ -620,6 +620,7 @@ tr.part.note th { color: var(--ink-2); }
 .src-outside { background: var(--src-outside); } .src-unknown { background: var(--src-unknown); }
 td.source { white-space: nowrap; }
 .legend .src { margin-right: 0; }
+tr.by-source th { font-weight: normal; color: var(--ink-2); }
 .table-wrap { overflow-x: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
 table { border-collapse: collapse; width: 100%; font-size: 13px; }
 th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--grid); vertical-align: top; }
