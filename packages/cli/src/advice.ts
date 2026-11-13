@@ -87,8 +87,9 @@ export function adviceItems({ streaming, firstWord, prompt, cold }: AdviceInput)
     const one = outside.length === 1;
     items.push(item(
       "outside",
-      `${named}: your app labelled ${one ? "it" : "them"} outside, and ${one ? "it's" : "they're"} in the prompt your app reported to run.prompt().`,
-      "Text from outside can carry instructions (indirect prompt injection). " +
+      `${named} ${one ? "is" : "are"} outside text sent to the model — a prompt-injection risk.`,
+      `Your app labelled ${one ? "it" : "them"} outside, and ${one ? "it's" : "they're"} in the prompt your app reported to run.prompt(). ` +
+        "Text from outside can carry instructions (indirect prompt injection). " +
         `Keep ${one ? "it" : "them"} apart from your own instructions and mark where ${one ? "it starts and ends" : "each starts and ends"}. ` +
         "Caliper doesn't detect injection; this is a risk, not a finding.",
       'OWASP Top 10 for LLM Applications 2025, LLM01 Prompt Injection: "Segregate and identify external content."',

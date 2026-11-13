@@ -116,7 +116,7 @@ try {
   const advice = adviceAt === -1 ? [] : lines.slice(adviceAt + 1, lines.findIndex((l, i) => i > adviceAt && !l.startsWith("    ")));
   check(advice.includes('    - 1 part not labelled (ghost): add source: "app", "user" or "outside" to each in run.prompt() — needs caliper-timings 0.6.0; see its README, "Choosing a source"'),
     `Advice has the unlabelled-part line (got: ${advice.join(" | ") || "no Advice section"})`);
-  check(advice.some((l) => l.startsWith("    - marker (24 bytes): your app labelled it outside")), `Advice names the part labelled outside (got: ${advice.join(" | ") || "no Advice section"})`);
+  check(advice.some((l) => l.startsWith("    - marker (24 bytes) is outside text sent to the model — a prompt-injection risk.")), `Advice names the part labelled outside (got: ${advice.join(" | ") || "no Advice section"})`);
   check(!out.stdout.split("\n").slice(at, adviceAt === -1 ? undefined : adviceAt).some((l) => l.includes("not labelled (ghost)")), "the unlabelled-part line isn't in the prompt sizes any more");
   // Advice right after the verdict, which ends with how many things there are to look at.
   const verdictAt = lines.indexOf("verdict");

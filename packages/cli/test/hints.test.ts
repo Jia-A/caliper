@@ -532,10 +532,17 @@ test("advice, outside: names each part your app labelled outside, with its bytes
   ] }]);
   const items = adviceItems({ streaming: null, firstWord: null, prompt });
   assert.deepEqual(items.map(pick), [{
-    text: "comments (87 bytes): your app labelled it outside, and it's in the prompt your app reported to run.prompt(). Text from outside can carry instructions (indirect prompt injection). Keep it apart from your own instructions and mark where it starts and ends. Caliper doesn't detect injection; this is a risk, not a finding.",
+    text: "comments (87 bytes) is outside text sent to the model — a prompt-injection risk. Your app labelled it outside, and it's in the prompt your app reported to run.prompt(). Text from outside can carry instructions (indirect prompt injection). Keep it apart from your own instructions and mark where it starts and ends. Caliper doesn't detect injection; this is a risk, not a finding.",
     basis: "OWASP Top 10 for LLM Applications 2025, LLM01 Prompt Injection: \"Segregate and identify external content.\"",
     link: OWASP,
   }]);
+});
+
+test("advice, outside: two parts read as one headline, \"are outside text\"", () => {
+  const prompt = promptView([{ role: "user", bytes: 900, parts: [
+    { name: "comments", bytes: 87, found: true, source: "outside" }, { name: "search_results", bytes: 300, found: true, source: "outside" },
+  ] }]);
+  assert.equal(adviceItems({ ...NO_DATA, prompt })[0]!.headline, "comments (87 bytes), search_results (300 bytes) are outside text sent to the model — a prompt-injection risk.");
 });
 
 test("advice, outside: a part labelled outside in only some marked visits isn't named", () => {
@@ -623,7 +630,7 @@ test("advice in the terminal: one item per rule that fired with its basis, or a 
   assert.equal(lines[0], "Advice — from this run's numbers");
   assert.ok(lines[1]!.startsWith("    - Doesn't stream: the whole answer appeared within 212 ms"), lines.join("\n"));
   assert.equal(lines[2], "      basis: Caliper's own threshold: a streaming span under 250 ms. No outside source.");
-  assert.ok(lines[3]!.startsWith("    - comments (87 bytes): your app labelled it outside"), lines.join("\n"));
+  assert.ok(lines[3]!.startsWith("    - comments (87 bytes) is outside text sent to the model — a prompt-injection risk. Your app labelled it outside"), lines.join("\n"));
   assert.equal(lines[4], `      basis: OWASP Top 10 for LLM Applications 2025, LLM01 Prompt Injection: "Segregate and identify external content." ${OWASP}`);
 });
 
@@ -642,7 +649,7 @@ test("advice: each item is a headline with its measured number, then the rest (d
     ["streaming", "Doesn't stream: the whole answer appeared within 212 ms of the first word (streaming span, the one warm run), and people waited 730 ms for the first word."],
     ["first-run", "The first run (a fresh browser) waited 3484 ms longer for the first word than the one warm run (5221 vs 1737 ms)."],
     ["dominant", "article is 53% of the prompt (160 of 300 bytes, labelled user)."],
-    ["outside", "comments (87 bytes): your app labelled it outside, and it's in the prompt your app reported to run.prompt()."],
+    ["outside", "comments (87 bytes) is outside text sent to the model — a prompt-injection risk."],
     ["unlabelled", "1 part not labelled (notes):"],
   ]);
   for (const a of items) assert.equal(a.text, a.detail ? `${a.headline} ${a.detail}` : a.headline, a.id);
