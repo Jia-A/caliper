@@ -424,6 +424,16 @@ try {
   const notPicked = new RegExp(`^Server timings \\? — marked visit 1 of 1: its AI request was POST ${esc(origin)}/marked/other/reply\\?\\S+, not the stamped POST ${esc(reply)}\\?\\S*kind=ping\\S*$`);
   check(notPicked.test(g.line ?? ""), `(g) reports the AI request isn't the stamped one, naming both (got: ${g.line ?? "nothing"})`, g.out);
 
+  // (x, y) The stamped request is refused, so the output never changes: the "?" line says what
+  // that request got (its HTTP status, or why there was none) before the timeout.
+  for (const [kase, got] of [["x", "answered HTTP 403"], ["y", "no response: net::ERR_EMPTY_RESPONSE"]]) {
+    const c = await runCase(`${kase}, stamped request refused`, kase, { args: ["--timeout", "4000"] });
+    check(c.stamped.length === 1, `(${kase}) the marked visit stamped one request (got ${c.stamped.length})`, c.out);
+    const want = new RegExp(`^Server timings \\? — marked visit 1 of 1: stamped POST ${esc(reply)}\\?\\S+ \\(${esc(got)}\\), then: ` +
+      `${esc('Timed out after 4000 ms: "#out" never changed after clicking --measure "^generate$".')}$`);
+    check(want.test(c.line ?? ""), `(${kase}) names what the stamped request got: ${got} (got: ${c.line ?? "nothing"})`, c.out);
+  }
+
   // (h) The token without --server-timings: nothing happens.
   const h = await runCase("h", "a", { named: null, args: reportArgs("h") });
   checkNoVisit(h);

@@ -889,6 +889,14 @@ async function markedVisit(
   let result: RunResult | null = null;
   let error: string | null = null;
   let loadFailed = false;
+  // What the stamped request got, for the line when the run fails after stamping it.
+  let answer = "no response by the end of the visit";
+  page.on("response", (res) => {
+    if (res.request() === matched[0]) answer = `answered HTTP ${res.status()}`;
+  });
+  page.on("requestfailed", (req) => {
+    if (req === matched[0]) answer = `no response: ${req.failure()?.errorText ?? "the request failed"}`;
+  });
   try {
     // From just before the click to the end of the run; requests during page load aren't routed.
     const beforeTrigger = async () => {
@@ -916,7 +924,7 @@ async function markedVisit(
   if (matched.length === 0) return fail(`no request matched ${keyText(key)}${keyNote}`);
   if (matched.length > 1) return fail(`${matched.length} requests matched ${keyText(key)}: ${matched.map((r) => r.url()).join(", ")}${keyNote}`);
   const stamped = matched[0]!;
-  if (!result) return fail(`stamped ${stamped.method()} ${stamped.url()}, then: ${error}${keyNote}`);
+  if (!result) return fail(`stamped ${stamped.method()} ${stamped.url()} (${answer}), then: ${error}${keyNote}`);
   const picked = result.pick.request;
   if (picked.raw !== stamped) {
     return fail(`its AI request was ${picked.method} ${picked.url}, not the stamped ${stamped.method()} ${stamped.url()}${keyNote}`);

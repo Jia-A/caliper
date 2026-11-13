@@ -200,6 +200,10 @@ function markedRoute(req, res, url, loads, seen, caliper) {
       res.end("{}");
       return;
     }
+    // ?stamped=403 / drop: a stamped reply is refused (403 JSON) or its connection closed.
+    const refuse = req.headers["x-caliper-run"] !== undefined ? url.searchParams.get("stamped") : null;
+    if (refuse === "403") return res.writeHead(403, { "content-type": "application/json", "cache-control": "no-store" }).end('{"error":"forbidden"}');
+    if (refuse === "drop") return req.socket.destroy();
     const start = Date.now();
     const run = req.headers["x-caliper-run"];
     const marked = !!caliper.token && req.headers["x-caliper-token"] === caliper.token && RUN_ID.test(run ?? "") && !url.searchParams.has("norecord");

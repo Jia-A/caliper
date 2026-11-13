@@ -32,6 +32,10 @@
        z  prompt sizes:           /marked/reply, recorded with a prompt field (?prompt=1)
        v  one visit fails:        /marked/reply, but /marked/other/reply on load --runs + 2 (the
                                   second marked visit), so that visit matches nothing
+       x  stamped → 403:          /marked/reply, but a stamped one gets a 403 JSON error, so the
+                                  output never changes in the marked visit
+       y  stamped → dropped:      /marked/reply, but a stamped one's connection is closed with no
+                                  answer, so the output never changes in the marked visit
      #msg is there for chat-style runs (--input/--prompt); the page doesn't read it. -->
 <input id="msg" size="40">
 <button id="generate">Generate</button>
@@ -78,6 +82,8 @@
     if (kase === "s") extra = "&generic=1"; // the record uses app-chosen Start/End names
     if (kase === "z") extra = "&prompt=1"; // the record has prompt sizes
     if (kase === "dh") extra = "&db=150"; // a 150 ms app span: over its 100 ms limit
+    if (kase === "x") extra = "&stamped=403"; // a stamped reply gets a 403
+    if (kase === "y") extra = "&stamped=drop"; // a stamped reply's connection is closed
     if (kase === "m") extra = `&pre=${[0, 30, 10][LOAD % 3]}&db=${[40, 10, 70][LOAD % 3]}`;
     if (kase === "q" && LOAD === runs + 2) extra = "&partial=1";
     if (kase === "v" && LOAD === runs + 2) path = "/marked/other/reply";
