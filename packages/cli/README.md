@@ -47,24 +47,41 @@ caliper audit https://your-app.example.com/blog/your-post-id \
   --output textarea
 ```
 
-Caliper opens the page, clicks **Share on socials**, then clicks **Generate** or **Regenerate**. It times how long it takes until the `textarea` first shows new content, and repeats this three times:
+Caliper opens the page, clicks **Share on socials**, then clicks **Generate** or **Regenerate**. It times how long it takes until the `textarea` first shows new content, and repeats this three times. The first run is "cold" (a fresh browser); the median covers the warm runs, 2 and later.
+
+This is the real output of that command on a local test page (a blog post with the same buttons, streaming its reply from `127.0.0.1`), on Nov 13, 2026. Runs 2 and 3 are cut to their first line:
 
 ```
-run 1 (cold)   7702 ms
-    POST https://api.your-app.example.com/v1/social/your-post-id/generate → 200 application/json
-    chosen from 3 request(s): +1 starts 5 ms after click, +1 POST with JSON body, +1 longest (7654 ms), +2 last to finish before first paint
-    click → fetch() called                   5 ms
-    CORS preflight                         109 ms
-    browser: response headers received    7524 ms
-    headers → done                          21 ms
-    done → first paint                      44 ms   ← what Lighthouse can't see
-    clock check: n/a (Resource Timing hides the response headers time without Timing-Allow-Origin)
-run 2          5746 ms
+run 1 (cold)    431 ms
+    POST http://127.0.0.1:47900/api/social/post-1/generate → 200 text/event-stream
+    chosen from 1 request(s): explains 21 of 21 output changes (body bytes ≤ 250 ms before each), no other request explains any
+    share: 21 of 21 output changes from its first body byte (100%) — the first run asks below 95% (Caliper's own threshold, no outside source)
+    click → request sent                     6 ms
+    browser: response headers received     403 ms
+    headers → first paint                   22 ms   (done 948 ms after paint; ended ERR_ABORTED after full body — treated as finished)
+    clock check: response headers within 0.7 ms of Resource Timing
+    click → first word                     431 ms
+    click → done                          1382 ms
+    streaming span                         951 ms
+    Streams.
+run 2           406 ms
     ...
-cold 7702 ms · median 6080 ms · worst 7702 ms
-...
+run 3           430 ms
+    ...
+cold 431 ms · median 418 ms · worst 431 ms
+done: median 1371 ms · span median 954 ms
+Streams — streaming span 954 ms (median of 2 warm runs).
+Where to look — browser (median of 2 warm runs)
+    Every part is within its limit.
+summary
+    ✓ streaming   Streams — streaming span 954 ms (median of 2 warm runs).
+verdict
+    People waited a median of 418 ms for the first word (2 warm runs).
+    In the browser: nothing over its limit.
 report: wrote /path/to/caliper-report.html
 ```
+
+On a real app, "Where to look" lists every part over its limit, biggest first, with things to check ([Where to look](#where-to-look)). The report path is shortened here.
 
 ### The HTML report
 
@@ -81,6 +98,26 @@ Every audit that finishes writes `caliper-report.html` in the current directory.
 5. **Details**, collapsed: the cold, median and worst tiles, the timeline per run, the Data table (one row per segment, one column per run, so it fits a narrow screen and scrolls inside its own box if it doesn't), request matching with the clock check, "Before the reply", and the server marks table with its run details.
 
 It follows the system's light or dark theme, and the layout works down to phone width. Tested with `npm run test:hints` (unit), and with `npm run test:marked` and `npm run test:auth` (end to end).
+
+## Upgrading from 0.4.0
+
+These change what an existing command does. Check them if you run Caliper in a script or CI, or read its output with a script.
+
+- **A report is written by default.** Every audit that finishes writes `caliper-report.html` in the current directory, and overwrites one that's already there (the last line says `wrote` or `overwrote`). Add `--no-report` to keep 0.4.0's behaviour, or `--report <path>` to write it elsewhere.
+- **Caliper can stop and ask on the first run.** When it isn't sure which request is the AI reply ([When it's not sure, it asks](#how-the-ai-request-is-detected)), it lists up to 3 candidates. In an interactive terminal it waits up to 2 minutes for a number. Without a terminal (CI, piped output) it stops at once, exit code 1, no report: `error: Too close to choose. Rerun with --request "…" or --request "…"`. An audit that finished under 0.4.0 can stop here. Pass `--request` to skip the question.
+- **Your answer is used for every later run.** The request you pick (method and path) is used for the later timed runs and the marked visits, as if you had passed `--request`.
+- **A tie on the first run is asked about** instead of being reported as "AI request not identified".
+- **2 or more matches is an error for that run.** When 2 or more requests match `--request` (or your answer) in a run, that run is "AI request not identified", listing every match. 0.4.0 used the first match. The Stop, double-send and canary checks still use the first match.
+- **A `--request` that matches nothing fails only that run.** The other runs go on, and the audit exits 0. In 0.4.0 the whole audit stopped.
+- **Renamed output lines.** Display only; the timings protocol and record fields are unchanged:
+  - `model: first chunk` → `server: first bytes sent`; `model: sent → first chunk` → `model call → first bytes sent`
+  - `request → first byte` → `browser: response headers received`; `first byte → done` → `headers → done`; `first byte → first paint` → `headers → first paint`
+  - clock check: `response headers within <n> ms of Resource Timing`
+  - pre-check: `token accepted (expected 400 on the test id caliper.precheck)`
+  - the chosen-request line adds `; <n> came before its first body byte` when some output changes came before the reply
+  - a `share:` line under every run's request, and `verdict` lines and "Where to look" after the summary
+  - in the server block, a `Request Map — what's inside each AI request (sizes only)` line above the prompt sizes
+- **One warm run isn't called a median.** With `--runs 2`: `cold <X> ms · warm <Y> ms (the one warm run) · worst <Z> ms`, and `the one warm run` in the done line, verdict and report. Two or more warm runs still say `median`.
 
 ## Commands and flags
 
@@ -511,16 +548,22 @@ An allowed domain that anyone can make send a request (an image proxy, an open r
 
 ## Development
 
+Before any commit, run all of these (the same list as the repo's `CLAUDE.md`), plus `npm run typecheck` and `npm test` in `packages/timings`:
+
 ```sh
-npm run test:csp     # CSP parser unit tests (Node 22.18+)
+npm run typecheck       # TypeScript, no output files
+npm run test:csp        # CSP parser unit tests (Node 22.18+)
+npm run test:sidecall   # builds, then checks the AI request is picked by timing next to a fast side-call
+npm run test:chat       # builds, then times a chat page with a "Thinking…" placeholder
+npm run test:nostore    # builds, then checks streams that end ERR_ABORTED after their full body (click and chat)
+npm run test:canary     # builds, then runs the canary check against a local fixture with and without CSP
+npm run test:selector   # builds, then clicks an icon-only send button with --measure-selector (click and chat)
+npm run test:marked     # builds, then checks the --server-timings marked visit: match key, stamping, origin guard
 npm run test:loadhints  # things-to-check lookup unit tests, from literal error strings (Node 22.18+)
-npm run test:serverblock  # "Inside the server" block unit tests on fixed records: spans, no-span lines, problems (Node 22.18+)
-npm run test:canary  # builds, then runs the canary check against a local fixture with and without CSP
-npm run test:nostore # builds, then checks streams that end ERR_ABORTED after their full body (click and chat)
-npm run test:chat    # builds, then times a chat page with a "Thinking…" placeholder
-npm run test:sidecall # builds, then checks the AI request is picked by timing next to a fast side-call
-npm run test:selector # builds, then clicks an icon-only send button with --measure-selector (click and chat)
-npm run test:marked  # builds, then checks the --server-timings marked visit: match key, stamping, origin guard
-npm run test:ambiguous # builds, then checks Caliper asks when unsure which request is the reply (needs python3 for a pseudo-terminal)
-npm run test:browser # builds, then checks the "isn't installed" instruction when Playwright's Chromium is missing
+npm run test:serverblock # "Inside the server" block unit tests on fixed records: spans, problems, the Request Map (Node 22.18+)
+npm run test:hints      # "Where to look" and the HTML report's verdict, bars and sections, unit tests (Node 22.18+)
+npm run test:auth       # builds, then checks --auth, the report on by default, and things to check for missing buttons
+npm run test:ambiguous  # builds, then checks Caliper asks when unsure which request is the reply (needs python3 for a pseudo-terminal)
+npm run test:browser    # builds, then checks the "isn't installed" instruction when Playwright's Chromium is missing
+npm run test:prompt     # builds, then runs the CLI against caliper-timings itself on a local app: the Request Map, and no prompt text leaks
 ```
