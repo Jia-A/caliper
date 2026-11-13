@@ -41,7 +41,6 @@ export interface ReportInput {
   double: DoubleReport | null; // null without --double
   canary: (CanaryReport & { input: string | undefined }) | null; // null without --canary
   csp: CspReport | null; // null without --csp or --canary
-  streaming: CheckReport;
   checks: SummaryEntry[]; // every check that ran, in summary order
   server: ServerReport | null; // null without --server-timings
   hints: { browser: HintList | null; server: HintList | null }; // browser: null with no run measured; server: null without a server block
@@ -73,7 +72,7 @@ const SEGMENTS: { key: SegmentKey; legend: string }[] = [
 
 // Top to bottom: the verdict; each side's bar and where to look (browser, then the server, never
 // merged); the checks; then everything else in a collapsed Details.
-export function renderReport({ url, measure, chat, output, steps, startedAt, summary, runs, failed, unidentified, stop, double, canary, csp, streaming, checks, server, hints, verdict, bars, advice }: ReportInput): string {
+export function renderReport({ url, measure, chat, output, steps, startedAt, summary, runs, failed, unidentified, stop, double, canary, csp, checks, server, hints, verdict, bars, advice }: ReportInput): string {
   const timeline: ChartRun[] = runs.map((run) => ({ ...run, bars: barSegments(run) }));
   const scale = Math.max(...runs.map((r) => r.total), 1);
   const ticks = niceTicks(scale);
@@ -113,7 +112,9 @@ export function renderReport({ url, measure, chat, output, steps, startedAt, sum
     <h2 id="verdict-h">Verdict</h2>
     <p class="headline">${esc(headline ?? "")}</p>
     ${sides.length ? `<ul class="sides">${sides.map((l) => `<li>${esc(l)}</li>`).join("")}</ul>` : ""}
+    ${advice.length ? `<p class="advice-count"><a href="#advice-h">${adviceCount(advice.length)}</a></p>` : ""}
   </section>
+  ${adviceSection(advice)}
 
   <section aria-labelledby="browser-h">
     <h2 id="browser-h">In the browser</h2>
@@ -122,9 +123,7 @@ export function renderReport({ url, measure, chat, output, steps, startedAt, sum
   </section>
   ${server ? serverTop(server, hints.server, bars.server) : ""}
 
-  ${adviceSection(advice)}
-  ${summaryBlock(checks)}
-  ${streamingSection(streaming)}
+  ${summaryBlock(checks, advice)}
   ${stop ? stopSection(stop) : ""}
   ${double ? doubleSection(double) : ""}
   ${canary ? canarySection(canary) : ""}
@@ -336,15 +335,6 @@ function cspSection({ verdict, fix, checks, notes }: CspReport): string {
   </section>`;
 }
 
-function streamingSection({ verdict, fix, checks, notes }: CheckReport): string {
-  return `<section aria-labelledby="streaming-h">
-    <h2 id="streaming-h">Streaming</h2>
-    <div class="stop">
-      <p class="muted">Streaming span: first word → done, in the warm runs</p>
-      ${checksBody({ verdict, fix, checks, notes })}
-    </div>
-  </section>`;
-}
 
 // The server side at the top: its bar and where to look. Never next to browser numbers.
 export function serverTop({ block }: ServerReport, hints: HintList | null, bar: Bar | null): string {
@@ -387,7 +377,6 @@ export function serverSection({ lines, block }: ServerReport): string {
       </table>
       </div>
       ${notes.length ? `<ul class="notes">${notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}
-      ${promptHtml(block.prompt)}
       ${block.problems.length ? `<h3>Problems reported by the server</h3>
       <ul class="notes">${block.problems.map((p) => `<li>${esc(p)}</li>`).join("")}</ul>` : ""}` : ""}
       <details${block ? "" : " open"}><summary>Run details</summary>
@@ -462,11 +451,20 @@ function shortHtml(h: Hint): string {
 
 const linksHtml = (links: string[]) => links.map((l) => `<a href="${esc(l)}" rel="noopener noreferrer">${esc(l)}</a>`).join(" · ");
 
-// Advice: each item with its basis (and link) under it, or a line saying there's nothing.
+// The verdict's pointer to Advice, and the terminal's last verdict line.
+export const adviceCount = (n: number) => `${n} thing${n === 1 ? "" : "s"} to look at ↓`;
+
+// Advice, right under the verdict: one bold line each, with its measured number; what to do,
+// the caveats and the basis folded under "why". Or a line saying there's nothing.
 function adviceSection(items: AdviceItem[]): string {
+  const why = ({ detail, basis, link }: AdviceItem) =>
+    detail || basis
+      ? `<details><summary>why</summary>${detail ? `<p>${esc(detail)}</p>` : ""}${basis ? `<p class="muted">Basis: ${esc(basis)}${link ? ` ${linksHtml([link])}` : ""}</p>` : ""}</details>`
+      : "";
   return `<section aria-labelledby="advice-h" class="advice">
     <h2 id="advice-h">Advice</h2>
-    ${items.length ? `<ul>${items.map(({ text, basis, link }) => `<li><p>${esc(text)}</p>${basis ? `<p class="muted">Basis: ${esc(basis)}${link ? ` ${linksHtml([link])}` : ""}</p>` : ""}</li>`).join("")}</ul>`
+    ${items.length
+      ? `<ul>${items.map((a) => `<li id="advice-${a.id}"><p class="advice-line"><b>${esc(a.headline.replace(/:$/, ""))}</b></p>${why(a)}</li>`).join("")}</ul>`
       : "<p>Nothing to suggest from this run's numbers.</p>"}
   </section>`;
 }
@@ -474,11 +472,13 @@ function adviceSection(items: AdviceItem[]): string {
 const STATUS_MARK: Record<CheckStatus, string> = { pass: "✓", warn: "⚠", fail: "✗", unknown: "?" };
 
 // One line per check that ran, at the top of the report. Same lines as the terminal summary.
-function summaryBlock(entries: SummaryEntry[]): string {
+function summaryBlock(entries: SummaryEntry[], advice: AdviceItem[]): string {
+  // A check whose advice is above links to it, so it's said once.
+  const see = (name: string) => (advice.some((a) => a.id === name) ? ` <a href="#advice-${name}">see Advice ↑</a>` : "");
   return `<section aria-labelledby="summary-h" class="summary">
     <h2 id="summary-h">Checks</h2>
     <ul>
-      ${entries.map(({ name, report, suffix }) => `<li class="${report.status}"><span class="smark">${STATUS_MARK[report.status]}</span><b>${esc(name)}</b> ${esc(report.verdict + (suffix ?? ""))}</li>`).join("")}
+      ${entries.map(({ name, report, suffix }) => `<li class="${report.status}"><span class="smark">${STATUS_MARK[report.status]}</span><b>${esc(name)}</b> ${esc(report.verdict + (suffix ?? ""))}${see(name)}</li>`).join("")}
     </ul>
   </section>`;
 }
@@ -647,6 +647,10 @@ tbody tr:last-child > * { border-bottom: 0; }
 .stop p { margin: 0 0 8px; }
 .verdict { font-size: 18px; font-weight: 600; }
 .fix { font-weight: 600; }
+.advice-count { margin: 0.5em 0 0; font-weight: 600; }
+.advice li { margin: 0 0 0.6em; }
+.advice .advice-line { margin: 0; }
+.advice details summary { cursor: pointer; color: var(--muted, inherit); }
 .summary ul { list-style: none; margin: 0; padding: 12px 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
 .summary li { display: flex; gap: 8px; align-items: baseline; padding: 3px 0; }
 .summary li b { min-width: 96px; }

@@ -486,8 +486,13 @@ try {
     `Inside the server: postgres — ${ratioOf(serverHints)} its limit, in ${serverHints?.first?.over} of ${serverHints?.first?.of} marked visits.`,
   ];
   const vAt = lines.indexOf("verdict");
-  check(vAt > lines.indexOf("summary") && JSON.stringify(lines.slice(vAt + 1, vAt + 4)) === JSON.stringify(verdictWant.map((l) => `    ${l}`)) && /^report: (wrote|overwrote) /.test(lines[vAt + 4] ?? ""),
-    `(dh) the terminal verdict under the summary, from the printed numbers, then the report line (want: ${verdictWant.join(" | ")}; got: ${lines.slice(vAt + 1, vAt + 4).join(" | ")})`, dh.out);
+  // Then the count of advice items (when any), the Advice block, and the report line last.
+  const aAt = lines.findIndex((l, i) => i > vAt && l.startsWith("Advice — "));
+  const countLine = /^    \d+ things? to look at ↓$/;
+  const counted = countLine.test(lines[vAt + 4] ?? "");
+  check(vAt > lines.indexOf("summary") && JSON.stringify(lines.slice(vAt + 1, vAt + 4)) === JSON.stringify(verdictWant.map((l) => `    ${l}`)) &&
+    aAt === vAt + (counted ? 5 : 4) && /^report: (wrote|overwrote) /.test(lines.filter((l) => l).at(-1) ?? ""),
+    `(dh) the terminal verdict under the summary, from the printed numbers, then Advice, then the report line (want: ${verdictWant.join(" | ")}; got: ${lines.slice(vAt + 1, vAt + 6).join(" | ")})`, dh.out);
   const vSection = dhHtml.slice(dhHtml.indexOf('aria-labelledby="verdict-h"'), dhHtml.indexOf('aria-labelledby="browser-h"'));
   check(verdictWant.every((l) => vSection.includes(htmlEsc(l))), "(dh) the HTML verdict has the same three lines, before the browser section", dh.out);
   check(/<div class="bseg over"[^>]*><span class="bname">headers → first paint<\/span> <span class="bms">\d+ ms<\/span> <span class="tag-over">over<\/span>/.test(htmlBrowser),

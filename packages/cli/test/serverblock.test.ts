@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { renderReport, serverSection, type ReportInput } from "../src/report.ts";
+import { renderReport, serverSection, serverTop, type ReportInput } from "../src/report.ts";
 import { formatServerBlock, parseServerRecord, serverBlock, type ServerRecord, type ServerReport } from "../src/serverblock.ts";
 
 // The visits of one block, from plain records (id is the run id each one is parsed against).
@@ -322,35 +322,37 @@ test("prompt sizes: a malformed prompt keeps the visit's timings and says why, n
   }
 });
 
-// Prompt sizes in the HTML report: the terminal's rows, as a table under the marks and spans.
+// Prompt sizes in the HTML report: the terminal's rows, as a table in the main server section
+// (the Request Map), under the server bar; not repeated in Details.
+const requestMap = (r: ServerReport) => serverTop(r, null, null);
 test("HTML: prompt sizes are a table with the terminal's rows: bytes and share per message, then the total", () => {
   const prompt = { messages: [{ role: "system", bytes: 2310 }, { role: "user", bytes: 5874 }] };
-  const html = serverSection(report(visits({ marks: QUILL_MARKS, prompt }), 1));
+  const html = requestMap(report(visits({ marks: QUILL_MARKS, prompt }), 1));
   assert.ok(html.includes("<h4>Prompt sizes (marked visit 1)</h4>"), html);
   assert.ok(html.includes("UTF-8 bytes of each message's text as your app passed it to run.prompt(); not tokens"), html);
   const rows = htmlRows(html);
   assert.deepEqual(rows.get("1 system"), ["2310", "28%"]);
   assert.deepEqual(rows.get("2 user"), ["5874", "72%"]);
   assert.deepEqual(rows.get("total"), ["8184", ""]);
-  // The prompt table comes after the marks and spans table.
-  assert.ok(html.indexOf("Prompt sizes") > html.indexOf("model call → first bytes sent"), html);
+  // Once: in the main server section, not again in Details' marks and spans.
+  assert.ok(!serverSection(report(visits({ marks: QUILL_MARKS, prompt }), 1)).includes("Request Map"), "not in Details");
 });
 
 test("HTML: a message with no size, and the total of the measured ones", () => {
   const prompt = { messages: [{ role: "system", bytes: 100 }, { role: "?", bytes: null }, { role: "user", bytes: 300 }] };
-  const rows = htmlRows(serverSection(report(visits({ marks: QUILL_MARKS, prompt }), 1)));
+  const rows = htmlRows(requestMap(report(visits({ marks: QUILL_MARKS, prompt }), 1)));
   assert.deepEqual(rows.get("2 ?"), ["–", "not measured (content wasn't a string)"]);
   assert.deepEqual(rows.get("total (2 of 3 measured)"), ["400", ""]);
 });
 
 test("HTML: none recorded, no messages, and an unreadable prompt each get their line, and no table", () => {
-  const none = serverSection(report(visits({ marks: QUILL_MARKS }), 1));
+  const none = requestMap(report(visits({ marks: QUILL_MARKS }), 1));
   assert.ok(none.includes("prompt sizes: none recorded (needs caliper-timings 0.2.0 or later, and run.prompt(messages) before the model call)"), none);
   assert.ok(!none.includes("<h4>Prompt sizes"), none);
-  const empty = serverSection(report(visits({ marks: QUILL_MARKS, prompt: { messages: [] } }), 1));
+  const empty = requestMap(report(visits({ marks: QUILL_MARKS, prompt: { messages: [] } }), 1));
   assert.ok(empty.includes("<h4>Prompt sizes (marked visit 1)</h4>") && empty.includes("no messages"), empty);
   assert.ok(!htmlRows(empty).has("total"), empty);
-  const bad = serverSection(report(visits({ marks: QUILL_MARKS, prompt: { messages: "x" } }), 1));
+  const bad = requestMap(report(visits({ marks: QUILL_MARKS, prompt: { messages: "x" } }), 1));
   assert.ok(bad.includes("prompt sizes ? — marked visit 1: the prompt field isn't { messages: [...] }"), bad);
   assert.ok(!bad.includes("<h4>Prompt sizes"), bad);
 });
@@ -368,10 +370,10 @@ test("Request Map: the title comes once, right before the sizes, the none-record
 });
 
 test("HTML: the Request Map is the h3, above the prompt sizes heading; also with none recorded or an unreadable prompt", () => {
-  const sized = serverSection(report(visits({ marks: QUILL_MARKS, prompt: { messages: [{ role: "system", bytes: 10 }] } }), 1));
+  const sized = requestMap(report(visits({ marks: QUILL_MARKS, prompt: { messages: [{ role: "system", bytes: 10 }] } }), 1));
   assert.ok(sized.includes(TITLE_HTML) && sized.indexOf(TITLE_HTML) < sized.indexOf("<h4>Prompt sizes (marked visit 1)</h4>"), sized);
   for (const prompt of [undefined, { messages: "x" }]) {
-    const html = serverSection(report(visits({ marks: QUILL_MARKS, prompt }), 1));
+    const html = requestMap(report(visits({ marks: QUILL_MARKS, prompt }), 1));
     assert.ok(html.includes(TITLE_HTML) && html.indexOf(TITLE_HTML) < html.indexOf("prompt sizes"), html);
   }
 });
@@ -431,7 +433,7 @@ test("prompt sizes, several visits, one without any: compared over the others, a
 });
 
 test("HTML: prompt sizes over several visits that differ: a column per visit, then min, median, max", () => {
-  const html = serverSection(report(visits({ marks: QUILL_MARKS, prompt: sizes(2310, 5874) }, { marks: QUILL_MARKS, prompt: sizes(2310, 5900) }), 2));
+  const html = requestMap(report(visits({ marks: QUILL_MARKS, prompt: sizes(2310, 5874) }, { marks: QUILL_MARKS, prompt: sizes(2310, 5900) }), 2));
   assert.ok(html.includes("<h4>Prompt sizes (marked visits 1, 2)</h4>"), html);
   const rows = htmlRows(html);
   assert.deepEqual(rows.get("2 user"), ["5874", "5900", "5874", "5887", "5900", ""]);
@@ -513,7 +515,7 @@ test("parts: visits whose parts have different names aren't compared", () => {
 });
 
 test("HTML: parts rows under their message, with the terminal's cells", () => {
-  const html = serverSection(report(visits({ marks: QUILL_MARKS, prompt: withParts([{ name: "title", bytes: 21, found: true }, { name: "summary", bytes: 40, found: false }]) }), 1));
+  const html = requestMap(report(visits({ marks: QUILL_MARKS, prompt: withParts([{ name: "title", bytes: 21, found: true }, { name: "summary", bytes: 40, found: false }]) }), 1));
   assert.ok(html.includes('<tr class="part"><th scope="row">title</th><td class="num">21</td><td></td><td class="source"><span class="src src-unknown"></span>unknown <span class="muted">not labelled</span></td></tr>'), html);
   assert.ok(html.includes(`<tr class="part"><th scope="row">summary</th><td class="num">–</td><td>not found in message 2 (the text given isn't in it)</td><td class="source"><span class="src src-unknown"></span>unknown <span class="muted">not labelled</span></td></tr>`), html);
   assert.ok(html.includes('<tr class="part note"><th scope="row" colspan="4">no rest of message 2: not every part was found in it</th></tr>'), html);
@@ -594,7 +596,7 @@ test("source, several visits: the same source in each is shown once; different s
 });
 
 test("HTML: a source column with a swatch and the word, labelled by app or not labelled; the legend; the fix line in the notes", () => {
-  const html = serverSection(report(visits({ marks: QUILL_MARKS, prompt: labelled(LABELLED, [...QUILL_LABELLED.slice(0, 3), { name: "article", bytes: 3232, found: true }]) }), 1));
+  const html = requestMap(report(visits({ marks: QUILL_MARKS, prompt: labelled(LABELLED, [...QUILL_LABELLED.slice(0, 3), { name: "article", bytes: 3232, found: true }]) }), 1));
   assert.ok(html.includes('<th scope="col">source</th>'), html);
   assert.ok(html.includes('<tr class="part"><th scope="row">instructions</th><td class="num">2499</td><td></td><td class="source"><span class="src src-app"></span>app <span class="muted">labelled by app</span></td></tr>'), html);
   assert.ok(html.includes('<tr class="part"><th scope="row">author</th><td class="num">11</td><td></td><td class="source"><span class="src src-user"></span>user <span class="muted">labelled by app</span></td></tr>'), html);
@@ -602,9 +604,9 @@ test("HTML: a source column with a swatch and the word, labelled by app or not l
   assert.ok(html.includes('<tr><th scope="row">total</th><td class="num">5827</td><td></td><td class="source"></td></tr>'), html);
   assert.ok(html.includes('<span class="src src-outside"></span>outside (anyone else)'), "legend");
   assert.ok(!html.includes("not labelled (article)"), html);
-  const outside = serverSection(report(visits({ marks: QUILL_MARKS, prompt: labelled(LABELLED, [{ name: "comments", bytes: 3328, found: true, source: "outside" }]) }), 1));
+  const outside = requestMap(report(visits({ marks: QUILL_MARKS, prompt: labelled(LABELLED, [{ name: "comments", bytes: 3328, found: true, source: "outside" }]) }), 1));
   assert.ok(outside.includes('<td class="source"><span class="src src-outside"></span>outside <span class="muted">labelled by app</span></td>'), outside);
-  const noParts = serverSection(report(visits({ marks: QUILL_MARKS, prompt: { messages: [{ role: "user", bytes: 10 }] } }), 1));
+  const noParts = requestMap(report(visits({ marks: QUILL_MARKS, prompt: { messages: [{ role: "user", bytes: 10 }] } }), 1));
   assert.ok(!noParts.includes("source"), noParts);
 });
 
@@ -659,7 +661,7 @@ test("by source, several visits that differ: a column per visit, then min · med
 });
 
 test("HTML: by-source rows after the total, with the swatch and the word in the source column", () => {
-  const html = serverSection(report(visits({ marks: QUILL_MARKS, prompt: labelled() }), 1));
+  const html = requestMap(report(visits({ marks: QUILL_MARKS, prompt: labelled() }), 1));
   assert.ok(html.includes('<tr class="by-source"><th scope="row">by source: user</th><td class="num">3264</td><td>56%</td><td class="source"><span class="src src-user"></span>user</td></tr>'), html);
   assert.ok(html.indexOf("by source: app") > html.indexOf('<th scope="row">total</th>'), html);
 });

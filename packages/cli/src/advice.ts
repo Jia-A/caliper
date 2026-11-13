@@ -10,10 +10,16 @@ import type { PromptRow, PromptView } from "./serverblock.js";
 export const STREAMS_MIN_MS = 250;
 
 export interface AdviceItem {
-  text: string;
+  id: "streaming" | "first-run" | "dominant" | "outside" | "unlabelled"; // the report's anchor (advice-<id>)
+  headline: string; // the one line with its measured number (bold in the report)
+  detail: string; // what to do and the caveats, after the headline; "" when there's none
+  text: string; // headline and detail together, as the terminal prints it
   basis: string | null; // where the threshold comes from; null when nothing is a threshold
   link: string | null;
 }
+
+const item = (id: AdviceItem["id"], headline: string, detail: string, basis: string | null, link: string | null = null): AdviceItem =>
+  ({ id, headline, detail, text: detail ? `${headline} ${detail}` : headline, basis, link });
 
 export interface AdviceInput {
   streaming: { span: number; settled: number } | null; // the warm runs' streaming span, when measured
@@ -35,14 +41,16 @@ export function adviceItems({ streaming, firstWord, prompt, cold }: AdviceInput)
 
   if (streaming && streaming.span < STREAMS_MIN_MS) {
     const waited = firstWord ? `, and people waited ${firstWord.median} ms for the first word` : "";
-    items.push({
-      text:
-        `Doesn't stream: the whole answer appeared within ${streaming.span} ms of the first word (streaming span, ${runs(streaming.settled)})${waited}. ` +
-        "Stream the response end to end: the server's writes, any proxy in between, and how the page reads it. " +
+    const how = streaming.span === 0
+      ? `arrived at once (0 ms between first and last word, ${runs(streaming.settled)})`
+      : `appeared within ${streaming.span} ms of the first word (streaming span, ${runs(streaming.settled)})`;
+    items.push(item(
+      "streaming",
+      `Doesn't stream: the whole answer ${how}${waited}.`,
+      "Stream the response end to end: the server's writes, any proxy in between, and how the page reads it. " +
         "Caliper can't tell how much sooner the first word would appear.",
-      basis: `Caliper's own threshold: a streaming span under ${STREAMS_MIN_MS} ms. No outside source.`,
-      link: null,
-    });
+      `Caliper's own threshold: a streaming span under ${STREAMS_MIN_MS} ms. No outside source.`,
+    ));
   }
 
   if (cold && cold.gaps.length) {
@@ -50,26 +58,24 @@ export function adviceItems({ streaming, firstWord, prompt, cold }: AdviceInput)
     const each = cold.gaps.map((g) =>
       `${g.label}: ${g.cold} ms on the first run, ${g.warm === null ? "not in the warm runs" : `${g.warm} ms warm`} (+${g.gap} ms, more than its ${g.limit} ms limit).`);
     const limits = [...new Map(cold.gaps.map((g) => [g.limit, `${g.limit} ms: ${g.basis}`])).values()];
-    items.push({
-      text:
-        `The first run (a fresh browser) waited ${cold.total - cold.warmMedian} ms longer for the first word than ${than} (${cold.total} vs ${cold.warmMedian} ms). ` +
-        `${each.join(" ")} Caliper can't tell why from timings alone.`,
-      basis:
-        "Caliper's own reasoning: each segment's Where-to-look limit, applied to the gap between the first run and the warm runs, " +
+    items.push(item(
+      "first-run",
+      `The first run (a fresh browser) waited ${cold.total - cold.warmMedian} ms longer for the first word than ${than} (${cold.total} vs ${cold.warmMedian} ms).`,
+      `${each.join(" ")} Caliper can't tell why from timings alone.`,
+      "Caliper's own reasoning: each segment's Where-to-look limit, applied to the gap between the first run and the warm runs, " +
         `from 1 first run and ${cold.warm === 1 ? "1 warm run" : `${cold.warm} warm runs`}. ${limits.join(" ")}`,
-      link: null,
-    });
+    ));
   }
 
   const dominant = prompt ? dominantPart(prompt) : null;
   if (dominant) {
-    items.push({
-      text: dominant,
-      basis:
-        "Caliper's own threshold: one named part is 50% or more of the prompt's measured bytes, more than all the rest together. " +
+    items.push(item(
+      "dominant",
+      dominant,
+      "",
+      "Caliper's own threshold: one named part is 50% or more of the prompt's measured bytes, more than all the rest together. " +
         "These are bytes your app reported, not tokens; Caliper didn't measure what trimming it would change.",
-      link: null,
-    });
+    ));
   }
 
   // Parts the app labelled outside, with their bytes as the table shows them.
@@ -79,18 +85,22 @@ export function adviceItems({ streaming, firstWord, prompt, cold }: AdviceInput)
       stats ? `${stats[0]}–${stats[2]} bytes` : `${values[0]} bytes`;
     const named = outside.map((r) => `${r.label} (${bytes(r.values, r.stats)})`).join(", ");
     const one = outside.length === 1;
-    items.push({
-      text:
-        `${named}: your app labelled ${one ? "it" : "them"} outside, and ${one ? "it's" : "they're"} in the prompt your app reported to run.prompt(). ` +
-        "Text from outside can carry instructions (indirect prompt injection). " +
+    items.push(item(
+      "outside",
+      `${named}: your app labelled ${one ? "it" : "them"} outside, and ${one ? "it's" : "they're"} in the prompt your app reported to run.prompt().`,
+      "Text from outside can carry instructions (indirect prompt injection). " +
         `Keep ${one ? "it" : "them"} apart from your own instructions and mark where ${one ? "it starts and ends" : "each starts and ends"}. ` +
         "Caliper doesn't detect injection; this is a risk, not a finding.",
-      basis: 'OWASP Top 10 for LLM Applications 2025, LLM01 Prompt Injection: "Segregate and identify external content."',
-      link: OWASP_LLM01,
-    });
+      'OWASP Top 10 for LLM Applications 2025, LLM01 Prompt Injection: "Segregate and identify external content."',
+      OWASP_LLM01,
+    ));
   }
 
-  if (prompt?.unlabelled) items.push({ text: prompt.unlabelled, basis: null, link: null });
+  // serverblock.ts's line, split after the names: "1 part not labelled (notes):" + "add source: …".
+  if (prompt?.unlabelled) {
+    const at = prompt.unlabelled.indexOf("): ");
+    items.push(at === -1 ? item("unlabelled", prompt.unlabelled, "", null) : item("unlabelled", prompt.unlabelled.slice(0, at + 2), prompt.unlabelled.slice(at + 3), null));
+  }
   return items;
 }
 

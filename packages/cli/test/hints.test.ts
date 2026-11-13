@@ -464,7 +464,7 @@ test("streaming verdict: the streaming span, and how many warm runs it's from", 
 });
 
 test("HTML: one warm run: the tile says \"The one warm run\", and the streaming section doesn't say median", () => {
-  const html = renderReport(input(null, null, null, { streaming: { ...streamingVerdict(3618, 1), checks: [], notes: [] } }));
+  const html = renderReport(input(null, null, null, { checks: [{ name: "streaming", report: { ...streamingVerdict(3618, 1), checks: [], notes: [] } }] }));
   assert.ok(html.includes('<div class="tile-label">The one warm run</div>'), html);
   assert.ok(!html.includes("Median (run 2)"), html);
   assert.ok(html.includes("Streams — streaming span 3618 ms (the one warm run)."), html);
@@ -472,7 +472,7 @@ test("HTML: one warm run: the tile says \"The one warm run\", and the streaming 
   assert.ok(!/median/i.test(streamingPart), streamingPart);
 });
 
-test("HTML: the prompt sizes table is in the main server section, under the bar, and still in Details", () => {
+test("HTML: the Request Map is in the main server section, under the bar, and only there (not again in Details)", () => {
   const b = serverBlock(
     [{ visit: 1, record: parseServerRecord({ id: "r1", status: 200, marks: { postgresStart: 0, postgresEnd: 545, modelCallSent: 545, firstChunk: 1078 }, prompt: { messages: [{ role: "system", bytes: 2499 }, { role: "user", bytes: 3328 }] } }, "r1") as ServerRecord }],
     1,
@@ -484,13 +484,17 @@ test("HTML: the prompt sizes table is in the main server section, under the bar,
   assert.ok(top.includes('<tr><th scope="row">1 system</th><td class="num">2499</td><td>43%</td></tr>'), top);
   assert.ok(promptAt < top.indexOf("Where to look — server"), "before where to look");
   const html = renderReport(input(null, { lines: [], block: b }, serverHints(b), { bars: { browser: null, server: serverBar(b) } }));
-  assert.equal(html.split("<h4>Prompt sizes (marked visit 1)</h4>").length - 1, 2, "in the main section and in Details");
+  assert.equal(html.split("<h4>Prompt sizes (marked visit 1)</h4>").length - 1, 1, "once");
+  assert.equal(html.split("<h3>Request Map").length - 1, 1, "one Request Map");
+  assert.ok(html.indexOf("<h3>Request Map") < html.indexOf('<details class="more">'), "before Details");
 });
 
 // --- Advice: next steps, each from a number this run measured ---
 
 const OWASP = "https://genai.owasp.org/llmrisk/llm01-prompt-injection/";
 const NO_DATA = { streaming: null, firstWord: null, prompt: null, cold: null };
+// What the terminal prints of an item: its text, basis and link.
+const pick = ({ text, basis, link }: { text: string; basis: string | null; link: string | null }) => ({ text, basis, link });
 // The prompt view of one visit whose record has these messages (bytes and parts as the wrapper records them).
 function promptView(messages: unknown[]) {
   return block({ marks: { modelCallSent: 0, firstChunk: 100 }, prompt: { messages } } as never).prompt;
@@ -506,7 +510,7 @@ const QUILL_PROMPT = [
 
 test("advice, streaming: the demo's Nov 13 numbers — span and first word as measured, no promise of how much sooner", () => {
   const items = adviceItems({ streaming: { span: 212, settled: 1 }, firstWord: { median: 730, warm: 1 }, prompt: null });
-  assert.deepEqual(items, [{
+  assert.deepEqual(items.map(pick), [{
     text: "Doesn't stream: the whole answer appeared within 212 ms of the first word (streaming span, the one warm run), and people waited 730 ms for the first word. Stream the response end to end: the server's writes, any proxy in between, and how the page reads it. Caliper can't tell how much sooner the first word would appear.",
     basis: "Caliper's own threshold: a streaming span under 250 ms. No outside source.",
     link: null,
@@ -527,7 +531,7 @@ test("advice, outside: names each part your app labelled outside, with its bytes
     { name: "question", bytes: 40, found: true, source: "user" }, { name: "comments", bytes: 87, found: true, source: "outside" },
   ] }]);
   const items = adviceItems({ streaming: null, firstWord: null, prompt });
-  assert.deepEqual(items, [{
+  assert.deepEqual(items.map(pick), [{
     text: "comments (87 bytes): your app labelled it outside, and it's in the prompt your app reported to run.prompt(). Text from outside can carry instructions (indirect prompt injection). Keep it apart from your own instructions and mark where it starts and ends. Caliper doesn't detect injection; this is a risk, not a finding.",
     basis: "OWASP Top 10 for LLM Applications 2025, LLM01 Prompt Injection: \"Segregate and identify external content.\"",
     link: OWASP,
@@ -549,7 +553,7 @@ test("advice: Quill's Nov 13 prompt (all labelled, nothing outside) gives only t
 // Rule 1: one named part is half the prompt or more — a fact, no trim advice.
 const DOMINANT_BASIS = "Caliper's own threshold: one named part is 50% or more of the prompt's measured bytes, more than all the rest together. These are bytes your app reported, not tokens; Caliper didn't measure what trimming it would change.";
 test("advice, dominant part: Quill's article and the demo's rules, as facts with their bytes and source", () => {
-  assert.deepEqual(adviceItems({ ...NO_DATA, prompt: promptView(QUILL_PROMPT) }), [{ text: "article is 55% of the prompt (3207 of 5827 bytes, labelled user).", basis: DOMINANT_BASIS, link: null }]);
+  assert.deepEqual(adviceItems({ ...NO_DATA, prompt: promptView(QUILL_PROMPT) }).map(pick), [{ text: "article is 55% of the prompt (3207 of 5827 bytes, labelled user).", basis: DOMINANT_BASIS, link: null }]);
   const demo = [
     { role: "system", bytes: 282, parts: [{ name: "persona", bytes: 102, found: true, source: "app" }, { name: "rules", bytes: 178, found: true, source: "app" }] },
     { role: "user", bytes: 26, parts: [{ name: "visitor", bytes: 26, found: true, source: "user" }] },
@@ -607,7 +611,7 @@ test("advice, first run: the demo's 02:01 numbers, each segment over its limit w
 test("advice, unlabelled: the fix line moves here, word for word, and leaves the prompt sizes", () => {
   const messages = [{ role: "user", bytes: 200, parts: [{ name: "article", bytes: 60, found: true }, { name: "title", bytes: 20, found: true, source: "user" }] }];
   const fix = '1 part not labelled (article): add source: "app", "user" or "outside" to each in run.prompt() — needs caliper-timings 0.6.0; see its README, "Choosing a source"';
-  assert.deepEqual(adviceItems({ streaming: null, firstWord: null, prompt: promptView(messages) }), [{ text: fix, basis: null, link: null }]);
+  assert.deepEqual(adviceItems({ streaming: null, firstWord: null, prompt: promptView(messages) }).map(pick), [{ text: fix, basis: null, link: null }]);
   const b = block({ marks: { modelCallSent: 0, firstChunk: 100 }, prompt: { messages } } as never);
   assert.ok(!formatServerBlock(b).includes("not labelled ("), formatServerBlock(b));
 });
@@ -623,15 +627,45 @@ test("advice in the terminal: one item per rule that fired with its basis, or a 
   assert.equal(lines[4], `      basis: OWASP Top 10 for LLM Applications 2025, LLM01 Prompt Injection: "Segregate and identify external content." ${OWASP}`);
 });
 
-test("HTML: Advice comes after the server section and before Checks, with the basis and a link; the streaming section has no Fix line", () => {
-  const advice = adviceItems({ streaming: { span: 212, settled: 1 }, firstWord: { median: 730, warm: 1 }, prompt: promptView([{ role: "user", bytes: 300, parts: [{ name: "comments", bytes: 87, found: true, source: "outside" }] }]) });
+test("advice, streaming: a span of 0 ms reads as arriving at once", () => {
+  const [item] = adviceItems({ ...NO_DATA, streaming: { span: 0, settled: 2 }, firstWord: { median: 349, warm: 2 } });
+  assert.equal(item!.headline, "Doesn't stream: the whole answer arrived at once (0 ms between first and last word, median of 2 warm runs), and people waited 349 ms for the first word.");
+});
+
+test("advice: each item is a headline with its measured number, then the rest (detail) — together the terminal's text", () => {
+  const items = adviceItems({
+    streaming: { span: 212, settled: 1 }, firstWord: { median: 730, warm: 1 },
+    cold: { total: 5221, warmMedian: 1737, warm: 1, gaps: coldGaps(run({ click: 9.6, ttfb: 5196.3, streaming: 14.7 }), [run({ click: 1.8, ttfb: 1723.0, streaming: 12.6 })]) },
+    prompt: promptView([{ role: "user", bytes: 300, parts: [{ name: "article", bytes: 160, found: true, source: "user" }, { name: "comments", bytes: 87, found: true, source: "outside" }, { name: "notes", bytes: 20, found: true }] }]),
+  });
+  assert.deepEqual(items.map((a) => [a.id, a.headline]), [
+    ["streaming", "Doesn't stream: the whole answer appeared within 212 ms of the first word (streaming span, the one warm run), and people waited 730 ms for the first word."],
+    ["first-run", "The first run (a fresh browser) waited 3484 ms longer for the first word than the one warm run (5221 vs 1737 ms)."],
+    ["dominant", "article is 53% of the prompt (160 of 300 bytes, labelled user)."],
+    ["outside", "comments (87 bytes): your app labelled it outside, and it's in the prompt your app reported to run.prompt()."],
+    ["unlabelled", "1 part not labelled (notes):"],
+  ]);
+  for (const a of items) assert.equal(a.text, a.detail ? `${a.headline} ${a.detail}` : a.headline, a.id);
+});
+
+test("HTML: Advice sits right under the Verdict, which says how many things to look at; one bold line each, the rest folded under \"why\"", () => {
+  const advice = adviceItems({ ...NO_DATA, streaming: { span: 212, settled: 1 }, firstWord: { median: 730, warm: 1 }, prompt: promptView([{ role: "user", bytes: 300, parts: [{ name: "comments", bytes: 87, found: true, source: "outside" }] }]) });
   const b = block({ marks: { modelCallSent: 0, firstChunk: 700 } });
-  const html = renderReport(input(null, { lines: [], block: b }, serverHints(b), { advice, streaming: { ...streamingVerdict(212, 1), checks: [], notes: [] } }));
+  const html = renderReport(input(browserHints([run({ ttfb: 100 }), run({ ttfb: 100 })]), { lines: [], block: b }, serverHints(b), { advice, checks: [{ name: "streaming", report: { ...streamingVerdict(212, 1), checks: [], notes: [] } }] }));
   const at = html.indexOf('<section aria-labelledby="advice-h"');
-  assert.ok(at > html.indexOf('<section aria-labelledby="server-top-h">') && at < html.indexOf('<h2 id="summary-h">Checks</h2>'), html);
-  assert.ok(html.includes(`<a href="${OWASP}" rel="noopener noreferrer">`), html);
-  assert.ok(html.includes("Caliper&#39;s own threshold") || html.includes("Caliper's own threshold"), html);
-  assert.ok(!html.includes("Fix: stream the response"), html);
+  assert.ok(html.indexOf('aria-labelledby="verdict-h"') < at && at < html.indexOf('<section aria-labelledby="browser-h">'), "right under the verdict");
+  const verdict = html.slice(html.indexOf('aria-labelledby="verdict-h"'), at);
+  assert.ok(verdict.includes('<a href="#advice-h">2 things to look at ↓</a>'), verdict);
+  const streaming = advice[0]!;
+  assert.ok(html.includes(`<li id="advice-streaming"><p class="advice-line"><b>${streaming.headline}</b></p><details><summary>why</summary><p>${streaming.detail}</p>`), html);
+  const why = html.slice(html.indexOf('<li id="advice-outside">'), html.indexOf("</li>", html.indexOf('<li id="advice-outside">')));
+  assert.ok(why.includes("<details><summary>why</summary>") && why.indexOf("Basis: OWASP") > why.indexOf("<details>") && why.includes(`<a href="${OWASP}" rel="noopener noreferrer">`), why);
+  assert.ok(!html.includes('aria-labelledby="streaming-h"'), "no separate Streaming section");
+  const checks = html.slice(html.indexOf('<h2 id="summary-h">Checks</h2>'));
+  assert.ok(checks.includes('<a href="#advice-streaming">'), "the Checks line links to the advice");
+  const one = renderReport(input(null, null, null, { advice: advice.slice(0, 1) }));
+  assert.ok(one.includes('<a href="#advice-h">1 thing to look at ↓</a>'), "one thing");
   const none = renderReport(input(null, null, null, { advice: [] }));
+  assert.ok(!none.includes("to look at ↓"), "no count line when nothing fires");
   assert.ok(none.includes("Nothing to suggest from this run&#39;s numbers.") || none.includes("Nothing to suggest from this run's numbers."), none);
 });

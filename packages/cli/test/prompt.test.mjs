@@ -118,6 +118,11 @@ try {
     `Advice has the unlabelled-part line (got: ${advice.join(" | ") || "no Advice section"})`);
   check(advice.some((l) => l.startsWith("    - marker (24 bytes): your app labelled it outside")), `Advice names the part labelled outside (got: ${advice.join(" | ") || "no Advice section"})`);
   check(!out.stdout.split("\n").slice(at, adviceAt === -1 ? undefined : adviceAt).some((l) => l.includes("not labelled (ghost)")), "the unlabelled-part line isn't in the prompt sizes any more");
+  // Advice right after the verdict, which ends with how many things there are to look at.
+  const verdictAt = lines.indexOf("verdict");
+  const count = advice.filter((l) => l.startsWith("    - ")).length;
+  check(verdictAt !== -1 && adviceAt > verdictAt && lines[adviceAt - 1] === `    ${count} thing${count === 1 ? "" : "s"} to look at ↓` && lines.slice(verdictAt, adviceAt).every((l, i) => i === 0 || l.startsWith("    ")),
+    `Advice comes right after the verdict, whose last line counts its ${count} items (got: ${lines.slice(verdictAt, adviceAt + 1).join(" | ")})`);
   check(at > 0 && lines[at - 1] === "  Request Map — what's inside each AI request (sizes only)", `the Request Map title is right above the prompt sizes (got: ${lines[at - 1] ?? "nothing"})`);
   check(html.length > 0, "the report was written");
   check(html.includes("<h3>Request Map — what's inside each AI request (sizes only)</h3>"), "the HTML report titles the section Request Map");

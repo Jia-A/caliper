@@ -11,7 +11,7 @@ import { buttonHints, buttonNames, expiredLoginCookies, loadFailureHints } from 
 import { adviceItems, formatAdvice } from "./advice.js";
 import { browserBar, browserHints, coldGaps, formatHints, serverBar, serverHints, STREAMS_MIN_MS, streamingVerdict, verdictLines, type HintList } from "./hints.js";
 import { formatServerBlock, parseServerRecord, plural, serverBlock, type ServerRecord, type ServerReport } from "./serverblock.js";
-import { renderReport, type ReportReply } from "./report.js";
+import { adviceCount, renderReport, type ReportReply } from "./report.js";
 import type {
   Breakdown,
   CanaryReport,
@@ -345,7 +345,6 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
         return { total: summary.cold, warmMedian: summary.median, warm: summary.warm, gaps: coldGaps(first.parts, warmRuns.map((r) => r.parts)) };
       })(),
     });
-    console.log(formatAdvice(advice));
     console.log(formatSummaryBlock(entries));
     // The verdict, under the summary: the same lines as the report's top.
     const verdict = verdictLines({
@@ -354,7 +353,9 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
       browser: browserList,
       server: serverTimings ? { list: serverList } : null,
     });
-    console.log(["verdict", ...verdict.map((l) => `    ${l}`)].join("\n"));
+    // Then the advice, right after the verdict, which ends with how many things it lists.
+    console.log(["verdict", ...verdict.map((l) => `    ${l}`), ...(advice.length ? [`    ${adviceCount(advice.length)}`] : [])].join("\n"));
+    console.log(formatAdvice(advice));
 
     if (report) {
       const reportPath = resolve(report);
@@ -373,7 +374,6 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
         double: doubleReport,
         canary: canaryReport && { input: canaryInput, ...canaryReport },
         csp: cspReport,
-        streaming: streamingReport,
         checks: entries,
         server: serverReport,
         hints: { browser: browserList, server: serverList },

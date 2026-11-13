@@ -11,6 +11,7 @@
 
 ### Changed
 
+- **Report layout: Advice first, each thing once.** Advice sits right under the Verdict, which ends with `<n> things to look at ↓` (nothing when none fire); in the terminal, Advice comes right after the `verdict` lines, which end with the same count. In the HTML report each item is one bold line with its measured number, and the rest (what to do, caveats, basis) is folded under "why"; the terminal keeps one line per item with the basis indented under it. The separate Streaming section is gone: the Checks line says ✓ or ✗ with the span and, when it doesn't stream, links to the advice. The Request Map is shown once, under the server bar, not again in Details. A streaming span of 0 ms reads `the whole answer arrived at once (0 ms between first and last word, …)`. Tested with `npm run test:hints`, `npm run test:serverblock` and `npm run test:prompt`.
 - **The streaming check's "Fix:" line is gone**, and its claim (`users see the first word sooner, total time stays the same`) wasn't measured. What to do is in Advice, with the measured span and wait, and that Caliper can't tell how much sooner the first word would appear.
 - **The "parts not labelled" line moved** from under the prompt sizes to Advice, word for word.
 
