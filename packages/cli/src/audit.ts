@@ -372,7 +372,6 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
       console.log(`report: ${existed ? "overwrote" : "wrote"} ${reportPath}`);
     }
   } catch (err) {
-    if (report) console.log("no report written: the audit stopped on the error below");
     if (err instanceof ButtonNotFoundError) throw withButtonHints(err, url, auth, authPath);
     throw err;
   } finally {

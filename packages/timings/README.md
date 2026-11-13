@@ -21,7 +21,7 @@ The machine you run Caliper from (your laptop, or CI). It's the CLI that marks a
 
 ```sh
 npm install -g caliper-ai
-npx playwright install chromium
+npx playwright@1.64.1 install chromium
 ```
 
 See the [caliper-ai README](https://github.com/Jia-A/caliper/tree/main/packages/cli#readme).

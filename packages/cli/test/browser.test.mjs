@@ -6,7 +6,7 @@
 // Run with `npm run test:browser` (builds first).
 
 import { execFile } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,7 +18,9 @@ const cli = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
 const auth = fileURLToPath(new URL("./fixtures/empty-auth.json", import.meta.url));
 const emptyBrowsers = mkdtempSync(join(tmpdir(), "caliper-no-browsers-"));
 
-const EXPECTED = "error: Chromium for Playwright isn't installed. Run:\n\n  npx playwright install chromium\n";
+// The Playwright version Caliper pins, in the command: outside a project, a bare
+// `npx playwright` fetches the latest Playwright, whose Chromium build Caliper can't use.
+const EXPECTED = "error: Chromium for Playwright isn't installed. Run:\n\n  npx playwright@1.64.1 install chromium\n";
 
 const server = await startFixtureServer();
 let failed = 0;
@@ -33,12 +35,13 @@ async function caliper(name, args) {
   try {
     const { stdout, stderr } = await run(process.execPath, [cli, ...args], { env, timeout: 60_000 });
     outputs.push(`--- ${name} (exit 0) ---\n${stdout}${stderr}`);
-    return { code: 0, stderr };
+    return { code: 0, stdout, stderr };
   } catch (err) {
     outputs.push(`--- ${name} (exit ${err.code}) ---\n${err.stdout ?? ""}${err.stderr ?? err.message}`);
-    return { code: err.code, stderr: err.stderr ?? "" };
+    return { code: err.code, stdout: err.stdout ?? "", stderr: err.stderr ?? "" };
   }
 }
+const NO_REPORT = "no report written: the audit stopped on the error below";
 
 try {
   const cases = [
@@ -48,9 +51,16 @@ try {
   for (const [name, args] of cases) {
     const { code, stderr } = await caliper(name, args);
     check(code === 1, `${name}: exits 1 (got ${code})`);
-    check(stderr.includes(EXPECTED), `${name}: says "Chromium for Playwright isn't installed. Run: npx playwright install chromium"`);
+    check(stderr.includes(EXPECTED), `${name}: says "Chromium for Playwright isn't installed. Run: npx playwright@1.64.1 install chromium"`);
     check(!stderr.includes("Executable doesn't exist") && !stderr.includes("╔"), `${name}: Playwright's own error box isn't printed`);
   }
+  // Every stranger's first run: no --no-report, so the last line says why there's no report.
+  const dir = mkdtempSync(join(tmpdir(), "caliper-no-browsers-report-"));
+  const first = await caliper("audit, report on", ["audit", `${server.url}/stream-nostore`, "--measure", "^generate$", "--output", "#out", "--runs", "1", "--auth", auth, "--report", join(dir, "r.html")]);
+  check(first.code === 1 && first.stderr.includes(EXPECTED) && first.stdout.trimEnd().split("\n").at(-1) === NO_REPORT && !existsSync(join(dir, "r.html")),
+    `audit, report on: the instruction, and "${NO_REPORT}" (got: ${first.stdout.trimEnd().split("\n").at(-1) || "nothing"})`);
+  const quiet = await caliper("audit, --no-report", cases[0][1]);
+  check(!quiet.stdout.includes("no report written"), "audit, --no-report: no report line");
 } finally {
   await server.close();
 }

@@ -12,10 +12,10 @@ The machine you run Caliper from (your laptop, or CI):
 
 ```sh
 npm install -g caliper-ai
-npx playwright install chromium
+npx playwright@1.64.1 install chromium
 ```
 
-Caliper drives a real Chromium through [Playwright](https://playwright.dev). The browser is a separate download and there is no postinstall script, so run the second command once. If you skip it, Caliper tells you to run it. Requires Node.js 20 or newer.
+Caliper drives a real Chromium through [Playwright](https://playwright.dev), pinned to 1.64.1. The browser is a separate download and there is no postinstall script, so run the second command once. Keep the `@1.64.1`: outside a project, a bare `npx playwright` fetches the latest Playwright, which downloads a different Chromium build that Caliper can't use. If you skip it, Caliper tells you the exact command to run, and the audit's last line is `no report written: the audit stopped on the error below`. Requires Node.js 20 or newer.
 
 ### 2. In your server's project: `caliper-timings` (optional)
 
@@ -85,7 +85,7 @@ On a real app, "Where to look" lists every part over its limit, biggest first, w
 
 ### The HTML report
 
-Every audit that finishes writes `caliper-report.html` in the current directory. The last terminal line says where, and whether it `wrote` a new file or `overwrote` one. `--report <path>` writes it elsewhere, and `--no-report` turns it off (passing both is an error). When the audit ends early, the last line says why there's no report: `no report written: every run failed to load`, or `no report written: the audit stopped on the error below`. The report is one self-contained file and works offline. From top to bottom:
+Every audit that finishes writes `caliper-report.html` in the current directory. The last terminal line says where, and whether it `wrote` a new file or `overwrote` one. `--report <path>` writes it elsewhere, and `--no-report` turns it off (passing both is an error). When the audit ends early, the last line says why there's no report: `no report written: every run failed to load`, or `no report written: the audit stopped on the error below`. That covers every stop once the flags are read: a flag check, a missing `--auth` file, a bad `--stop` pattern, Chromium not installed, or an error during the runs. A command line Caliper can't parse at all (an unknown flag, no URL) prints the usage instead. With `--no-report` there's no report line. The report is one self-contained file and works offline. From top to bottom:
 
 1. **Verdict.** Two plain sentences, only from measured numbers: `People waited a median of <X> ms for the first word (<n> warm runs).`, or with one warm run (`--runs 2`) `People waited <X> ms for the first word in the one warm run.`, then one line per side. For example, `In the browser: <top hint> — <R>× its limit, in <k> of <n> warm runs.` and, with `--server-timings`, `Inside the server: <top hint> — <R>× its limit, in <k> of <n> marked visits.` A side with no hint says `nothing over its limit.` The two sides are never merged or compared. The terminal prints the same lines under `verdict`, after the summary.
 2. **One bar per side.**

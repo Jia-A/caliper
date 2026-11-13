@@ -21,7 +21,9 @@
 //   (j) --no-report: no file, no report line; (k) --report <path>: written there;
 //   (l) every run fails to load: "no report written: every run failed to load", no file;
 //   (m) --report with --no-report: an error before any run;
-//   (n) an audit stopped by an error: "no report written: the audit stopped on the error below".
+//   (n) an audit stopped by an error: "no report written: the audit stopped on the error below";
+//   (o) the same for stops before any run (a flag check, a missing --auth file, a bad --stop
+//       regex), and nothing with --no-report.
 // Run with `npm run test:auth` (builds first).
 
 import { execFile } from "node:child_process";
@@ -158,6 +160,23 @@ try {
   // (n) Stopped by an error.
   const n = await caliper(reports, noButton([]));
   check(n.code !== 0 && lastLine(n) === "no report written: the audit stopped on the error below" && !existsSync(file), `(n) stopped by an error: says no report was written (got: ${lastLine(n)})`, n);
+  // (o) Stops before any run (a flag check, a missing --auth file, a bad --stop regex) end the
+  // same way; with --no-report, none of them prints it.
+  const early = [
+    ["--input without --prompt", [...run, "--input", "#msg"], "audit: --input needs --prompt <text>."],
+    ["missing --auth file", [...run, "--auth", "nosuch.json"], `No saved session at ${join(reports, "nosuch.json")}.`],
+    ["bad --stop regex", [...run, "--stop", "("], `--stop "(" is not a valid regular expression`],
+  ];
+  for (const [what, args, error] of early) {
+    const o = await caliper(reports, args);
+    check(o.code === 1 && o.stderr.includes(error) && lastLine(o) === "no report written: the audit stopped on the error below" && timedRuns(o.stdout) === 0 && !existsSync(file),
+      `(o) ${what}: its error, and "no report written: the audit stopped on the error below" (got: ${lastLine(o) ?? "nothing"})`, o);
+    const quiet = await caliper(reports, [...args, "--no-report"]);
+    check(quiet.code === 1 && quiet.stderr.includes(error) && !/no report written/.test(quiet.stdout), `(o) ${what} with --no-report: its error, no report line`, quiet);
+  }
+  // A command line that can't be parsed: the usage, and no report line (--no-report can't be read).
+  const unparsed = await caliper(reports, [...run, "--nosuch"]);
+  check(unparsed.code === 1 && unparsed.stderr.includes("Usage:") && !/no report written/.test(unparsed.stdout), "(o) an unknown flag: the usage, no report line", unparsed);
   rmSync(reports, { recursive: true, force: true });
 } finally {
   await server.close();

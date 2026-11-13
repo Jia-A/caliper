@@ -121,52 +121,59 @@ const COMMANDS = {
     },
     optionalValues: { report: DEFAULT_REPORT },
     async run({ url, values }) {
-      if (values.measure !== undefined && values["measure-selector"] !== undefined) {
-        throw new CliError("audit: pass --measure <text> or --measure-selector <css>, not both.");
-      }
-      if (!values.measure && !values["measure-selector"] && !values.input) {
-        throw new CliError("audit: --measure <text> or --measure-selector <css> (or --input <selector>) is required.");
-      }
-      if (!values.output) throw new CliError("audit: --output <selector> is required.");
-      if (values["no-report"] && values.report !== undefined) throw new CliError("audit: pass --report <path> or --no-report, not both.");
-      if (values.input && values.prompt === undefined) throw new CliError("audit: --input needs --prompt <text>.");
-      if (values.prompt !== undefined && !values.input) throw new CliError("audit: --prompt needs --input <selector>.");
-      if (values.input) {
-        const clash = (["stop", "double", "canary", "canary-input"] as const).find((f) => values[f]);
-        if (clash) throw new CliError(`audit: --${clash} can't be combined with --input yet.`);
-      }
+      // Every audit that stops ends by saying there's no report (unless --no-report), from the
+      // flag checks on: a missing --auth file, a bad --stop, no Chromium, an error mid-run.
+      try {
+        if (values.measure !== undefined && values["measure-selector"] !== undefined) {
+          throw new CliError("audit: pass --measure <text> or --measure-selector <css>, not both.");
+        }
+        if (!values.measure && !values["measure-selector"] && !values.input) {
+          throw new CliError("audit: --measure <text> or --measure-selector <css> (or --input <selector>) is required.");
+        }
+        if (!values.output) throw new CliError("audit: --output <selector> is required.");
+        if (values["no-report"] && values.report !== undefined) throw new CliError("audit: pass --report <path> or --no-report, not both.");
+        if (values.input && values.prompt === undefined) throw new CliError("audit: --input needs --prompt <text>.");
+        if (values.prompt !== undefined && !values.input) throw new CliError("audit: --prompt needs --input <selector>.");
+        if (values.input) {
+          const clash = (["stop", "double", "canary", "canary-input"] as const).find((f) => values[f]);
+          if (clash) throw new CliError(`audit: --${clash} can't be combined with --input yet.`);
+        }
 
-      let serverTimings: { origin: string; token: string; runs: number } | undefined;
-      if (values["server-runs"] !== undefined && values["server-timings"] === undefined) {
-        throw new CliError("audit: --server-runs needs --server-timings <origin>.");
-      }
-      if (values["server-timings"] !== undefined) {
-        const token = process.env.CALIPER_TOKEN;
-        if (!token) throw new CliError("audit: --server-timings needs CALIPER_TOKEN set in the environment.");
-        serverTimings = { origin: parseOrigin(values["server-timings"]), token, runs: serverRuns(values["server-runs"] ?? "3") };
-      }
+        let serverTimings: { origin: string; token: string; runs: number } | undefined;
+        if (values["server-runs"] !== undefined && values["server-timings"] === undefined) {
+          throw new CliError("audit: --server-runs needs --server-timings <origin>.");
+        }
+        if (values["server-timings"] !== undefined) {
+          const token = process.env.CALIPER_TOKEN;
+          if (!token) throw new CliError("audit: --server-timings needs CALIPER_TOKEN set in the environment.");
+          serverTimings = { origin: parseOrigin(values["server-timings"]), token, runs: serverRuns(values["server-runs"] ?? "3") };
+        }
 
-      const { audit } = await import("./audit.js");
-      await audit({
-        url,
-        measure: values.measure ? { name: values.measure } : values["measure-selector"] ? { selector: values["measure-selector"] } : undefined,
-        output: values.output,
-        steps: values.step,
-        runs: positiveInt(values.runs, "--runs"),
-        headed: values.headed,
-        auth: values.auth,
-        timeout: positiveInt(values.timeout, "--timeout"),
-        settleMs: positiveInt(values["settle-ms"], "--settle-ms"),
-        request: values.request,
-        report: values["no-report"] ? undefined : (values.report ?? DEFAULT_REPORT),
-        stop: values.stop,
-        double: values.double,
-        canary: values.canary,
-        canaryInput: values["canary-input"],
-        csp: values.csp,
-        chat: values.input ? { input: values.input, prompt: values.prompt! } : undefined,
-        serverTimings,
-      });
+        const { audit } = await import("./audit.js");
+        await audit({
+          url,
+          measure: values.measure ? { name: values.measure } : values["measure-selector"] ? { selector: values["measure-selector"] } : undefined,
+          output: values.output,
+          steps: values.step,
+          runs: positiveInt(values.runs, "--runs"),
+          headed: values.headed,
+          auth: values.auth,
+          timeout: positiveInt(values.timeout, "--timeout"),
+          settleMs: positiveInt(values["settle-ms"], "--settle-ms"),
+          request: values.request,
+          report: values["no-report"] ? undefined : (values.report ?? DEFAULT_REPORT),
+          stop: values.stop,
+          double: values.double,
+          canary: values.canary,
+          canaryInput: values["canary-input"],
+          csp: values.csp,
+          chat: values.input ? { input: values.input, prompt: values.prompt! } : undefined,
+          serverTimings,
+        });
+      } catch (err) {
+        if (!values["no-report"]) console.log("no report written: the audit stopped on the error below");
+        throw err;
+      }
     },
   }),
 };
