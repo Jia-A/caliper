@@ -1,7 +1,7 @@
 // Self-contained HTML timeline for an audit: inline CSS/JS, no external requests.
 
 import type { Bar, BarPart, Hint, HintList } from "./hints.js";
-import type { PromptView, ServerReport, ServerRow } from "./serverblock.js";
+import type { PromptView, RowSource, ServerReport, ServerRow } from "./serverblock.js";
 import type {
   Breakdown,
   CanaryReport,
@@ -394,24 +394,34 @@ export function serverSection({ lines, block }: ServerReport): string {
   </section>`;
 }
 
+// Who wrote a row: a swatch and the word, then how it's known; each visit's in words when they differ.
+const sourceCell = (s: RowSource | undefined) =>
+  `<td class="source">${!s ? "" : s.kind === "mixed" ? esc(s.word) : `<span class="src src-${s.kind}"></span>${esc(s.word)} <span class="muted">${esc(s.note)}</span>`}</td>`;
+const SOURCE_LEGEND = `<p class="muted">Source: who wrote the text, as your app labelled it.</p>
+      <ul class="legend">${([
+  ["app", "your own text"], ["user", "the person using the feature"], ["outside", "anyone else"], ["unknown", "not labelled"],
+] as const).map(([k, what]) => `<li><span class="src src-${k}"></span>${k} (${what})</li>`).join("")}</ul>`;
+
 // Prompt sizes: the terminal's rows as a table (bytes, then the share or why there's no size; with
-// several visits that differ, a column per visit and min, median, max), or the line saying none
-// were recorded; a line per visit that isn't compared.
-function promptHtml({ heading, note, visits, rows, none, lines }: PromptView): string {
+// several visits that differ, a column per visit and min, median, max; who wrote each part when
+// the prompt has named parts), or the line saying none were recorded; a line per visit that isn't
+// compared.
+function promptHtml({ heading, note, visits, rows, legend, unlabelled, none, lines }: PromptView): string {
   const many = visits.length > 1;
-  const head = many
+  const head = (many
     ? `${visits.map((v) => `<th scope="col" class="num">visit ${v} (bytes)</th>`).join("")}<th scope="col" class="num">min</th><th scope="col" class="num">median</th><th scope="col" class="num">max</th><th scope="col">note</th>`
-    : `<th scope="col" class="num">bytes</th><th scope="col">share</th>`;
-  const columns = 1 + visits.length + (many ? 3 : 0) + 1;
-  const cells = ({ values, stats, tail }: PromptView["rows"][number]) =>
-    [...values, ...(many ? (stats ?? ["", "", ""]).map(String) : [])].map((v) => `<td class="num">${esc(v)}</td>`).join("") + `<td>${esc(tail)}</td>`;
+    : `<th scope="col" class="num">bytes</th><th scope="col">share</th>`) + (legend ? `<th scope="col">source</th>` : "");
+  const columns = 1 + visits.length + (many ? 3 : 0) + 1 + (legend ? 1 : 0);
+  const cells = ({ values, stats, tail, source }: PromptView["rows"][number]) =>
+    [...values, ...(many ? (stats ?? ["", "", ""]).map(String) : [])].map((v) => `<td class="num">${esc(v)}</td>`).join("") + `<td>${esc(tail)}</td>` + (legend ? sourceCell(source) : "");
   const row = (r: PromptView["rows"][number]) =>
     r.kind === "note"
       ? `<tr class="part note"><th scope="row" colspan="${columns}">${esc(r.label)}</th></tr>`
       : `<tr${r.kind === "part" ? ' class="part"' : ""}><th scope="row">${esc(r.label)}</th>${cells(r)}</tr>`;
-  const notes = [...(none ? [none] : []), ...lines];
+  const notes = [...(none ? [none] : []), ...(unlabelled ? [unlabelled] : []), ...lines];
   return `${heading ? `<h3>${esc(heading[0]!.toUpperCase() + heading.slice(1))}</h3>
       <p class="muted">${esc(note[0]!.toUpperCase() + note.slice(1))}.</p>
+      ${legend ? SOURCE_LEGEND : ""}
       ${rows.length ? `<div class="table-wrap">
       <table>
         <thead><tr><th scope="col">message</th>${head}</tr></thead>
@@ -517,6 +527,7 @@ const CSS = `
   --seg-click: #eda100; --seg-preflight: #e87ba4; --seg-connection: #008300; --seg-ttfb: #2a78d6;
   --seg-download: #1baf7a; --seg-render: #eb6834; --seg-streaming: #e34948; --seg-other: #c3c2b7;
   --ok: #e1e0d9; --ok-ink: #0b0b0b; --warn: #b93a0b; --warn-ink: #ffffff; --track: #f1f0eb;
+  --src-app: #2a78d6; --src-user: #eda100; --src-outside: #e34948; --src-unknown: #c3c2b7;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -526,6 +537,7 @@ const CSS = `
     --seg-click: #c98500; --seg-preflight: #d55181; --seg-connection: #008300; --seg-ttfb: #3987e5;
     --seg-download: #199e70; --seg-render: #d95926; --seg-streaming: #e66767; --seg-other: #52514e;
     --ok: #383835; --ok-ink: #f0efec; --warn: #f2884f; --warn-ink: #0b0b0b; --track: #141413;
+    --src-app: #3987e5; --src-user: #c98500; --src-outside: #e66767; --src-unknown: #52514e;
   }
 }
 * { box-sizing: border-box; }
@@ -603,6 +615,11 @@ details.more h3 { font-size: 15px; margin: 24px 0 10px; }
 .table-wrap + .table-wrap { margin-top: 12px; }
 tr.part th { padding-left: 1.5em; font-weight: normal; }
 tr.part.note th { color: var(--ink-2); }
+.src { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+.src-app { background: var(--src-app); } .src-user { background: var(--src-user); }
+.src-outside { background: var(--src-outside); } .src-unknown { background: var(--src-unknown); }
+td.source { white-space: nowrap; }
+.legend .src { margin-right: 0; }
 .table-wrap { overflow-x: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
 table { border-collapse: collapse; width: 100%; font-size: 13px; }
 th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--grid); vertical-align: top; }

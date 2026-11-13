@@ -12,10 +12,11 @@ export const LEAKY_MESSAGES = () => [
 ];
 
 // Named parts for LEAKY_MESSAGES: the system message split in two (so they add up to it exactly),
-// a part named with the marker, and a part whose text (carrying the marker) isn't in its message.
+// a part named with the marker, and a part whose text (carrying the marker) isn't in its message
+// and whose source is the marker too.
 export const LEAKY_PARTS = () => [
-  { message: 0, name: "intro", text: "You are a writer. " },
-  { message: 0, name: "marker", text: SECRET },
-  { message: 4, name: `named ${SECRET}`, text: SECRET },
-  { message: 4, name: "ghost", text: `${SECRET} is not here` },
+  { message: 0, name: "intro", text: "You are a writer. ", source: "app" },
+  { message: 0, name: "marker", text: SECRET, source: "outside" },
+  { message: 4, name: `named ${SECRET}`, text: SECRET, source: "user" },
+  { message: 4, name: "ghost", text: `${SECRET} is not here`, source: `user ${SECRET}` },
 ];

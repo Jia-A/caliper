@@ -86,20 +86,23 @@ try {
   // LEAKY_MESSAGES: 42 bytes of system text, 25 bytes under a role that's really text, a list of
   // parts (not measured), 13 bytes of history, and the marker three times (72 bytes).
   // Parts: the system message as intro + marker (adding up to it exactly), and in message 5 a
-  // part named with the marker (shown as "?") and one whose text isn't in it.
+  // part named with the marker (shown as "?") and one whose text isn't in it. Sources as labelled;
+  // the ghost's source was the marker, so the wrapper dropped it: unknown, and the fix line.
   const want = [
+    "    source = who wrote the text, as your app labelled it: app (your own text), user (the person using the feature), outside (anyone else), unknown (not labelled)",
     "    1 system                            42 bytes   28%",
-    "        intro                           18 bytes",
-    "        marker                          24 bytes",
-    "        rest of message 1                0 bytes",
-    "    2 ?                                 25 bytes   16%",
-    "    3 user                               – bytes   not measured (content wasn't a string)",
-    "    4 assistant                         13 bytes   9%",
+    "        intro                           18 bytes   source: app (labelled by app)",
+    "        marker                          24 bytes   source: outside (labelled by app)",
+    "        rest of message 1                0 bytes   source: unknown (not labelled)",
+    "    2 ?                                 25 bytes   16%   source: unknown (no parts named)",
+    "    3 user                               – bytes   not measured (content wasn't a string)   source: unknown (no parts named)",
+    "    4 assistant                         13 bytes   9%   source: unknown (no parts named)",
     "    5 user                              72 bytes   47%",
-    "        ?                               24 bytes",
-    "        ghost                            – bytes   not found in message 5 (the text given isn't in it)",
+    "        ?                               24 bytes   source: user (labelled by app)",
+    "        ghost                            – bytes   not found in message 5 (the text given isn't in it)   source: unknown (not labelled)",
     "        no rest of message 5: not every part was found in it",
     "    total (4 of 5 measured)            152 bytes",
+    '    1 part not labelled (ghost): add source: "app", "user" or "outside" to each in run.prompt() — needs caliper-timings 0.6.0; see its README, "Choosing a source"',
   ];
 
   check(out.code === 0, `exits 0 (got ${out.code})`);
@@ -109,10 +112,14 @@ try {
   check(!out.stdout.includes(SECRET), "the marker isn't in the terminal output");
   check(!out.stderr.includes(SECRET), "the marker isn't in stderr");
   check(html.length > 0, "the report was written");
-  check(html.includes("<h3>Prompt sizes (the same in marked visits 1, 2)</h3>") && html.includes('<tr><th scope="row">5 user</th><td class="num">72</td><td>47%</td></tr>'),
+  check(html.includes("<h3>Prompt sizes (the same in marked visits 1, 2)</h3>") && html.includes('<tr><th scope="row">5 user</th><td class="num">72</td><td>47%</td><td class="source"></td></tr>'),
     "the HTML report has the prompt sizes table, with the terminal's numbers");
-  check(html.includes(`<tr class="part"><th scope="row">ghost</th><td class="num">–</td><td>not found in message 5 (the text given isn't in it)</td></tr>`),
+  check(html.includes(`<tr class="part"><th scope="row">ghost</th><td class="num">–</td><td>not found in message 5 (the text given isn't in it)</td><td class="source"><span class="src src-unknown"></span>unknown <span class="muted">not labelled</span></td></tr>`),
     "the HTML report has the parts, with the not-found one");
+  check(html.includes(`<tr class="part"><th scope="row">marker</th><td class="num">24</td><td></td><td class="source"><span class="src src-outside"></span>outside <span class="muted">labelled by app</span></td></tr>`),
+    "the HTML report has each part's source");
+  check(out.stdout.includes(`prompt part 4: source isn't "app", "user" or "outside"; recorded without a source`),
+    "the wrapper's problem about the ghost's source is printed, by number only");
   check(!html.includes(SECRET), "the marker isn't in the HTML report");
   if (failed) console.log(`${out.stdout}\n${out.stderr}`.replace(/^/gm, "     | "));
 } finally {

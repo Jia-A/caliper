@@ -46,7 +46,10 @@ export interface PromptPart {
   name: string;
   bytes: number | null;
   found: boolean | null;
+  source: PartSource | null; // who wrote it, as the app labelled it (caliper-timings 0.6.0); null when it didn't
 }
+export type PartSource = "app" | "user" | "outside";
+const SOURCES: readonly unknown[] = ["app", "user", "outside"];
 
 // A message's parts, or why they can't be shown. Only that message's parts: its size stands.
 function parseParts(parts: unknown): PromptPart[] | { unreadable: string } {
@@ -54,11 +57,13 @@ function parseParts(parts: unknown): PromptPart[] | { unreadable: string } {
   const out: PromptPart[] = [];
   for (const [j, p] of parts.entries()) {
     if (typeof p !== "object" || p === null) return { unreadable: `part ${j + 1} isn't { name, bytes, found }` };
-    const { name, bytes, found } = p as { name?: unknown; bytes?: unknown; found?: unknown };
+    const { name, bytes, found, source } = p as { name?: unknown; bytes?: unknown; found?: unknown; source?: unknown };
     if (typeof name !== "string" || !ROLE.test(name)) return { unreadable: `part ${j + 1}'s name isn't a lowercase name of up to 32 letters or _ (or "?")` };
     if (bytes !== null && !(Number.isInteger(bytes) && (bytes as number) >= 0)) return { unreadable: `part ${j + 1}'s bytes isn't a whole number ≥ 0 or null` };
     if (found !== true && found !== false && found !== null) return { unreadable: `part ${j + 1}'s found isn't true, false or null` };
-    out.push({ name, bytes: bytes as number | null, found });
+    // Never shown when it's anything else: it could be text.
+    if (source !== undefined && !SOURCES.includes(source)) return { unreadable: `part ${j + 1}'s source isn't "app", "user" or "outside"` };
+    out.push({ name, bytes: bytes as number | null, found, source: (source ?? null) as PartSource | null });
   }
   return out;
 }
@@ -255,6 +260,13 @@ function promptBlock(visits: { visit: number; record: ServerRecord }[]): PromptB
   };
 }
 
+/** Who wrote a row's text: a source and how it's known, or each visit's when they differ ("mixed"). */
+export interface RowSource {
+  kind: PartSource | "unknown" | "mixed";
+  word: string; // "user"; for mixed, the whole text with the visits
+  note: string; // "labelled by app", "not labelled", "no parts named"; "" for mixed
+}
+
 /** One row of the prompt sizes: a message (or the total), one of its named parts, or a note under them. */
 export interface PromptRow {
   kind: "message" | "part" | "note";
@@ -262,6 +274,7 @@ export interface PromptRow {
   values: string[]; // one per column: bytes, or "–"
   stats: [min: number, median: number, max: number] | null;
   tail: string; // the share, or why there's no size
+  source?: RowSource; // only when the prompt has named parts; none on a message with parts, or the total
 }
 
 /** Prompt sizes as shown, shared by the terminal and the HTML report. */
@@ -270,6 +283,8 @@ export interface PromptView {
   note: string;
   visits: number[]; // one column each; a single column when one visit, or all the same
   rows: PromptRow[];
+  legend: string | null; // what source means; only when the prompt has named parts
+  unlabelled: string | null; // the parts with no source, and how to label them
   none: string | null; // the line when no visit recorded a prompt
   lines: string[]; // a visit with none, different messages or parts, or unreadable sizes
 }
@@ -280,13 +295,16 @@ const inVisits = (visits: number[]) => `in marked visit${visits.length > 1 ? "s"
 const NOT_FOUND = (n: number) => `not found in message ${n} (the text given isn't in it)`;
 const NOT_MEASURED_PART = "not measured (its text wasn't a string)";
 const NOT_CHECKED = "not checked (the server couldn't compare it with the message)";
+const LEGEND = "source = who wrote the text, as your app labelled it: app (your own text), user (the person using the feature), outside (anyone else), unknown (not labelled)";
+const UNKNOWN = (note: string): RowSource => ({ kind: "unknown", word: "unknown", note });
+const sourceOf = (source: PartSource | null): RowSource => (source ? { kind: source, word: source, note: "labelled by app" } : UNKNOWN("not labelled"));
 
 // One column: each message's bytes and its share of the measured total (none when the total is
 // 0), its named parts under it, then the total, labelled with how many were measured when not all
 // were. Several visits with different sizes: a column per visit, min · median · max per row, and
 // no share.
 function promptView({ compared, lines, none }: PromptBlock): PromptView {
-  const view: PromptView = { heading: null, note: SIZES_NOTE, visits: [], rows: [], none: none ? NO_SIZES : null, lines };
+  const view: PromptView = { heading: null, note: SIZES_NOTE, visits: [], rows: [], legend: null, unlabelled: null, none: none ? NO_SIZES : null, lines };
   if (none || compared.length === 0) return view;
   const all = compared.map((c) => c.visit);
   const sameParts = (a: PromptSize["parts"], b: PromptSize["parts"]) => JSON.stringify(a) === JSON.stringify(b);
@@ -312,6 +330,16 @@ function promptView({ compared, lines, none }: PromptBlock): PromptView {
   };
   const share = (bytes: number) => (!many && totals[0]! > 0 ? `${Math.round((bytes / totals[0]!) * 100)}%` : "");
   const note = (label: string): PromptRow => ({ kind: "note", label, values: [], stats: null, tail: "" });
+  // Sources only when some message has named parts: then every part, rest and unnamed message has one.
+  const sources = shown.some((c) => c.messages.some((m) => m.parts !== undefined));
+  const unlabelled: string[] = [];
+  // Each visit's source for a part: one when they agree, else each with the visits that had it.
+  const sourceAcross = (each: PromptPart[]): RowSource => {
+    const texts = each.map((q) => sourceOf(q.source)).map((x) => ({ x, text: `${x.word} (${x.note})` }));
+    if (texts.every((t) => t.text === texts[0]!.text)) return texts[0]!.x;
+    const groups = [...new Set(texts.map((t) => t.text))];
+    return { kind: "mixed", word: groups.map((g) => `${g} ${inVisits(shown.filter((_, k) => texts[k]!.text === g).map((c) => c.visit))}`).join("; "), note: "" };
+  };
 
   const partRows = (i: number): PromptRow[] => {
     const n = i + 1;
@@ -322,7 +350,8 @@ function promptView({ compared, lines, none }: PromptBlock): PromptView {
       const each = parts.map((ps) => (ps as PromptPart[])[j]!);
       const values = each.map((q) => (q.found === false || q.bytes === null ? null : q.bytes));
       const statuses = each.map((q) => (q.found === false ? NOT_FOUND(n) : q.bytes === null ? NOT_MEASURED_PART : q.found === null ? NOT_CHECKED : ""));
-      return { kind: "part", label: p.name, values: cells(values), stats: stats(values), tail: tailOf(statuses) };
+      if (each.some((q) => q.source === null)) unlabelled.push(p.name);
+      return { kind: "part", label: p.name, values: cells(values), stats: stats(values), tail: tailOf(statuses), source: sourceAcross(each) };
     });
     // The rest of the message: only when every part was found and they fit inside it.
     const rests = shown.map((c) => {
@@ -335,7 +364,7 @@ function promptView({ compared, lines, none }: PromptBlock): PromptView {
     });
     if (rests.every((r) => "rest" in r)) {
       const values = rests.map((r) => (r as { rest: number }).rest);
-      rows.push({ kind: "part", label: `rest of message ${n}`, values: cells(values), stats: stats(values), tail: "" });
+      rows.push({ kind: "part", label: `rest of message ${n}`, values: cells(values), stats: stats(values), tail: "", source: UNKNOWN("not labelled") });
     } else {
       const whys = [...new Set(rests.flatMap((r) => ("why" in r ? [r.why] : [])))];
       const where = many ? ` ${inVisits(shown.filter((_, k) => "why" in rests[k]!).map((c) => c.visit))}` : "";
@@ -346,15 +375,12 @@ function promptView({ compared, lines, none }: PromptBlock): PromptView {
 
   const anyNull = shown.some((c) => c.messages.some((m) => m.bytes === null));
   const measured = shown[0]!.messages.filter((m) => m.bytes !== null).length;
-  return {
-    ...view,
-    heading,
-    visits: shown.map((c) => c.visit),
-    rows: [
+  const rows: PromptRow[] = [
       ...roles.flatMap((role, i) => {
         const values = shown.map((c) => c.messages[i]!.bytes);
         const statuses = values.map((v) => (v === null ? "not measured (content wasn't a string)" : ""));
         const message: PromptRow = { kind: "message", label: `${i + 1} ${role}`, values: cells(values), stats: stats(values), tail: many ? tailOf(statuses) : values[0] === null ? statuses[0]! : share(values[0]!) };
+        if (sources && shown.every((c) => c.messages[i]!.parts === undefined)) message.source = UNKNOWN("no parts named");
         return [message, ...partRows(i)];
       }),
       {
@@ -364,22 +390,28 @@ function promptView({ compared, lines, none }: PromptBlock): PromptView {
         stats: stats(totals),
         tail: "",
       },
-    ],
-  };
+  ];
+  const fix = unlabelled.length
+    ? `${unlabelled.length} part${unlabelled.length > 1 ? "s" : ""} not labelled (${unlabelled.join(", ")}): add source: "app", "user" or "outside" to each in run.prompt() — needs caliper-timings 0.6.0; see its README, "Choosing a source"`
+    : null;
+  return { ...view, heading, visits: shown.map((c) => c.visit), rows, legend: sources ? LEGEND : null, unlabelled: fix };
 }
 
-function promptLines({ heading, note, visits, rows, none, lines }: PromptView): string[] {
+function promptLines({ heading, note, visits, rows, legend, unlabelled, none, lines }: PromptView): string[] {
   if (none) return [`  ${none}`];
-  const row = ({ kind, label, values, stats, tail }: PromptRow) => {
+  const sourceText = (s: RowSource) => `   source: ${s.word}${s.note ? ` (${s.note})` : ""}`;
+  const row = ({ kind, label, values, stats, tail, source }: PromptRow) => {
     if (kind === "note") return `        ${label}`;
     const head = kind === "part" ? `        ${label.padEnd(LABEL_WIDTH - 4)}` : `    ${label.padEnd(LABEL_WIDTH)}`;
-    return `${head}${values.map((v) => v.padStart(6)).join("")}${stats ? `   min ${stats[0]} · median ${stats[1]} · max ${stats[2]}` : ""} bytes${tail ? `   ${tail}` : ""}`;
+    return `${head}${values.map((v) => v.padStart(6)).join("")}${stats ? `   min ${stats[0]} · median ${stats[1]} · max ${stats[2]}` : ""} bytes${tail ? `   ${tail}` : ""}${source ? sourceText(source) : ""}`;
   };
   return [
     ...(heading ? [
       `  ${heading} — ${note}`,
+      ...(legend ? [`    ${legend}`] : []),
       ...(visits.length > 1 ? [`    ${"marked visit".padEnd(LABEL_WIDTH)}${visits.map((v) => String(v).padStart(6)).join("")}`] : []),
       ...(rows.length ? rows.map(row) : ["    no messages"]),
+      ...(unlabelled ? [`    ${unlabelled}`] : []),
     ] : []),
     ...lines.map((l) => `  ${l}`),
   ];

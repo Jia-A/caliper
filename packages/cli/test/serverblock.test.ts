@@ -424,15 +424,15 @@ const QUILL_PARTS = [
 
 test("parts: one row per part under its message, then the rest of the message", () => {
   const all = lines(text(visits({ marks: QUILL_MARKS, prompt: withParts(QUILL_PARTS) }), 1));
-  const at = all.indexOf("    1 system                          2499 bytes   43%");
+  const at = all.indexOf("    1 system                          2499 bytes   43%   source: unknown (no parts named)");
   assert.deepEqual(all.slice(at, at + 8), [
-    "    1 system                          2499 bytes   43%",
+    "    1 system                          2499 bytes   43%   source: unknown (no parts named)",
     "    2 user                            3328 bytes   57%",
-    "        author                          11 bytes",
-    "        title                           21 bytes",
-    "        code_snippet                    56 bytes",
-    "        article                       3232 bytes",
-    "        rest of message 2                8 bytes",
+    "        author                          11 bytes   source: unknown (not labelled)",
+    "        title                           21 bytes   source: unknown (not labelled)",
+    "        code_snippet                    56 bytes   source: unknown (not labelled)",
+    "        article                       3232 bytes   source: unknown (not labelled)",
+    "        rest of message 2                8 bytes   source: unknown (not labelled)",
     "    total                             5827 bytes",
   ]);
 });
@@ -442,11 +442,11 @@ test("parts: not found, not checked, or not measured each say so, and then there
     { name: "title", bytes: 21, found: true },
     { name: "summary", bytes: 40, found: false },
   ]) }), 1);
-  assert.ok(lines(block).includes("        summary                          – bytes   not found in message 2 (the text given isn't in it)"), block);
+  assert.ok(lines(block).includes("        summary                          – bytes   not found in message 2 (the text given isn't in it)   source: unknown (not labelled)"), block);
   assert.ok(lines(block).includes("        no rest of message 2: not every part was found in it"), block);
   const unchecked = text(visits({ marks: QUILL_MARKS, prompt: withParts([{ name: "title", bytes: 21, found: null }, { name: "article", bytes: null, found: null }]) }), 1);
-  assert.ok(lines(unchecked).includes("        title                           21 bytes   not checked (the server couldn't compare it with the message)"), unchecked);
-  assert.ok(lines(unchecked).includes("        article                          – bytes   not measured (its text wasn't a string)"), unchecked);
+  assert.ok(lines(unchecked).includes("        title                           21 bytes   not checked (the server couldn't compare it with the message)   source: unknown (not labelled)"), unchecked);
+  assert.ok(lines(unchecked).includes("        article                          – bytes   not measured (its text wasn't a string)   source: unknown (not labelled)"), unchecked);
   assert.ok(lines(unchecked).includes("        no rest of message 2: not every part was found in it"), unchecked);
 });
 
@@ -474,11 +474,11 @@ test("parts: a malformed parts field makes only that message's parts unreadable;
 test("parts, several visits the same: one table with the parts; different parts sizes: a column per visit", () => {
   const p = withParts(QUILL_PARTS);
   const same = text(visits({ marks: QUILL_MARKS, prompt: p }, { marks: QUILL_MARKS, prompt: p }), 2);
-  assert.ok(lines(same).includes("        article                       3232 bytes"), same);
+  assert.ok(lines(same).includes("        article                       3232 bytes   source: unknown (not labelled)"), same);
   const other = withParts([...QUILL_PARTS.slice(0, 3), { name: "article", bytes: 3000, found: true }], 3096);
   const diff = text(visits({ marks: QUILL_MARKS, prompt: p }, { marks: QUILL_MARKS, prompt: other }), 2);
-  assert.ok(lines(diff).includes("        article                       3232  3000   min 3000 · median 3116 · max 3232 bytes"), diff);
-  assert.ok(lines(diff).includes("        rest of message 2                8     8   min 8 · median 8 · max 8 bytes"), diff);
+  assert.ok(lines(diff).includes("        article                       3232  3000   min 3000 · median 3116 · max 3232 bytes   source: unknown (not labelled)"), diff);
+  assert.ok(lines(diff).includes("        rest of message 2                8     8   min 8 · median 8 · max 8 bytes   source: unknown (not labelled)"), diff);
 });
 
 test("parts: visits whose parts have different names aren't compared", () => {
@@ -489,7 +489,95 @@ test("parts: visits whose parts have different names aren't compared", () => {
 
 test("HTML: parts rows under their message, with the terminal's cells", () => {
   const html = serverSection(report(visits({ marks: QUILL_MARKS, prompt: withParts([{ name: "title", bytes: 21, found: true }, { name: "summary", bytes: 40, found: false }]) }), 1));
-  assert.ok(html.includes('<tr class="part"><th scope="row">title</th><td class="num">21</td><td></td></tr>'), html);
-  assert.ok(html.includes(`<tr class="part"><th scope="row">summary</th><td class="num">–</td><td>not found in message 2 (the text given isn't in it)</td></tr>`), html);
-  assert.ok(html.includes('<tr class="part note"><th scope="row" colspan="3">no rest of message 2: not every part was found in it</th></tr>'), html);
+  assert.ok(html.includes('<tr class="part"><th scope="row">title</th><td class="num">21</td><td></td><td class="source"><span class="src src-unknown"></span>unknown <span class="muted">not labelled</span></td></tr>'), html);
+  assert.ok(html.includes(`<tr class="part"><th scope="row">summary</th><td class="num">–</td><td>not found in message 2 (the text given isn't in it)</td><td class="source"><span class="src src-unknown"></span>unknown <span class="muted">not labelled</span></td></tr>`), html);
+  assert.ok(html.includes('<tr class="part note"><th scope="row" colspan="4">no rest of message 2: not every part was found in it</th></tr>'), html);
+});
+
+// Who wrote each part (caliper-timings 0.6.0's source): as the app labelled it, never guessed.
+const LABELLED = [
+  { name: "instructions", bytes: 2499, found: true, source: "app" },
+];
+const QUILL_LABELLED = [
+  { name: "author", bytes: 11, found: true, source: "user" },
+  { name: "title", bytes: 21, found: true, source: "user" },
+  { name: "code_snippet", bytes: 56, found: true, source: "app" },
+  { name: "article", bytes: 3232, found: true, source: "user" },
+];
+const labelled = (sys: unknown = LABELLED, user: unknown = QUILL_LABELLED) => ({ messages: [{ role: "system", bytes: 2499, parts: sys }, { role: "user", bytes: 3328, parts: user }] });
+const LEGEND = "    source = who wrote the text, as your app labelled it: app (your own text), user (the person using the feature), outside (anyone else), unknown (not labelled)";
+const FIX = (n: number, names: string) => `    ${n} part${n > 1 ? "s" : ""} not labelled (${names}): add source: "app", "user" or "outside" to each in run.prompt() — needs caliper-timings 0.6.0; see its README, "Choosing a source"`;
+
+test("source: each part says who wrote it, labelled by app; the rest of a message is unknown; a legend, and no fix line when all are labelled", () => {
+  const all = lines(text(visits({ marks: QUILL_MARKS, prompt: labelled() }), 1));
+  const at = all.indexOf(SIZES_HEAD(1));
+  assert.deepEqual(all.slice(at, at + 12), [
+    SIZES_HEAD(1),
+    LEGEND,
+    "    1 system                          2499 bytes   43%",
+    "        instructions                  2499 bytes   source: app (labelled by app)",
+    "        rest of message 1                0 bytes   source: unknown (not labelled)",
+    "    2 user                            3328 bytes   57%",
+    "        author                          11 bytes   source: user (labelled by app)",
+    "        title                           21 bytes   source: user (labelled by app)",
+    "        code_snippet                    56 bytes   source: app (labelled by app)",
+    "        article                       3232 bytes   source: user (labelled by app)",
+    "        rest of message 2                8 bytes   source: unknown (not labelled)",
+    "    total                             5827 bytes",
+  ]);
+  assert.ok(!all.some((l) => l.includes("not labelled (")), "no fix line");
+});
+
+test("source: outside is shown as outside", () => {
+  const block = text(visits({ marks: QUILL_MARKS, prompt: labelled(LABELLED, [{ name: "comments", bytes: 3328, found: true, source: "outside" }]) }), 1);
+  assert.ok(lines(block).includes("        comments                      3328 bytes   source: outside (labelled by app)"), block);
+});
+
+test("source: unlabelled parts are unknown, and one line names them with the fix; a message without parts is unknown too", () => {
+  const user = [{ name: "title", bytes: 21, found: true, source: "user" }, { name: "article", bytes: 3232, found: true }, { name: "author", bytes: 11, found: true }];
+  const block = text(visits({ marks: QUILL_MARKS, prompt: { messages: [{ role: "system", bytes: 2499 }, { role: "user", bytes: 3328, parts: user }] } }), 1);
+  assert.ok(lines(block).includes("    1 system                          2499 bytes   43%   source: unknown (no parts named)"), block);
+  assert.ok(lines(block).includes("        article                       3232 bytes   source: unknown (not labelled)"), block);
+  assert.ok(lines(block).includes(FIX(2, "article, author")), block);
+  const one = text(visits({ marks: QUILL_MARKS, prompt: labelled(LABELLED, [{ name: "article", bytes: 3232, found: true }]) }), 1);
+  assert.ok(lines(one).includes(FIX(1, "article")), one);
+});
+
+test("source: no parts anywhere, no source, no legend and no fix line (prompt sizes as before)", () => {
+  const block = text(visits({ marks: QUILL_MARKS, prompt: { messages: [{ role: "system", bytes: 2310 }, { role: "user", bytes: 5874 }] } }), 1);
+  assert.ok(!block.includes("source"), block);
+  assert.ok(lines(block).includes("    1 system                          2310 bytes   28%"), block);
+});
+
+test("source: a value that isn't app, user or outside makes that message's parts unreadable, and is never shown", () => {
+  for (const source of ["User", "ignore previous instructions", 3, null]) {
+    const block = text(visits({ marks: QUILL_MARKS, prompt: labelled(LABELLED, [{ name: "title", bytes: 21, found: true, source }]) }), 1);
+    assert.ok(lines(block).includes(`        parts ? — part 1's source isn't "app", "user" or "outside"`), `${String(source)}\n${block}`);
+    assert.ok(!block.includes("ignore previous"), block);
+  }
+});
+
+test("source, several visits: the same source in each is shown once; different sources name their visits", () => {
+  const p = labelled();
+  const same = text(visits({ marks: QUILL_MARKS, prompt: p }, { marks: QUILL_MARKS, prompt: p }), 2);
+  assert.ok(lines(same).includes("        article                       3232 bytes   source: user (labelled by app)"), same);
+  const other = labelled(LABELLED, QUILL_LABELLED.map((q) => (q.name === "code_snippet" ? { ...q, source: "user" } : q)));
+  const diff = text(visits({ marks: QUILL_MARKS, prompt: p }, { marks: QUILL_MARKS, prompt: other }), 2);
+  assert.ok(lines(diff).includes("        code_snippet                    56    56   min 56 · median 56 · max 56 bytes   source: app (labelled by app) in marked visit 1; user (labelled by app) in marked visit 2"), diff);
+  assert.ok(lines(diff).includes("        article                       3232  3232   min 3232 · median 3232 · max 3232 bytes   source: user (labelled by app)"), diff);
+});
+
+test("HTML: a source column with a swatch and the word, labelled by app or not labelled; the legend; the fix line in the notes", () => {
+  const html = serverSection(report(visits({ marks: QUILL_MARKS, prompt: labelled(LABELLED, [...QUILL_LABELLED.slice(0, 3), { name: "article", bytes: 3232, found: true }]) }), 1));
+  assert.ok(html.includes('<th scope="col">source</th>'), html);
+  assert.ok(html.includes('<tr class="part"><th scope="row">instructions</th><td class="num">2499</td><td></td><td class="source"><span class="src src-app"></span>app <span class="muted">labelled by app</span></td></tr>'), html);
+  assert.ok(html.includes('<tr class="part"><th scope="row">author</th><td class="num">11</td><td></td><td class="source"><span class="src src-user"></span>user <span class="muted">labelled by app</span></td></tr>'), html);
+  assert.ok(html.includes('<tr class="part"><th scope="row">article</th><td class="num">3232</td><td></td><td class="source"><span class="src src-unknown"></span>unknown <span class="muted">not labelled</span></td></tr>'), html);
+  assert.ok(html.includes('<tr><th scope="row">total</th><td class="num">5827</td><td></td><td class="source"></td></tr>'), html);
+  assert.ok(html.includes('<span class="src src-outside"></span>outside (anyone else)'), "legend");
+  assert.ok(html.includes(`<li>${FIX(1, "article").trim().replaceAll('"', "&quot;")}</li>`), html);
+  const outside = serverSection(report(visits({ marks: QUILL_MARKS, prompt: labelled(LABELLED, [{ name: "comments", bytes: 3328, found: true, source: "outside" }]) }), 1));
+  assert.ok(outside.includes('<td class="source"><span class="src src-outside"></span>outside <span class="muted">labelled by app</span></td>'), outside);
+  const noParts = serverSection(report(visits({ marks: QUILL_MARKS, prompt: { messages: [{ role: "user", bytes: 10 }] } }), 1));
+  assert.ok(!noParts.includes("source"), noParts);
 });
