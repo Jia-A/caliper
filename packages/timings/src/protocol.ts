@@ -26,8 +26,15 @@ export type PromptMessageSize = { role: string; bytes: number | null; parts?: Pr
 
 // name: a lowercase name, or "?". bytes: the part text's UTF-8 length, or null when it wasn't a
 // string. found: whether that text is inside its message's content; null when either wasn't a
-// string, so it couldn't be checked.
-export type PromptPartSize = { name: string; bytes: number | null; found: boolean | null };
+// string, so it couldn't be checked. source: who wrote the text, as the app labelled it; absent
+// when it didn't (never a default).
+export type PromptPartSize = { name: string; bytes: number | null; found: boolean | null; source?: PromptSource };
+
+// app: the developer's own text. user: the person using the feature. outside: anyone else
+// (a database, the web, retrieved documents, other users' content).
+export type PromptSource = "app" | "user" | "outside";
+const SOURCES: readonly unknown[] = ["app", "user", "outside"];
+export const isValidSource = (source: unknown): source is PromptSource => SOURCES.includes(source);
 
 export interface TimingStore {
   put(id: string, record: TimingRecord): Promise<void>;

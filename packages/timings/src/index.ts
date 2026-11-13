@@ -7,10 +7,12 @@ export {
   isValidRunId,
   isValidMarkName,
   isValidRole,
+  isValidSource,
   type TimingRecord,
   type TimingStore,
   type PromptMessageSize,
   type PromptPartSize,
+  type PromptSource,
 } from "./protocol.ts";
 export { CaliperRun, type RunOptions } from "./run.ts";
 export { MemoryStore } from "./memoryStore.ts";

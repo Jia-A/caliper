@@ -1,4 +1,4 @@
-import { isValidMarkName, isValidRole, type PromptMessageSize, type PromptPartSize, type TimingRecord, type TimingStore } from "./protocol.ts";
+import { isValidMarkName, isValidRole, isValidSource, type PromptMessageSize, type PromptPartSize, type TimingRecord, type TimingStore } from "./protocol.ts";
 
 // Cloudflare documents navigator.userAgent === "Cloudflare-Workers" as the way
 // to tell code is running on Workers (global_navigator flag, on by default
@@ -127,14 +127,14 @@ export class CaliperRun {
     const dropped = new Map<number, number>(); // message index → parts over the limit
     for (let i = 0; i < parts.length; i++) {
       const n = i + 1;
-      let message: unknown, name: unknown, text: unknown;
+      let message: unknown, name: unknown, text: unknown, source: unknown;
       try {
         const part = parts[i];
         if (typeof part !== "object" || part === null) {
           this.#problem(`prompt part ${n}: isn't { message, name, text }; not recorded`);
           continue;
         }
-        ({ message, name, text } = part as { message?: unknown; name?: unknown; text?: unknown });
+        ({ message, name, text, source } = part as { message?: unknown; name?: unknown; text?: unknown; source?: unknown });
       } catch {
         this.#problem(`prompt part ${n}: reading it failed; not recorded`);
         continue;
@@ -155,7 +155,8 @@ export class CaliperRun {
       if (typeof text !== "string") this.#problem(`prompt part ${n}: text isn't a string; size not measured and not checked`);
       else if (typeof content !== "string") this.#problem(`prompt part ${n}: message ${at + 1}'s content isn't a string, so the part couldn't be checked`);
       else found = content.includes(text);
-      const size: PromptPartSize = { name: isValidRole(name) ? name : "?", bytes: typeof text === "string" ? utf8.encode(text).length : null, found };
+      if (source !== undefined && !isValidSource(source)) this.#problem(`prompt part ${n}: source isn't "app", "user" or "outside"; recorded without a source`);
+      const size: PromptPartSize = { name: isValidRole(name) ? name : "?", bytes: typeof text === "string" ? utf8.encode(text).length : null, found, ...(isValidSource(source) && { source }) };
       (entry.parts ??= []).push(size);
     }
     for (const [at, count] of dropped) {

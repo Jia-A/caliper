@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`source` on a named part:** `{ message, name, text, source }` with `source` `"app"`, `"user"` or `"outside"` records who wrote the part, as the app labels it, under the part as `source`. Absent when the app gives none, never a default. Any other value isn't recorded, with a problem naming the part by number. Optional field in SPEC v1; readers that don't know it ignore it.
+- **Known limit:** the wrapper records the app's label; it doesn't check it.
+
 ## 0.5.0 — 2026-11-13
 
 ### Added

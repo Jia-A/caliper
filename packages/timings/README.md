@@ -72,6 +72,16 @@ createServer(async (req, res) => {
   ```js
   run?.prompt(messages, { parts: [{ message: 1, name: "title", text: titleLine }, { message: 1, name: "article", text: articleText }] });
   ```
+- **`source` on a part** says who wrote its text: `"app"` (your own text), `"user"` (the person using the feature) or `"outside"` (anyone else). It's recorded as you give it; Caliper never fills it in, so a part without one shows as unknown. Any other value isn't recorded, with a problem naming the part by number. Needs caliper-timings 0.6.0: older versions ignore it without a problem.
+  ```js
+  { message: 0, name: "instructions", text: SYSTEM, source: "app" },
+  { message: 1, name: "question", text: question, source: "user" },
+  { message: 1, name: "search_results", text: results, source: "outside" },
+  ```
+
+#### Choosing a source
+
+**Could anyone other than the person pressing the button have written this text? Then it's `"outside"`, even if it's in your own database.** It depends on the feature, not the field: a post's text is `"user"` when only its author can run the AI on it, and `"outside"` when readers can too. A part that mixes sources takes the least trusted one (`outside`, then `user`, then `app`); a label you put in front (`"Title: "`) doesn't make it `"app"`. Not sure? Leave it out: unknown is shown as unknown.
 - **When the record is saved:** at the first `res.write` with bytes, with `firstChunk` marked then. Otherwise when the response closes, whether it finished or the client left. `status` is `res.statusCode`, or `null` if no headers were sent. Every write goes through unchanged.
 
 ### It never changes your app
@@ -241,6 +251,7 @@ That is one app, one machine and 20 pairs each. Other runtimes, frameworks, stor
 - **Never changing the app:** with a store whose `put` throws, or one whose `put` rejects, the marked response is byte-identical to the unmarked one and nothing escapes as an unhandled error. With a broken `get`, the endpoint answers 500 and app requests are untouched. A URL that doesn't parse is left to the app. A `save()` with a throwing store or `defer` neither throws nor rejects. Each of these was checked by removing the guard, and the test then fails.
 - **Marks and mark names:** marks in ms from `start()`. Bad names are skipped and reported in `problems`, each once, at most 20, then one line saying more were dropped. There's no `problems` field when nothing went wrong.
 - **Named parts:** name, bytes and `found` per part, in order, under their message; labelled parts plus separators adding up exactly to the message; a part not in its message (`found: false`, size still measured); a name that isn't a lowercase name recorded as `"?"`; text that isn't a string (no size, not checked); a message whose content isn't a string (size measured, not checked); a message index that isn't one of the messages, a part that isn't an object, and parts that aren't a list (not recorded, message sizes kept); 50 parts per message at most; the same text twice found both times. A marker in a part's text and in its name is nowhere in the record or the error log; the parts and options see no write of any kind; options, parts and fields that throw when read never throw out of `prompt()`. Each checked by breaking the code (storing the text, keeping a name that's text, a problem repeating the name, `found` always true, no try/catch around a part, writing to a part).
+- **Part source:** `"app"`, `"user"` and `"outside"` recorded as given; no `source` field and no problem when a part has none, on a system message too; any other value (a capital, another word, empty, a number, `null`, an object, a marker string) recorded without a source, with a problem naming the part by number, and the marker nowhere in the record or the error log; a `source` that throws when read skips that part and never throws out of `prompt()`. Checked by breaking the code (storing the source unchecked, dropping the problem).
 - **Prompt sizes never carry text, never change the app:** a marker string put in a system prompt, a role, a list of parts and an extra key is nowhere in the record, its problems, the error log or the endpoint's answer. The messages see no write of any kind (a Proxy records every write; none), and a deeply frozen list reads fine. Lists that throw when read (a revoked Proxy, a throwing `length`, item, `role` or `content`, a `toString` that throws, a list containing itself, 100,000 messages) never throw out of `prompt()`, and the record still saves. Over HTTP, a marked request that calls `prompt()` with the marker list, a revoked Proxy or a throwing role gets the same status, headers and bytes as an unmarked one, with nothing escaping. An unmarked request reads the messages 0 times. Each was checked by breaking the code (storing the text, removing the try/catch, writing a tag on each message): the matching test then fails.
 - **Prompt sizes (`run.prompt`):** role and UTF-8 bytes per message, in order, matching `TextEncoder` (lone surrogates included); a later call replaces an earlier one; no `prompt` field without a call. Roles that aren't lowercase names are recorded as `"?"`, content that isn't a string as `bytes: null`, and something that isn't a list as no `prompt`, each with a problem naming the message by number. At most 1000 messages.
 - **`runtime`:** `"workers"` only for `navigator.userAgent === "Cloudflare-Workers"`, and absent on Node.
@@ -251,6 +262,7 @@ That is one app, one machine and 20 pairs each. Other runtimes, frameworks, stor
 ## Known limits
 
 - **Prompt sizes: a role can still carry a little text.** `run.prompt()` keeps a role that is up to 32 lowercase letters or `_` as it is, so an app that puts text there (`ignoreallpreviousinstructions`) has it recorded and shown. Anything with a space, a capital, a digit or punctuation is recorded as `"?"`. Message content is never recorded.
+- **A part's `source` is the app's word, not checked.** The wrapper records what the app labelled; it can't tell whether the label is right.
 - **Saved once, at the first chunk.** Marks made after the first chunk of a streamed reply aren't in the record.
 - **`res.end(body)` doesn't mark `firstChunk`.** A reply sent only that way gets no `firstChunk` mark; only `res.write` is watched.
 - **One process only.** `MemoryStore` is for single-process servers. For several processes or serverless instances, use the Upstash store.
