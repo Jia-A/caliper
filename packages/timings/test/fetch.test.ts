@@ -220,3 +220,47 @@ test("the clock starts when start() is called", async (t) => {
   await run.save();
   assert.equal((await store.get("run_clock"))!.marks.dbStart, 12);
 });
+
+// The README's AI SDK route (caliper-test-3 #4): a handler that already has a Response, as
+// toUIMessageStreamResponse() returns, wrapped exactly as the README shows. The marked reply
+// must keep the status, statusText, every header (the AI SDK's own included) and the bytes of
+// the unmarked one, and be saved at its first chunk, with modelFirstChunk once onChunk marks it.
+const UI_HEADERS = {
+  "content-type": "text/event-stream",
+  "cache-control": "no-cache",
+  connection: "keep-alive",
+  "x-vercel-ai-ui-message-stream": "v1",
+  "x-accel-buffering": "no",
+};
+const UI_CHUNKS = ['data: {"type":"start"}\n\n', 'data: {"type":"text-delta","delta":"Hi"}\n\n', "data: [DONE]\n\n"];
+const uiResponse = () =>
+  new Response(new ReadableStream({ start: (c) => (UI_CHUNKS.forEach((x) => c.enqueue(enc.encode(x))), c.close()) }), {
+    status: 200,
+    statusText: "OK",
+    headers: UI_HEADERS,
+  });
+
+// The README's lines, as written there.
+function readmeRoute(run: CaliperRun | null, response: Response): Response {
+  if (!run || !response.body) return response;
+  return finish(run, new Response(run.watchFirstChunk(response.body), { status: response.status, statusText: response.statusText, headers: response.headers }));
+}
+
+test("README AI SDK route: a marked reply has the same status, statusText, headers and bytes as an unmarked one, and is saved at its first chunk", async () => {
+  const store = new CountingStore();
+  const plain = readmeRoute(await start(generate(), { token: TOKEN, store }), uiResponse());
+  const run = (await start(generate(STAMP("run_ui")), { token: TOKEN, store }))!;
+  const marked = readmeRoute(run, uiResponse());
+  for (const r of [plain, marked]) {
+    assert.equal(r.status, 200);
+    assert.equal(r.statusText, "OK");
+    assert.deepEqual(Object.fromEntries(r.headers), UI_HEADERS);
+  }
+  const [a, b] = [await plain.text(), await marked.text()];
+  assert.equal(b, a);
+  assert.equal(b, UI_CHUNKS.join(""));
+  await sleep(5);
+  const record = (await store.get("run_ui"))!;
+  assert.equal(record.status, 200);
+  assert.ok(record.marks.firstChunk !== undefined, "saved at the first chunk");
+});

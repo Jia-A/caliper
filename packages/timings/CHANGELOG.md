@@ -10,6 +10,8 @@
 
 ### Fixed
 
+- **README: the Next.js sample works as written.** It used an undefined `stream` and dropped the response's headers, and each route made its own store while the text said to share one (with `MemoryStore`, two maps: the timings route could 404 on a saved record). It now shows `lib/caliper.js` with the one store, both routes importing it, and an AI SDK route that wraps `toUIMessageStreamResponse()`'s body with its status, status text and headers. That wrapping is tested (`test/fetch.test.ts`: same status, headers and bytes marked or not; the old shape fails it).
+- **README: "Set a token, in two places":** what value (`openssl rand -hex 24`), and that the server and the shell running `caliper audit` need the same one, with what each mistake looks like.
 - **README: the Chromium install command** is now `npx playwright@1.64.1 install chromium`, the build caliper-ai uses (it was unpinned, which the caliper-ai README warns against).
 
 ## 0.6.0 — 2026-11-13

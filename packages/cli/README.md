@@ -17,6 +17,8 @@ npx playwright@1.64.1 install chromium
 
 Caliper drives a real Chromium through [Playwright](https://playwright.dev), pinned to 1.64.1. The browser is a separate download and there is no postinstall script, so run the second command once. Keep the `@1.64.1`: outside a project, a bare `npx playwright` fetches the latest Playwright, which downloads a different Chromium build that Caliper can't use. If you skip it, Caliper tells you the exact command to run, and the audit's last line is `no report written: the audit stopped on the error below`. Requires Node.js 20 or newer.
 
+Without a global install: `npx caliper-ai audit …` (the package's command is `caliper`; `npx caliper-ai` runs it). The Chromium step is the same.
+
 ### 2. In your server's project: `caliper-timings` (optional)
 
 Only for [server timings](#marked-visit---server-timings): what happened inside one marked request on your server (database wait, model call). Install it in the project of the app Caliper measures, not on the machine that runs Caliper:
@@ -29,7 +31,7 @@ Then wire it into your server: see the [caliper-timings README](https://github.c
 
 ## Quick start
 
-The example is an AI "generate a social post" button on a blog page. The page needs a logged-in user, so save a session first:
+The example is an AI "generate a social post" button on a blog page. The page needs a logged-in user, so save a session first. **No login on your app? Skip `caliper login` and leave out `--auth`.**
 
 ```sh
 caliper login https://your-app.example.com

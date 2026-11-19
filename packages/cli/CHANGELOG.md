@@ -20,6 +20,7 @@ Fixes from a test by someone new to Caliper, on two apps they didn't write (an A
 
 ### Added
 
+- **README:** `npx caliper-ai audit …` works without a global install, and the Quick start says to skip `caliper login` and `--auth` for an app with no login.
 - **`first word shows`:** each run prints the text it timed as the first word, and the report's "Before the reply" table (now shown for every audit) has a "First word shows" column, so you can check it's the reply. Tested with `npm run test:firstword`.
 
 ## 0.6.0 — 2026-11-14

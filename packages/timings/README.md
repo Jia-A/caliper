@@ -36,6 +36,21 @@ npm install caliper-timings
 
 Without it (or without `CALIPER_TOKEN` set on the server), Caliper still times everything it sees from the browser. Requires Node.js 20 or newer.
 
+### 3. Set a token, in two places
+
+Any non-empty string; it travels in an HTTP header, so letters and digits are safest. To make one:
+
+```sh
+openssl rand -hex 24
+```
+
+Put the **same** value in both places:
+
+- **The server's environment**, as `CALIPER_TOKEN` (Next.js: `.env.local`, then restart `next dev`). Without it the wrapper is off, and Caliper's pre-check says `feature off (404 …)`.
+- **The shell that runs `caliper audit`**: `export CALIPER_TOKEN=<the same value>`. Without it, `--server-timings` stops before any run and says so.
+
+A different value in the two places gets `token rejected (401 …)` from the pre-check.
+
 ## Node (`node:http`)
 
 ```js
@@ -206,28 +221,58 @@ Caliper then shows "model call → model's first chunk". Without it, Caliper see
 
 ## Next.js App Router (and Vercel)
 
-Route handlers take a Web `Request` and return a `Response`, so they use the fetch adapter as it is, with the Upstash store on Vercel:
+Route handlers take a Web `Request` and return a `Response`, so they use the fetch adapter as it is, with the Upstash store on Vercel. Both routes must use **one** store, so it lives in its own file:
 
 ```js
-// app/api/generate/route.js
-import { after } from "next/server";
-import { finish, MemoryStore, start, UpstashStore } from "caliper-timings/upstash";
+// lib/caliper.js
+import { MemoryStore, UpstashStore } from "caliper-timings/upstash";
 
-const store = UpstashStore.fromEnv(process.env) ?? new MemoryStore();
+export const store = UpstashStore.fromEnv(process.env) ?? new MemoryStore();
+```
+
+```js
+// app/api/generate/route.js: your own stream
+import { after } from "next/server";
+import { finish, start } from "caliper-timings/upstash";
+import { store } from "../../../lib/caliper.js";
 
 export async function POST(request) {
   const run = await start(request, { token: process.env.CALIPER_TOKEN, store, defer: (p) => after(() => p) });
   // … run?.mark(…), run?.prompt(messages, { parts }), then the model's stream:
-  const response = new Response(run ? run.watchFirstChunk(stream) : stream);
-  return run ? finish(run, response) : response;
+  const stream = await model.stream(/* … */); // a ReadableStream
+  const headers = { "content-type": "text/event-stream", "cache-control": "no-cache" };
+  if (!run) return new Response(stream, { headers });
+  return finish(run, new Response(run.watchFirstChunk(stream), { headers }));
+}
+```
+
+With the AI SDK, the route already has a `Response` (`toUIMessageStreamResponse()`). Wrap its body and pass its status, status text and headers on, so a marked reply is the same as an unmarked one:
+
+```js
+// app/api/chat/route.js: AI SDK
+import { after } from "next/server";
+import { convertToModelMessages, streamText } from "ai";
+import { finish, start } from "caliper-timings/upstash";
+import { store } from "../../../lib/caliper.js";
+
+export async function POST(request) {
+  const run = await start(request, { token: process.env.CALIPER_TOKEN, store, defer: (p) => after(() => p) });
+  const { messages } = await request.json();
+  const modelMessages = await convertToModelMessages(messages);
+  run?.prompt([{ role: "system", content: SYSTEM }, ...modelMessages]);
+  run?.mark("modelCallSent");
+  const result = streamText({ model, system: SYSTEM, messages: modelMessages, onChunk: () => run?.mark("modelFirstChunk") });
+
+  const response = result.toUIMessageStreamResponse();
+  if (!run || !response.body) return response;
+  return finish(run, new Response(run.watchFirstChunk(response.body), { status: response.status, statusText: response.statusText, headers: response.headers }));
 }
 ```
 
 ```js
 // app/%5F_caliper/timings/[id]/route.js
-import { handle, MemoryStore, UpstashStore } from "caliper-timings/upstash";
-
-const store = UpstashStore.fromEnv(process.env) ?? new MemoryStore();
+import { handle } from "caliper-timings/upstash";
+import { store } from "../../../../lib/caliper.js";
 
 export async function GET(request) {
   return (await handle(request, { token: process.env.CALIPER_TOKEN, store })) ?? new Response("Not found", { status: 404 });
@@ -236,7 +281,8 @@ export async function GET(request) {
 
 - **The folder is `%5F_caliper`.** A folder starting with `_` is private in the App Router and never routed; `%5F` is an encoded `_`, so it's the URL segment `__caliper`.
 - **`defer: (p) => after(() => p)`**, with `after` from `next/server` (Next.js 15.1+), keeps the function alive for the save after the response. Below 15.1, or outside Next.js on Vercel, use `waitUntil` from `@vercel/functions`.
-- Share one store between the two routes (the example has it in `lib/caliper.js`).
+- **One store for both routes**, from `lib/caliper.js`. With `MemoryStore`, a store created in each route file can be two separate maps, and the timings route then answers 404 for a record that was saved.
+- **The AI SDK route's wrapping** (status, status text, every header and the bytes unchanged, saved at the first chunk) is tested with a stand-in for `toUIMessageStreamResponse()`'s response, not the AI SDK itself (`npm test`, test/fetch.test.ts). The same lines ran on a real Next.js 16 + AI SDK 6 app in our stranger test.
 - **Checked by hand once, not by an automated test:** Next.js 16.2.6 on 127.0.0.1, with memory and with a local stand-in for Upstash's REST API; see [examples/next-app-router](https://github.com/Jia-A/caliper/tree/main/examples/next-app-router). Not yet on Vercel or with real Upstash. The Pages Router isn't covered.
 
 ## Core (`caliper-timings`)
