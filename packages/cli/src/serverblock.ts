@@ -15,11 +15,20 @@ function median(values: number[]): number | null {
 const RESERVED_MARKS: Record<string, string> = {
   modelCallSent: "model call sent",
   firstChunk: "server: first bytes sent",
+  modelFirstChunk: "model's first chunk", // caliper-timings 0.6.1: the app marks it from its SDK's per-chunk callback
 };
 // SPEC v1: <name>Start and <name>End are one span, <name>, chosen by the app. Only pairs: there's
 // no span between two unrelated marks (on Workers that's computation, which the clock doesn't see).
 const SPAN_MARK = /^([A-Za-z][A-Za-z0-9_]*)(Start|End)$/;
 const MODEL_SPAN = { label: "model call → first bytes sent", from: "modelCallSent", to: "firstChunk" };
+// With modelFirstChunk recorded, the model span ends there: firstChunk may be an envelope.
+const MODEL_FIRST_SPAN = { label: "model call → model's first chunk", from: "modelCallSent", to: "modelFirstChunk" };
+// The AI SDK's UI message stream (toUIMessageStreamResponse) sends this header (ai 6.0.208,
+// UI_MESSAGE_STREAM_HEADERS) and writes {"type":"start"} as soon as the stream opens, before
+// the model answers, so firstChunk there is that envelope.
+export const UI_STREAM_HEADER = "x-vercel-ai-ui-message-stream";
+const uiStreamLine = (where: string) =>
+  `model call → first bytes sent ? — the AI response${where} is an AI SDK UI message stream (header ${UI_STREAM_HEADER}), which writes {"type":"start"} before the model answers, so first bytes sent isn't the model's first chunk. To measure it, mark it from streamText: onChunk: () => run?.mark("modelFirstChunk") (caliper-timings README, "AI SDK").`;
 const LABEL_WIDTH = 32; // fits "model call → first bytes sent"
 
 const WORKERS_NOTE = "Workers time waits only — a span with only computation inside (no I/O) can read 0 ms.";
@@ -192,7 +201,9 @@ export interface ServerReport {
 // span), then min · median · max over the visits that did (only with two or more). Medians of
 // marks are never subtracted from each other. The Workers note when a record says runtime
 // "workers"; Caliper doesn't guess the server's runtime.
-export function serverBlock(visits: { visit: number; record: ServerRecord }[], n: number): ServerBlock {
+// uiStream: the marked visit's AI response carried the AI SDK's UI message stream header (seen by
+// the browser, not reported by the server).
+export function serverBlock(visits: { visit: number; record: ServerRecord; uiStream?: boolean }[], n: number): ServerBlock {
   const k = visits.length;
   const statuses = visits.map((v) => v.record.status);
   const status =
@@ -217,9 +228,16 @@ export function serverBlock(visits: { visit: number; record: ServerRecord }[], n
   const marks = [...new Set(visits.flatMap((v) => [...v.record.at.keys()]))].sort((a, b) => middle(a) - middle(b));
   const names = [...new Set(marks.map((mark) => SPAN_MARK.exec(mark)?.[1]).filter((x): x is string => x !== undefined))];
   const pairs = names.map((name) => ({ name, per: visits.map(({ record: { at } }) => spanIn(at, name)) }));
+  // The model span: to modelFirstChunk when any visit recorded it. Otherwise to firstChunk,
+  // except in visits whose response was an AI SDK UI message stream: there firstChunk is the
+  // envelope, so that visit has no model span and the block says why.
+  const anyModelFirst = visits.some((v) => v.record.at.has("modelFirstChunk"));
+  const model = anyModelFirst ? MODEL_FIRST_SPAN : MODEL_SPAN;
+  const envelope = anyModelFirst ? [] : visits.filter((v) => v.uiStream);
+  const uiLines = envelope.length === 0 ? [] : [uiStreamLine(envelope.length === k ? "" : ` in ${envelope.length === 1 ? "marked visit" : "marked visits"} ${envelope.map((v) => v.visit).join(", ")}`)];
   const spans = [
     ...pairs.map(({ name, per }) => ({ kind: "span" as const, name, label: name, from: `${name}Start`, note: `${name}Start → ${name}End`, values: per.map((s) => ("value" in s ? s.value : null)) })),
-    { ...MODEL_SPAN, kind: "model" as const, name: "model", note: undefined, values: visits.map(({ record: { at } }) => (at.has(MODEL_SPAN.from) && at.has(MODEL_SPAN.to) ? at.get(MODEL_SPAN.to)! - at.get(MODEL_SPAN.from)! : null)) },
+    { ...model, kind: "model" as const, name: "model", note: undefined, values: visits.map(({ record: { at }, uiStream }) => (at.has(model.from) && at.has(model.to) && !(model === MODEL_SPAN && uiStream) ? at.get(model.to)! - at.get(model.from)! : null)) },
   ].filter((s) => s.values.some((v) => v !== null)).sort((a, b) => middle(a.from) - middle(b.from));
   // Each distinct problem once, in the order first reported, with the visits that reported it.
   const problems = [...new Set(visits.flatMap((v) => v.record.problems))].map((p) => {
@@ -233,7 +251,7 @@ export function serverBlock(visits: { visit: number; record: ServerRecord }[], n
     visits: visits.map((v) => v.visit),
     marks: marks.map((name) => row("mark", name, RESERVED_MARKS[name] ?? name, markValues(name))),
     spans: spans.map((s) => row(s.kind, s.name, s.label, s.values, s.note)),
-    noSpan: pairs.flatMap(({ name, per }) => noSpanLine(name, per, visits)),
+    noSpan: [...pairs.flatMap(({ name, per }) => noSpanLine(name, per, visits)), ...uiLines],
     workers: visits.some((v) => v.record.runtime === "workers") ? WORKERS_NOTE : null,
     firstBytes: visits.some((v) => v.record.at.has("firstChunk")) ? FIRST_BYTES_NOTE : null,
     problems,

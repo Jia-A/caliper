@@ -685,3 +685,12 @@ test("HTML: Advice sits right under the Verdict, which says how many things to l
   assert.ok(!none.includes("to look at ↓"), "no count line when nothing fires");
   assert.ok(none.includes("Nothing to suggest from this run&#39;s numbers.") || none.includes("Nothing to suggest from this run's numbers."), none);
 });
+
+test("modelFirstChunk: the model hint is model call → model's first chunk, its share out of the time to the model's first chunk", () => {
+  const list = serverHints(block({ marks: { dbStart: 0, dbEnd: 400, modelCallSent: 400, firstChunk: 402, modelFirstChunk: 1400 } }));
+  const model = list.hints.find((h) => h.label === "model call → model's first chunk");
+  assert.ok(model, `got ${list.hints.map((h) => h.label).join(", ")}`);
+  assert.equal(model!.median, 1000);
+  assert.equal(model!.share, 71); // 1000 of 1400 ms, rounded
+  assert.equal(model!.shareOf, "the time to the model's first chunk");
+});

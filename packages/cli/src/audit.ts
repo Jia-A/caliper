@@ -10,7 +10,7 @@ import { ButtonNotFoundError, CliError, FailedRequestError, messageOf, PageLoadE
 import { buttonHints, buttonNames, expiredLoginCookies, loadFailureHints } from "./loadhints.js";
 import { adviceItems, formatAdvice } from "./advice.js";
 import { browserBar, browserHints, coldGaps, formatHints, serverBar, serverHints, STREAMS_MIN_MS, streamingVerdict, verdictLines, type HintList } from "./hints.js";
-import { formatServerBlock, parseServerRecord, plural, serverBlock, type ServerRecord, type ServerReport } from "./serverblock.js";
+import { formatServerBlock, parseServerRecord, plural, serverBlock, UI_STREAM_HEADER, type ServerRecord, type ServerReport } from "./serverblock.js";
 import { adviceCount, renderReport, type ReportReply } from "./report.js";
 import type {
   Breakdown,
@@ -935,7 +935,7 @@ async function markedVisits(
   if (pre.status !== 400) return unknown(`pre-check: got HTTP ${pre.status} ${on} from ${precheckUrl}; no marked visit.`);
   say(`Server timings — pre-check: feature on, token accepted (expected 400 on the test id ${PRECHECK_ID})`);
 
-  const succeeded: { visit: number; record: ServerRecord }[] = [];
+  const succeeded: { visit: number; record: ServerRecord; uiStream: boolean }[] = [];
   for (let visit = 1; visit <= runs; visit++) {
     const label = `marked visit ${visit} of ${runs}`;
     const got = await markedVisit(context, options, { origin, token }, key, keyNote);
@@ -943,7 +943,7 @@ async function markedVisits(
     if (typeof got.result === "string") {
       unknown(`${label}: ${got.result}`);
       for (const line of got.hints) say(`    ${line}`);
-    } else succeeded.push({ visit, record: got.result });
+    } else succeeded.push({ visit, record: got.result, uiStream: got.uiStream });
   }
   if (!succeeded.length) return unknown(`0 of ${plural(runs, "marked visit")} succeeded`);
   const block = serverBlock(succeeded, runs);
@@ -960,8 +960,8 @@ async function markedVisit(
   { origin, token }: { origin: string; token: string },
   key: MatchKey,
   keyNote: string // which runs the key came from, for every line about this visit
-): Promise<{ sent: string | null; result: ServerRecord | string; hints: string[] }> {
-  const fail = (reason: string, hints: string[] = []) => ({ sent: null, result: reason, hints });
+): Promise<{ sent: string | null; result: ServerRecord | string; hints: string[]; uiStream: boolean }> {
+  const fail = (reason: string, hints: string[] = []) => ({ sent: null, result: reason, hints, uiStream: false });
   const runId = randomUUID();
   const matched: Request[] = [];
   let armed = false;
@@ -1013,22 +1013,24 @@ async function markedVisit(
     return fail(`its AI request was ${picked.method} ${picked.url}, not the stamped ${stamped.method()} ${stamped.url()}${keyNote}`);
   }
   const sent = `x-caliper-run ${runId} on ${stamped.method()} ${stamped.url()} (matched ${keyText(key)})${keyNote}`;
+  // Read from the response the browser got, not from the server's record.
+  const uiStream = picked.response?.headers()[UI_STREAM_HEADER] !== undefined;
 
   const recordUrl = `${origin}/__caliper/timings/${runId}`;
   let res: globalThis.Response;
   try {
     res = await askWrapper(origin, token, runId, options.timeout);
   } catch (err) {
-    return { sent, result: `fetching ${recordUrl} failed: ${fetchError(err)}.`, hints: [] };
+    return { sent, result: `fetching ${recordUrl} failed: ${fetchError(err)}.`, hints: [], uiStream };
   }
   if (res.status !== 200) {
     await res.body?.cancel();
-    return { sent, result: res.status === 404 ? `token OK and wrapper present, but no record for run ${runId}.` : `fetching ${recordUrl} got HTTP ${res.status}.`, hints: [] };
+    return { sent, result: res.status === 404 ? `token OK and wrapper present, but no record for run ${runId}.` : `fetching ${recordUrl} got HTTP ${res.status}.`, hints: [], uiStream };
   }
   try {
-    return { sent, result: parseServerRecord(await res.json(), runId), hints: [] };
+    return { sent, result: parseServerRecord(await res.json(), runId), hints: [], uiStream };
   } catch {
-    return { sent, result: `the record for run ${runId} isn't JSON.`, hints: [] };
+    return { sent, result: `the record for run ${runId} isn't JSON.`, hints: [], uiStream };
   }
 }
 

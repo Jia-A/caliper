@@ -572,6 +572,22 @@ try {
     "    2 user                            5874 bytes   72%",
     "    total                             8184 bytes",
   ]), `(z) prints the prompt sizes: system 2310, user 5874, total 8184`, z.out);
+  // (u) An AI SDK UI message stream (its header, a {"type":"start"} envelope at once) without
+  // modelFirstChunk: firstChunk is the envelope, so no model span, a "?" line with the reason,
+  // read from the response's header (caliper-test-3 #8), and no model hint.
+  const u = await runCase("u, AI SDK UI stream, no modelFirstChunk", "u");
+  const uLines = u.out.stdout.split("\n");
+  check(uLines.some((l) => l.startsWith('    model call → first bytes sent ? — the AI response is an AI SDK UI message stream (header x-vercel-ai-ui-message-stream)')),
+    "(u) the model span is ? with the reason, naming the header", u.out);
+  check(!uLines.some((l) => /^    model call → first bytes sent\s+\d+ ms/.test(l)), "(u) no model span number (it would be the envelope's ~0 ms)", u.out);
+  check(uLines.some((l) => /^    server: first bytes sent\s+\d+ ms/.test(l)), "(u) the first-bytes mark is still shown, as recorded", u.out);
+  // (k) The same with modelFirstChunk: the model span ends at the model's first chunk.
+  const k = await runCase("k, AI SDK UI stream with modelFirstChunk", "k");
+  const kLines = k.out.stdout.split("\n");
+  const kSpan = kLines.map((l) => l.match(/^    model call → model's first chunk\s+(\d+) ms/)).find(Boolean);
+  check(!!kSpan && Number(kSpan[1]) >= 250, `(k) model call → model's first chunk is the token's ~300 ms, not the envelope (got ${kSpan?.[1] ?? "no such row"})`, k.out);
+  check(kLines.some((l) => /^    model's first chunk\s+\d+ ms/.test(l)) && !kLines.some((l) => l.includes("UI message stream")), "(k) the mark is shown, and no ? line", k.out);
+
   // A record without a prompt field: one line saying what's needed.
   check(s.out.stdout.split("\n").includes("  prompt sizes: none recorded (needs caliper-timings 0.2.0 or later, and run.prompt(messages) before the model call)"),
     "(s) a record without prompt sizes says none were recorded, and what's needed", s.out);

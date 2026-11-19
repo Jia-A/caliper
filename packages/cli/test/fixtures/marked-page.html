@@ -30,6 +30,9 @@
                                   and three marks that pair with nothing valid (?generic=1)
        q  one record partial:    /marked/reply, recorded without firstChunk on load --runs + 2 only
        z  prompt sizes:           /marked/reply, recorded with a prompt field (?prompt=1)
+       u  AI SDK UI stream:       /marked/reply as the AI SDK's UI message stream: its header and an
+                                  envelope at once (firstChunk), no modelFirstChunk (?uistream=1)
+       k  … with the mark:        the same, recording modelFirstChunk at the first token
        v  one visit fails:        /marked/reply, but /marked/other/reply on load --runs + 2 (the
                                   second marked visit), so that visit matches nothing
        x  stamped → 403:          /marked/reply, but a stamped one gets a 403 JSON error, so the
@@ -65,7 +68,7 @@
       buffer = events.pop();
       for (const event of events) {
         const data = event.replace(/^data: /, "");
-        if (data !== "[DONE]") out.textContent += JSON.parse(data).t;
+        if (data !== "[DONE]") out.textContent += JSON.parse(data).t ?? ""; // an envelope ({"type":"start"}) shows nothing
       }
     }
   }
@@ -81,6 +84,8 @@
     if (kase === "o") extra = "&runtime=node"; // the record names another runtime
     if (kase === "s") extra = "&generic=1"; // the record uses app-chosen Start/End names
     if (kase === "z") extra = "&prompt=1"; // the record has prompt sizes
+    if (kase === "u") extra = "&uistream=1"; // an AI SDK UI message stream, no modelFirstChunk
+    if (kase === "k") extra = "&uistream=1&modelfirst=1"; // the same, with modelFirstChunk
     if (kase === "dh") extra = "&db=150"; // a 150 ms app span: over its 100 ms limit
     if (kase === "x") extra = "&stamped=403"; // a stamped reply gets a 403
     if (kase === "y") extra = "&stamped=drop"; // a stamped reply's connection is closed

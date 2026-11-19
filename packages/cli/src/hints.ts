@@ -240,7 +240,10 @@ const rowMedian = (row: ServerRow) => row.stats?.median ?? row.values.find((v) =
 /** Server hints from the block's spans: app-named spans and model call → first bytes sent. */
 export function serverHints(block: ServerBlock): HintList {
   const k = block.visits.length;
-  const firstBytes = block.marks.find((r) => r.kind === "mark" && r.name === "firstChunk");
+  // Shares are out of the time to the model's first chunk when recorded, else to first bytes sent.
+  const modelFirst = block.marks.find((r) => r.kind === "mark" && r.name === "modelFirstChunk");
+  const firstBytes = modelFirst ?? block.marks.find((r) => r.kind === "mark" && r.name === "firstChunk");
+  const shareTo = modelFirst ? "the time to the model's first chunk" : "the time to server: first bytes sent";
   const hints: Measured[] = [];
   for (const row of block.spans) {
     if (row.kind === "mark") continue;
@@ -263,7 +266,7 @@ export function serverHints(block: ServerBlock): HintList {
       measuredNote: got.length < k ? ` (measured in ${got.length} of ${k})` : "",
       unit: "marked visits",
       share,
-      shareOf: share !== null ? "the time to server: first bytes sent" : "server: first bytes sent wasn't recorded, so no share",
+      shareOf: share !== null ? shareTo : "server: first bytes sent wasn't recorded, so no share",
       ...(layer.about && { about: layer.about }),
       ...(row.kind === "span" && beforeModelLine(block, row)),
       checks: layer.checks,

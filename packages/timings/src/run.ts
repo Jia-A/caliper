@@ -47,6 +47,8 @@ export class CaliperRun {
   readonly #store: TimingStore;
   readonly #defer: (p: Promise<void>) => void;
   #watchingStream = false;
+  #saves = 0; // saves started; modelFirstChunk after one saves again
+  #lastSave: Promise<void> = Promise.resolve(); // saves run one after another, so the newest lands last
 
   constructor(id: string, store: TimingStore, { start = Date.now(), defer = () => {} }: RunOptions = {}) {
     this.id = id;
@@ -59,6 +61,15 @@ export class CaliperRun {
   mark(name: string) {
     if (!isValidMarkName(name)) {
       this.#problem(`mark name ${JSON.stringify(name)} rejected — use a letter, then up to 63 letters, digits or _ (e.g. dbStart)`);
+      return;
+    }
+    // The model's first chunk, marked from a per-chunk callback (the AI SDK's onChunk): only the
+    // first call counts. A record already saved (at firstChunk, when the app wrote an envelope
+    // before the model answered) is saved again with it.
+    if (name === "modelFirstChunk") {
+      if (name in this.#marks) return;
+      this.#marks[name] = Date.now() - this.#start;
+      if (this.#saves > 0) void this.save();
       return;
     }
     this.#marks[name] = Date.now() - this.#start;
@@ -205,7 +216,9 @@ export class CaliperRun {
         ...(this.#problems.length && { problems: [...this.#problems] }),
         ...(this.#prompt && { prompt: { messages: this.#prompt.map((m) => ({ ...m, ...(m.parts && { parts: m.parts.map((p) => ({ ...p })) }) })) } }),
       };
-      saved = Promise.resolve(this.#store.put(this.id, record)).catch(logFailure);
+      this.#saves++;
+      saved = this.#lastSave.then(() => this.#store.put(this.id, record)).catch(logFailure);
+      this.#lastSave = saved;
     } catch (err) {
       logFailure(err);
       saved = Promise.resolve();

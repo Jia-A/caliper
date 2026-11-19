@@ -36,6 +36,8 @@
 //   vectorSearchStart/End around 15 ms, then cacheStart with no End, warmupEnd with no Start,
 //   and lockEnd 5 ms before lockStart (reversed), then modelCallSent and firstChunk, and one
 //   problem (GENERIC_PROBLEM) as a wrapper reports a mark name it skipped.
+//   ?uistream=1 answers like the AI SDK's UI message stream (its header, a {"type":"start"} envelope
+//   at once as firstChunk); &modelfirst=1 also records modelFirstChunk at the model's first token.
 //   ?prompt=1 adds PROMPT_SIZES, the prompt field caliper-timings 0.2.0's run.prompt() writes.
 // For more than one request lining up with the output (see ambiguous-page.html):
 //   /ambiguous              the page (?case=split | splitid | tie | typewriter | late&id=<x>; loads counted per id)
@@ -259,6 +261,25 @@ function markedRoute(req, res, url, loads, seen, caliper) {
       }
       mark("modelCallSent");
       record.status = 200;
+      // ?uistream=1: like the AI SDK's toUIMessageStreamResponse, its header and a {"type":"start"}
+      // envelope at once (firstChunk, saved then), the model's tokens FIRST_TOKEN_MS later.
+      // &modelfirst=1 also marks modelFirstChunk at the first token, as onChunk would.
+      if (url.searchParams.has("uistream")) {
+        res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", "x-vercel-ai-ui-message-stream": "v1" });
+        res.write(`data: ${JSON.stringify({ type: "start" })}\n\n`);
+        mark("firstChunk");
+        if (marked) caliper.records.set(run, record);
+        sleep(FIRST_TOKEN_MS).then(async () => {
+          if (url.searchParams.has("modelfirst")) mark("modelFirstChunk");
+          for (const t of REPLY) {
+            if (res.destroyed) return;
+            res.write(`data: ${JSON.stringify({ t })}\n\n`);
+            await sleep(TOKEN_MS);
+          }
+          res.end();
+        });
+        return;
+      }
       streamReply(res, "no-cache", () => {
         if (!url.searchParams.has("partial")) mark("firstChunk");
         if (marked) caliper.records.set(run, record); // saved at the first chunk, like Quill's

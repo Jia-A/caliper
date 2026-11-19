@@ -236,11 +236,14 @@ After the timed runs, Caliper builds a match key from the AI request each run pi
 
   With one successful visit (for example `--server-runs 1`) there's no column row and no min · median · max, only the values. A mark or span that a successful visit didn't record shows `–` in its column, and min · median · max cover only the visits that recorded it (none with fewer than two).
 
-  **Marks and spans follow the [protocol](https://github.com/Jia-A/caliper/blob/main/packages/timings/SPEC.md#marks).** Every recorded mark is shown under its own name, in the order the marks happened. The exceptions are `modelCallSent` and `firstChunk`, which are reserved and labelled. Spans:
+  **Marks and spans follow the [protocol](https://github.com/Jia-A/caliper/blob/main/packages/timings/SPEC.md#marks).** Every recorded mark is shown under its own name, in the order the marks happened. The exceptions are `modelCallSent`, `firstChunk` and `modelFirstChunk` (caliper-timings 0.6.1), which are reserved and labelled. Spans:
   - each `<name>Start` / `<name>End` pair the app recorded is a span called `<name>`;
-  - `modelCallSent` → `firstChunk` is "model call → first bytes sent".
+  - `modelCallSent` → `modelFirstChunk` is "model call → model's first chunk", when a visit recorded `modelFirstChunk`;
+  - otherwise `modelCallSent` → `firstChunk` is "model call → first bytes sent".
 
   `firstChunk` is shown as "server: first bytes sent": the server's first write to the browser, not necessarily the model's first token. If your app writes anything before the model's reply (a heartbeat, an envelope), this is that write. A line under the block says so whenever a visit recorded it.
+
+  **AI SDK apps:** `toUIMessageStreamResponse()` writes `{"type":"start"}` as soon as the stream opens, before the model answers, so `firstChunk` is that envelope (2 ms after the model call on the app we tested, where the model took seconds). Mark the model's first chunk from `streamText`: `onChunk: () => run?.mark("modelFirstChunk")` (see the [caliper-timings README](https://github.com/Jia-A/caliper/tree/main/packages/timings#ai-sdk)). When the marked visit's response carries the AI SDK's `x-vercel-ai-ui-message-stream` header and the record has no `modelFirstChunk`, Caliper shows no model span. It prints instead: `model call → first bytes sent ? — the AI response is an AI SDK UI message stream (header x-vercel-ai-ui-message-stream), which writes {"type":"start"} before the model answers, …`, and no model hint fires. The header is read from the response the browser got. Other SDKs or frameworks that write an envelope first aren't detected: there the "first bytes sent" note above is all Caliper can say. Tested with `npm run test:marked` (cases `u` and `k`) and `npm run test:serverblock`.
 
   When a pair is missing one of its marks, or its End is before its Start, there's no span, and a line says why. Caliper never makes a span between unrelated marks. This one is from a fixture record with app-chosen names, made up for the test, that also reports one problem:
 

@@ -46,8 +46,8 @@ export const RECORD_TTL_MS = 10 * 60 * 1000;
 const RUN_ID = /^[A-Za-z0-9_-]{1,64}$/;
 export const isValidRunId = (id: string) => RUN_ID.test(id);
 
-// Case-sensitive. <name>Start / <name>End is a span called <name>; modelCallSent and firstChunk
-// are reserved for the model call.
+// Case-sensitive. <name>Start / <name>End is a span called <name>; modelCallSent, modelFirstChunk
+// and firstChunk are reserved for the model call.
 const MARK_NAME = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
 export const isValidMarkName = (name: unknown): name is string => typeof name === "string" && MARK_NAME.test(name);
 

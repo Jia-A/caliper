@@ -665,3 +665,30 @@ test("HTML: by-source rows after the total, with the swatch and the word in the 
   assert.ok(html.includes('<tr class="by-source"><th scope="row">by source: user</th><td class="num">3264</td><td>56%</td><td class="source"><span class="src src-user"></span>user</td></tr>'), html);
   assert.ok(html.indexOf("by source: app") > html.indexOf('<th scope="row">total</th>'), html);
 });
+
+// --- modelFirstChunk and the AI SDK UI message stream (caliper-test-3 #8) ---
+
+const UI_STREAM_LINE =
+  'model call → first bytes sent ? — the AI response is an AI SDK UI message stream (header x-vercel-ai-ui-message-stream), which writes {"type":"start"} before the model answers, so first bytes sent isn\'t the model\'s first chunk. To measure it, mark it from streamText: onChunk: () => run?.mark("modelFirstChunk") (caliper-timings README, "AI SDK").';
+
+test("AI SDK UI message stream without modelFirstChunk: no model span, a ? line with the reason and the fix, never 2 ms", () => {
+  const v = visits({ marks: { modelCallSent: 1, firstChunk: 3 } }).map((x) => ({ ...x, uiStream: true }));
+  const block = serverBlock(v, 1);
+  assert.deepEqual(block.spans.map((s) => s.label), []);
+  assert.deepEqual(block.noSpan, [UI_STREAM_LINE]);
+  assert.ok(lines(formatServerBlock(block)).includes(`    ${UI_STREAM_LINE}`));
+});
+
+test("not a UI message stream: the model span is model call → first bytes sent, as before", () => {
+  const block = serverBlock(visits({ marks: { modelCallSent: 1, firstChunk: 300 } }).map((x) => ({ ...x, uiStream: false })), 1);
+  assert.deepEqual(block.spans.map((s) => [s.label, s.values]), [["model call → first bytes sent", [299]]]);
+  assert.deepEqual(block.noSpan, []);
+});
+
+test("modelFirstChunk recorded: its own mark row, and the model span ends there, envelope or not", () => {
+  const v = visits({ marks: { modelCallSent: 1, firstChunk: 3, modelFirstChunk: 1201 } }).map((x) => ({ ...x, uiStream: true }));
+  const block = serverBlock(v, 1);
+  assert.deepEqual(block.marks.map((m) => [m.label, m.values]), [["model call sent", [1]], ["server: first bytes sent", [3]], ["model's first chunk", [1201]]]);
+  assert.deepEqual(block.spans.map((s) => [s.label, s.values]), [["model call → model's first chunk", [1200]]]);
+  assert.deepEqual(block.noSpan, []);
+});

@@ -66,7 +66,7 @@ createServer(async (req, res) => {
 
 - **`handle(req, res)`** answers `GET /__caliper/timings/:id` in SPEC.md's check order and returns `true`. For any other request it returns `false` and doesn't touch the response. With no token set it returns `false` for every request, so your own 404 answers.
 - **`start(req, res)`** returns a `CaliperRun` only when the request carries a valid `x-caliper-run` and the right `x-caliper-token`. Otherwise it returns `null` and the request and response are left exactly as they were. Call it first thing in the route: marks are measured from the moment `start()` was called.
-- **`run.mark(name)`** records ms since then. Name spans with `<name>Start` / `<name>End` (`dbStart` / `dbEnd`); Caliper shows each pair as a span called `<name>`. `modelCallSent` and `firstChunk` are reserved. A name outside `^[A-Za-z][A-Za-z0-9_]{0,63}$` is skipped, not thrown, and Caliper prints it under "problems reported by the server".
+- **`run.mark(name)`** records ms since then. Name spans with `<name>Start` / `<name>End` (`dbStart` / `dbEnd`); Caliper shows each pair as a span called `<name>`. `modelCallSent`, `firstChunk` and `modelFirstChunk` are reserved. `modelFirstChunk` is the model's first chunk reaching your code: mark it from your SDK's per-chunk callback. Only its first call counts, and a record already saved (at `firstChunk`) is saved again with it, so the one line below is enough. See [AI SDK](#ai-sdk). A name outside `^[A-Za-z][A-Za-z0-9_]{0,63}$` is skipped, not thrown, and Caliper prints it under "problems reported by the server".
 - **`run.prompt(messages)`** records each message's role and its size in bytes (UTF-8), in order, for Caliper's prompt sizes. Pass the same list you send to the model, as `{ role, content }` objects, just before the model call. With a separate system text (Anthropic's API), pass it as the first message. It never records the text. A role that isn't a lowercase name (`system`, `user`, `assistant`, …) is recorded as `"?"`, and content that isn't a string gets no size (`null`), with a problem saying which message, by number. It reads the list and never changes it. A later call replaces an earlier one. See [SPEC.md](SPEC.md#prompt-sizes).
 - **`run.prompt(messages, { parts })`** also names pieces of a message: `parts` is a list of `{ message, name, text }`, where `message` is the index in `messages` (0 for the first), `name` follows the role rule (else `"?"`), and `text` is the exact string you put in that message, label included (`"Title: …"`). For each one it records the name, the text's size in bytes, and `found`: whether that text is inside the message. The text is used for that check and dropped, never recorded. Problems name a part by number only. A part naming no message, or one that can't be read, isn't recorded. At most 50 parts per message.
   ```js
@@ -179,6 +179,20 @@ const store = UpstashStore.fromEnv(process.env) ?? new MemoryStore();
 - **`fromEnv(env)`** returns `null` when neither pair is complete, never throws. Pass the environment yourself (`process.env`, or Workers' `env`).
 - **Use the Standard REST token,** not the Read Only one: the store writes.
 - **Each call gives up after 2 s** (`timeoutMs` to change it). A refused, failed or timed-out call rejects with the command and the status or Upstash's error, never the token or the URL. `CaliperRun.save()` logs it and drops the record; the endpoint answers 500. Neither reaches your request.
+
+## AI SDK
+
+The AI SDK's `toUIMessageStreamResponse()` writes `{"type":"start"}` as soon as the stream opens, before the model answers. So `firstChunk` (server: first bytes sent) is that envelope, not the model. Mark the model's first chunk yourself, in `streamText`:
+
+```js
+const result = streamText({
+  model,
+  messages,
+  onChunk: () => run?.mark("modelFirstChunk"), // the model's first chunk: only the first call counts
+});
+```
+
+Caliper then shows "model call → model's first chunk". Without it, Caliper sees the AI SDK's `x-vercel-ai-ui-message-stream` header on the response and shows that span as `?` with this line as the fix, instead of the envelope's few ms. `onChunk` is the AI SDK's own callback: in `ai` 6.0.208 it's called for the model's content chunks (text and reasoning deltas, tool calls and their input, sources), not for lifecycle frames such as `start`, and with tool calling on every step. Only the first call counts. Tested with a stand-in for the AI SDK's stream (its header and envelope), not with the AI SDK itself: `npm test` here, and `npm run test:marked` in caliper-ai.
 
 ## Next.js App Router (and Vercel)
 
