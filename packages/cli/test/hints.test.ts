@@ -726,3 +726,14 @@ test("advice, first run: when a segment's gap is bigger than the whole gap, segm
   const demo = adviceItems({ ...NO_DATA, cold: { total: 5221, warmMedian: 1737, warm: 1, gaps: coldGaps(demoCold, [demoWarm]), opposite: coldOpposite(demoCold, [demoWarm]) } })[0]!.text;
   assert.ok(!demo.includes("other way"), demo);
 });
+
+test("server bar, AI SDK case: the axis runs to the model's first chunk when it comes after first bytes sent (App 1, Nov 19: 3 ms envelope, 3065 ms)", () => {
+  const bar = serverBar(block({ marks: { modelCallSent: 1, firstChunk: 3, modelFirstChunk: 3065 } }))!;
+  assert.equal(bar.title, "Marked visit 1, the one visit: 3065 ms from arrival to the model's first chunk");
+  assert.equal(bar.total, 3065);
+  const span = bar.lanes.flat().find((p) => p.label === "model call → model's first chunk")!;
+  assert.deepEqual([span.start, span.ms], [1, 3064]);
+  assert.ok(span.start + span.ms <= bar.total, "the span fits inside the axis");
+  // Without modelFirstChunk, unchanged: the axis is first bytes sent.
+  assert.equal(serverBar(block({ marks: { modelCallSent: 0, firstChunk: 460 } }))!.title, "Marked visit 1, the one visit: 460 ms from arrival to server: first bytes sent");
+});

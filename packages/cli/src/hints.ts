@@ -447,14 +447,22 @@ export function browserBar(warm: { run: number; total: number; segments: Segment
   return { title: `Run ${run}, ${which(warm.length, exact, "warm run", m)}: ${total} ms from click to first word`, total, lanes: [parts] };
 }
 
-/** The server bar: the visit nearest the median first bytes sent, its spans on rows that don't overlap. */
+/** The server bar: the visit nearest the median axis end (first bytes sent, or the model's first chunk when later), its spans on rows that don't overlap. */
 export function serverBar(block: ServerBlock): Bar | null {
   const mark = (name: string) => block.marks.find((r) => r.name === name);
   const firstBytes = mark("firstChunk");
-  // Each visit's axis: first bytes sent, or else the end of its last span.
+  const modelFirst = mark("modelFirstChunk");
+  // Each visit's axis: the later of first bytes sent and the model's first chunk (an AI SDK app
+  // sends its envelope first, so the model's first chunk comes after), or else the end of its
+  // last span. The axis must hold every span drawn on it.
+  const axisEnd = (i: number) => {
+    const fb = firstBytes?.values[i] ?? null;
+    const mf = modelFirst?.values[i] ?? null;
+    return mf !== null && (fb === null || mf > fb) ? mf : fb;
+  };
   const ends = block.visits.map((_, i) => {
-    const fb = firstBytes?.values[i];
-    if (fb !== undefined && fb !== null) return fb;
+    const axis = axisEnd(i);
+    if (axis !== null) return axis;
     const spanEnds = block.spans.flatMap((s) => {
       const start = mark(s.kind === "model" ? "modelCallSent" : `${s.name}Start`)?.values[i];
       return start != null && s.values[i] != null ? [start + s.values[i]!] : [];
@@ -481,6 +489,8 @@ export function serverBar(block: ServerBlock): Bar | null {
     if (lane) lane.push(p);
     else lanes.push([p]);
   }
-  const to = firstBytes?.values[i] != null ? "server: first bytes sent" : "the end of its last span";
+  const fb = firstBytes?.values[i] ?? null;
+  const mf = modelFirst?.values[i] ?? null;
+  const to = mf !== null && (fb === null || mf > fb) ? "the model's first chunk" : fb !== null ? "server: first bytes sent" : "the end of its last span";
   return { title: `Marked visit ${block.visits[i]}, ${which(known.length, exact, "visit", m)}: ${known[at]!.e} ms from arrival to ${to}`, total: known[at]!.e, lanes };
 }
