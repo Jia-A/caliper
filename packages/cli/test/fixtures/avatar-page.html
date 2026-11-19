@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Avatar fixture</title>
+<style>.tip { visibility: hidden; }</style>
+</head>
+<body>
+<!-- Copies the tool-calling-template sequence (caliper-test-3, #11/#12): Enter adds your bubble
+     with an avatar fallback ("Me") and your message, then POSTs /avatar/stream. That stream
+     writes an AI SDK-style {"type":"start"} envelope at once and the reply's text only
+     AVATAR_TEXT_MS later. On the envelope the page swaps the "Me" fallback for an <img> and
+     adds the reply bubble with a hidden "Copy message" tooltip. Neither is the first word:
+     only new visible text is. -->
+<div id="messages"></div>
+<input id="msg" size="60" placeholder="Message">
+<script>
+  const messages = document.getElementById("messages");
+  const input = document.getElementById("msg");
+  const PIXEL = "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==";
+
+  input.addEventListener("keydown", async (event) => {
+    if (event.key !== "Enter" || !input.value.trim()) return;
+    event.preventDefault();
+    const prompt = input.value;
+    input.value = "";
+    const mine = document.createElement("div");
+    mine.className = "msg user";
+    mine.innerHTML = `<span class="avatar">Me</span><p></p>`;
+    mine.querySelector("p").textContent = prompt;
+    messages.append(mine);
+
+    const res = await fetch("/avatar/stream", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt }) });
+    const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+    let reply = null;
+    let text = "";
+    let buffer = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += value;
+      const events = buffer.split("\n\n");
+      buffer = events.pop();
+      for (const event of events) {
+        const data = JSON.parse(event.replace(/^data: /, ""));
+        if (data.type === "start") {
+          // The avatar image loads: the fallback text goes, an <img> comes.
+          const img = document.createElement("img");
+          img.src = PIXEL;
+          img.alt = "";
+          mine.querySelector(".avatar").replaceWith(img);
+          reply = document.createElement("div");
+          reply.className = "msg assistant";
+          reply.innerHTML = `<span class="tip">Copy message</span><p></p>`;
+          messages.append(reply);
+        } else if (data.type === "text-delta") {
+          text += data.delta;
+          reply.querySelector("p").textContent = text;
+        }
+      }
+    }
+  });
+</script>
+</body>
+</html>

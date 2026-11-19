@@ -337,7 +337,7 @@ After the timed runs, Caliper builds a match key from the AI request each run pi
 
 Each run opens a fresh page and loads the URL. Caliper clicks the steps and then installs a small watcher in the page. The watcher listens for the next click and, on every animation frame after it, checks whether the output element's content has changed. Then Caliper clicks the measured button.
 
-The total is the time from the click event to the first word: the first frame in which the output changed after the AI request's first body byte arrived. Both ends come from the page's own `performance.now()` clock. Changes before that byte (a "Loading…" placeholder, say) are listed as pre-reply changes and never timed.
+The total is the time from the click event to the first word: the first frame in which the output's text changed after the AI request's first body byte arrived. Each run prints what that change showed (`first word shows`). Both ends come from the page's own `performance.now()` clock. Changes before that byte (a "Loading…" placeholder, say) are listed as pre-reply changes and never timed.
 
 ### How the AI request is detected
 
@@ -473,11 +473,12 @@ caliper audit https://your-app.example.com/chat --input "#msg" --prompt "hello" 
 
 Caliper types the prompt into `--input`, then sends it by clicking `--measure` or `--measure-selector` if given, or by pressing Enter in the input. If Enter doesn't send on your page, pass one of them. The click or keydown starts the timer. `--output` can be the message list: Caliper watches it for added nodes and text changes.
 
-- **Your own message doesn't count.** An added node whose trimmed text equals the prompt is ignored.
-- **Placeholders don't count.** The first word is the container's first change at or after the chosen AI request's first body byte, the same rule as the double-send check uses. Changes before that, such as a "Thinking…" bubble or a typing indicator, are printed as pre-reply changes and shown in the report's "Before the reply" table. They are never timed.
+- **Only new visible text counts.** An added node or text edit counts only if it shows text. An image loading (an avatar swapping in), an empty element, an attribute change, or text hidden by CSS (a hover tooltip) never counts, before or after the reply starts.
+- **Your own message doesn't count.** Any added node whose text contains the prompt is treated as your message bubble and ignored whole, with anything else in it (an avatar fallback such as "Me", your name). Known limit: if your page re-renders the whole message list as one new node when the reply arrives, that node contains your prompt too, so it isn't counted; the run then reports no output change after the AI request's first body byte instead of a number.
+- **Placeholders don't count.** The first word is the container's first new text at or after the chosen AI request's first body byte, the same rule as the double-send check uses. Changes before that, such as a "Thinking…" bubble or a typing indicator, are printed as pre-reply changes and shown in the report's "Before the reply" table. They are never timed.
 - **Done** is the same settle window as for other runs, applied to the container.
 
-Each run also prints `send → first body byte`: the first chunk of the response body on the wire. The breakdown's `browser: response headers received` is when the response headers arrived, which for a stream can be earlier. `--stop`, `--double` and `--canary` can't be combined with `--input` yet.
+Each run prints `first word shows` with the text that was timed as the first word (the report's "Before the reply" table has it too), so you can check it's your reply. It also prints `send → first body byte`: the first chunk of the response body on the wire. The breakdown's `browser: response headers received` is when the response headers arrived, which for a stream can be earlier. `--stop`, `--double` and `--canary` can't be combined with `--input` yet.
 
 ## Checks
 

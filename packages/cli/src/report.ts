@@ -22,6 +22,7 @@ import type {
 export interface ReportReply {
   firstByte: number | null;
   preReply: { at: number; text: string }[];
+  firstWord: string; // what the first word change showed
 }
 
 export type ReportRun = Breakdown & { run: number; total: number; reply: ReportReply }; // run: 1-based number, 1 = cold
@@ -173,7 +174,7 @@ export function renderReport({ url, measure, chat, output, steps, startedAt, sum
       <h3 id="requests-h">Request matching and clock check</h3>
       <ul class="reqs">${runs.map(requestItem).join("")}</ul>
     </section>
-    ${chat || runs.some((r) => r.reply.preReply.length) ? replySection(runs, chat ? "Send" : "Click") : ""}
+    ${replySection(runs, chat ? "Send" : "Click")}
     ${server ? serverSection(server) : ""}
   </details>
 </main>
@@ -274,17 +275,18 @@ function replySection(runs: ReportRun[], start: "Send" | "Click"): string {
       : `<span class="muted">none</span>`;
   return `<section aria-labelledby="reply-h">
     <h2 id="reply-h">Before the reply</h2>
-    <p class="muted">The first word is the output&rsquo;s first change at or after the AI request&rsquo;s first body byte. Earlier changes are pre-reply changes, listed here and never timed.${start === "Send" ? " Your own message isn't counted." : ""}</p>
+    <p class="muted">The first word is the output&rsquo;s first new text at or after the AI request&rsquo;s first body byte.${start === "Send" ? " Only visible text counts: images, empty elements and text hidden by CSS don&rsquo;t, and neither does your own message (any element whose text contains it, an avatar or name in it included)." : ""} Earlier changes are pre-reply changes, listed here and never timed.</p>
     <div class="table-wrap">
     <table>
       <thead><tr>
-        <th scope="col">Run</th><th scope="col" class="num">${start} → first body byte (ms)</th><th scope="col" class="num">${start} → first word (ms)</th><th scope="col">Pre-reply changes</th>
+        <th scope="col">Run</th><th scope="col" class="num">${start} → first body byte (ms)</th><th scope="col" class="num">${start} → first word (ms)</th><th scope="col">First word shows</th><th scope="col">Pre-reply changes</th>
       </tr></thead>
       <tbody>
         ${runs.map((run) => `<tr>
           <th scope="row">${runName(run.run)}</th>
           <td class="num">${run.reply.firstByte === null ? "?" : fmtMs(run.reply.firstByte)}</td>
           <td class="num">${fmtMs(run.total)}</td>
+          <td class="wrap">${esc(JSON.stringify(run.reply.firstWord))}</td>
           <td class="wrap">${changes(run.reply)}</td>
         </tr>`).join("")}
       </tbody>

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.6.1 — unreleased
+
+Fixes from a test by someone new to Caliper, on two apps they didn't write (an AI SDK app on Next.js, and Google's Gemini example chat app). Tested on local fixtures that copy what those apps did.
+
+### Fixed
+
+- **The first word is the first new visible text, not any change** (chat runs, `--input`). On an AI SDK app, the stream's `{"type":"start"}` envelope arrived first and the user's avatar image swapped in right after it, inside `--output`. 0.6.0 timed that image as the first word (49 ms; the reply took seconds). Now an added node or text edit counts only if it shows visible text: images, empty elements, attribute changes and text hidden by CSS never count. Tested with `npm run test:firstword`.
+- **Your own message doesn't count, even with an avatar or a name in the bubble.** 0.6.0 ignored a node only when its text equalled the prompt, so a bubble reading "MeWhat's the weather…" counted. Now any node whose text contains the prompt is ignored whole. Tested with `npm run test:firstword`.
+
+### Added
+
+- **`first word shows`:** each run prints the text it timed as the first word, and the report's "Before the reply" table (now shown for every audit) has a "First word shows" column, so you can check it's the reply. Tested with `npm run test:firstword`.
+
 ## 0.6.0 — 2026-11-14
 
 Advice: what to look at next, from this run's numbers only. The report and the terminal output are reordered around it: see [Upgrading from 0.5.0](https://github.com/Jia-A/caliper/tree/main/packages/cli#upgrading-from-050). Tested on local fixtures and local apps only.

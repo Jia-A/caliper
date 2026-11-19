@@ -557,7 +557,7 @@ async function finishRun(
     requests,
     pick,
     // The output going empty (e.g. cleared at the click) isn't a placeholder; it's left out.
-    reply: { firstByteAt, preReply: changes.filter((c) => c.at < firstWord.at && c.text !== "") },
+    reply: { firstByteAt, preReply: changes.filter((c) => c.at < firstWord.at && c.text !== ""), firstWord: firstWord.text },
     chat,
   };
 }
@@ -996,13 +996,23 @@ async function prepareChatRun(page: Page, { url, measure, output, steps, timeout
     window.__caliperChanges = [];
     window.__caliperRecording = true;
 
-    // What an added or edited node shows, or null when it doesn't count: whitespace, or the
-    // user's own message (its trimmed text equals the prompt).
+    // The new visible text an added or edited node shows, or null when it doesn't count. Only
+    // text counts: an element without visible text (an image loading, an empty wrapper) and
+    // text hidden by CSS (a hover tooltip) never do. Neither does the user's own message: any
+    // node whose text contains the prompt is their bubble, with whatever else is in it (an
+    // avatar fallback such as "Me", a name).
+    const visibleText = (node: Node): string => {
+      if (node instanceof HTMLElement) return node.checkVisibility() ? node.innerText : "";
+      if (node.nodeType === Node.TEXT_NODE) {
+        const parent = node.parentElement;
+        return parent && parent.checkVisibility({ visibilityProperty: true }) ? (node.textContent ?? "") : "";
+      }
+      return "";
+    };
     const describe = (node: Node): string | null => {
-      const text = (node.textContent ?? "").trim();
-      if (text === prompt.trim()) return null;
-      if (text) return text.length > 60 ? `${text.slice(0, 59)}…` : text;
-      return node instanceof Element ? `<${node.tagName.toLowerCase()}>` : null;
+      const text = visibleText(node).replace(/\s+/g, " ").trim();
+      if (!text || (prompt.trim() && text.includes(prompt.trim().replace(/\s+/g, " ")))) return null;
+      return text.length > 60 ? `${text.slice(0, 59)}…` : text;
     };
 
     // Changes are stamped in the next animation frame, like the click watcher's.
@@ -1992,6 +2002,7 @@ function formatDone(result: RunResult): string {
   const start = startLabel(result);
   const row = (label: string, value: number) => `    ${label.padEnd(LABEL_WIDTH)}${String(ms(value)).padStart(6)} ms`;
   const lines = [row(`${start} → first word`, timing.firstPaintAt - timing.clickAt)];
+  lines.push(`    ${"first word shows".padEnd(LABEL_WIDTH)}${JSON.stringify(result.reply.firstWord)}`);
   if (!done.settled) {
     lines.push(`    ${`${start} → done`.padEnd(LABEL_WIDTH)}did not settle within ${DONE_CAP_MS / 1000}s of first word`);
     return lines.join("\n");
@@ -2549,6 +2560,7 @@ function reportReply({ timing, reply }: RunResult): ReportReply {
   return {
     firstByte: reply.firstByteAt === null ? null : after(reply.firstByteAt),
     preReply: reply.preReply.map((c) => ({ at: after(c.at), text: c.text })),
+    firstWord: reply.firstWord,
   };
 }
 

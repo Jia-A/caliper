@@ -79,13 +79,14 @@ export interface RequestShare {
  */
 export interface ContainerChange {
   at: number;
-  text: string; // what changed, trimmed and shortened; "<tag>" for an empty element; "" when the output went empty
+  text: string; // what changed, trimmed and shortened: a chat run's new visible text; a click run's whole output ("" when it went empty)
 }
 
 /** When the chosen AI request's first body byte came, and what changed before the reply. */
 export interface ReplyTiming {
   firstByteAt: number | null; // first body chunk on the wire, else response headers
   preReply: ContainerChange[]; // changes before the first word (placeholders), never timed
+  firstWord: string; // what the first word change showed, as recorded (trimmed, shortened)
 }
 
 /** Everything one run measured. */

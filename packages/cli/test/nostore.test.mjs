@@ -55,6 +55,10 @@ try {
     check(error === null, `${c.name}: audit completed${error ? ` (${error})` : ""}`);
     check((stdout.match(/^run \d/gm) ?? []).length === 2, `${c.name}: both runs measured`);
     check(took < TIMEOUT_MS, `${c.name}: took ${took} ms, not stuck on --timeout`);
+    // Every run, click or chat, says what it timed as the first word, in both outputs.
+    const shows = [...stdout.matchAll(/^\s+first word shows\s+(".+")$/gm)].map((m) => JSON.parse(m[1]));
+    check(shows.length === 2 && shows.every((t) => t.length > 0) && html.includes("First word shows"),
+      `${c.name}: each run prints "first word shows" with its text, and the report has the column (got ${JSON.stringify(shows)})`);
     const labelled = stdout.includes(LABEL) && html.includes(LABEL);
     const unlabelled = !stdout.includes(LABEL) && !html.includes(LABEL);
     check(c.label ? labelled : unlabelled,

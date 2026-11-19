@@ -46,6 +46,10 @@
 //                           (?case=tie: SPLIT_GENERATE, as many as the reply; ?case=late: SPLIT_GENERATE,
 //                           while the reply sends SPLIT_STATUS, so the status stream wins)
 //   /ambiguous/heartbeat    typewriter's tick (GET SSE): one every 50 ms for 3 s, never shown
+// For a reply whose stream opens with an envelope (#11/#12 of the 0.6.0 stranger test):
+//   /avatar          the page (avatar-page.html): your bubble has a "Me" avatar fallback; on the
+//                    envelope it swaps to an <img> and a hidden tooltip is added
+//   /avatar/stream   the reply (POST SSE): {"type":"start"} at once, text-delta tokens from AVATAR_TEXT_MS
 // Run on its own with `node test/fixtures/server.mjs [port]`, or import startFixtureServer().
 
 import { readFileSync } from "node:fs";
@@ -60,6 +64,7 @@ const SIDECALL_PAGE = readFileSync(new URL("./sidecall-page.html", import.meta.u
 const ICON_PAGE = readFileSync(new URL("./icon-page.html", import.meta.url), "utf8");
 const MARKED_PAGE = readFileSync(new URL("./marked-page.html", import.meta.url), "utf8");
 const AMBIGUOUS_PAGE = readFileSync(new URL("./ambiguous-page.html", import.meta.url), "utf8");
+const AVATAR_PAGE = readFileSync(new URL("./avatar-page.html", import.meta.url), "utf8");
 const BUTTONS_PAGE = readFileSync(new URL("./buttons-page.html", import.meta.url), "utf8");
 
 // The streamed reply: headers at once, the first token after a pause, then a token every 60 ms.
@@ -105,6 +110,22 @@ async function sidecallStream(res) {
   res.end();
 }
 
+export const AVATAR_TEXT_MS = 700; // the reply's first text, after the envelope
+export const AVATAR_REPLY = "Hello! The weather on Mars is cold and dusty today.";
+
+async function avatarStream(req, res) {
+  req.resume(); // the body isn't used
+  res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+  res.write(`data: ${JSON.stringify({ type: "start" })}\n\n`);
+  await sleep(AVATAR_TEXT_MS);
+  for (const delta of AVATAR_REPLY.split(/(?<= )/)) {
+    if (res.destroyed) return;
+    res.write(`data: ${JSON.stringify({ type: "text-delta", delta })}\n\n`);
+    await sleep(TOKEN_MS);
+  }
+  res.end();
+}
+
 export const SPLIT_GENERATE = 7;
 export const SPLIT_STATUS = 6;
 export const TYPEWRITER_CHUNKS = 5;
@@ -141,7 +162,7 @@ function ambiguousRoute(req, res, url) {
   res.writeHead(404).end("not found");
 }
 
-const PAGES = { "/stream-nostore": STREAM_PAGE, "/chat": CHAT_PAGE, "/sidecall": SIDECALL_PAGE, "/icon": ICON_PAGE, "/buttons": BUTTONS_PAGE };
+const PAGES = { "/stream-nostore": STREAM_PAGE, "/chat": CHAT_PAGE, "/sidecall": SIDECALL_PAGE, "/icon": ICON_PAGE, "/buttons": BUTTONS_PAGE, "/avatar": AVATAR_PAGE };
 const STREAMS = { "/chat/stream": "no-cache", "/chat/stream-nostore": "no-store" };
 
 const VARIANTS = {
@@ -286,6 +307,10 @@ export function startFixtureServer(port = 0, { caliperToken = null, caliperStatu
     if (STREAMS[path] && req.method === "POST") {
       req.resume(); // the body isn't used
       streamReply(res, STREAMS[path]);
+      return;
+    }
+    if (path === "/avatar/stream" && req.method === "POST") {
+      avatarStream(req, res);
       return;
     }
     if (path === "/sidecall/predict" && req.method === "POST") {
