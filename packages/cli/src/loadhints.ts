@@ -62,8 +62,10 @@ const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 // Things to check after a --step or --measure button never appeared, only from what Caliper saw:
 // the buttons on the page (null when they couldn't be read: no line), and the login. With
 // --auth, a line only when a cookie for this site has expired; without, that none was used.
-export function buttonHints({ seen, pattern, login, url }: {
+export function buttonHints({ seen, unnamed = [], selectorFlag = "--measure-selector", pattern, login, url }: {
   seen: string[] | null;
+  unnamed?: { tag: string; selector: string }[]; // buttons with no name: a name can't match them
+  selectorFlag?: string;
   pattern: RegExp;
   login: { file: string; expired: number[] } | null; // null without --auth
   url: string;
@@ -72,7 +74,11 @@ export function buttonHints({ seen, pattern, login, url }: {
   if (seen) {
     const shown = seen.slice(0, MAX_BUTTONS).map((n) => JSON.stringify(n)).join(", ");
     const more = seen.length > MAX_BUTTONS ? ` (and ${seen.length - MAX_BUTTONS} more)` : "";
-    lines.push(`Buttons I saw: ${seen.length ? `${shown}${more}` : "none"}. None matched ${pattern}.`);
+    if (seen.length) lines.push(`Buttons I saw: ${shown}${more}. None matched ${pattern}.`);
+    else if (!unnamed.length) lines.push(`No buttons on the page, so nothing to match ${pattern}.`);
+  }
+  if (unnamed.length) {
+    lines.push(`Buttons without a name (a name can't match them; use a selector): ${unnamed.map((b) => `<${b.tag}> ${selectorFlag} ${JSON.stringify(b.selector)}`).join(" · ")}`);
   }
   if (!login) {
     lines.push("No saved login was used. If this button only shows when logged in, run caliper login first and pass --auth.");

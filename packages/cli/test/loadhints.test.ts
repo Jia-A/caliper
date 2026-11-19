@@ -69,7 +69,11 @@ test("the buttons seen, capped at 15, then what didn't match", () => {
     `Buttons I saw: ${names.slice(0, 15).map((n) => JSON.stringify(n)).join(", ")} (and 5 more). None matched /^nosuch$/i.`,
   ]);
   assert.equal(buttonHints({ seen: ["Generate"], pattern: /x/i, login: null, url: PAGE })[0], 'Buttons I saw: "Generate". None matched /x/i.');
-  assert.equal(buttonHints({ seen: [], pattern: /x/i, login: null, url: PAGE })[0], "Buttons I saw: none. None matched /x/i.");
+  assert.equal(buttonHints({ seen: [], pattern: /x/i, login: null, url: PAGE })[0], "No buttons on the page, so nothing to match /x/i.");
+  // Unnamed buttons are listed with a selector instead, and "Buttons I saw: none" never appears.
+  const unnamed = buttonHints({ seen: [], unnamed: [{ tag: "button", selector: "button.toggle-btn" }], selectorFlag: "--step-selector", pattern: /x/i, login: null, url: PAGE });
+  assert.equal(unnamed[0], 'Buttons without a name (a name can\'t match them; use a selector): <button> --step-selector "button.toggle-btn"');
+  assert.ok(!unnamed.some((l) => l.includes("Buttons I saw")));
   // Couldn't read the page: no buttons line at all, never a guess.
   assert.ok(!buttonHints({ seen: null, pattern: /x/i, login: null, url: PAGE }).some((l) => l.startsWith("Buttons I saw")));
 });

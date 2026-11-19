@@ -148,6 +148,7 @@ These change what an existing command does. Check them if you run Caliper in a s
 | `--measure-selector <css>` | none | Click the one element this CSS selector matches instead of a button by name. See [icon-only buttons](#icon-only-buttons---measure-selector). |
 | `--output <selector>` | required | CSS selector for the element where the AI output appears. Caliper reads `value` (inputs and textareas) or else `textContent`. |
 | `--step <text>` | none | A button to click before measuring. Repeat the flag for several, clicked in order. |
+| `--step-selector <css>` | none | A step clicked by CSS selector instead of name, for a button with no name (its text hidden, or icon only). It must match exactly one element, and Caliper prints `clicking <…> for --step-selector "…"`. `--step` and `--step-selector` run in the order given. |
 | `--runs <n>` | `3` | Number of runs. |
 | `--headed` | off | Show the browser window. Useful for debugging a flow. |
 | `--auth <path>` | none | Session saved by `caliper login`. A path with no file is an error before any run. Without `--auth` there's no saved session (an `auth.json` in the current directory is not loaded), and Caliper prints `No --auth given: running without a saved session.` |
@@ -161,8 +162,8 @@ These change what an existing command does. Check them if you run Caliper in a s
 | `--canary` | off | Run the [canary image check](#canary-image---canary---canary-input); you plant the canary line yourself. |
 | `--canary-input <selector>` | none | Run the canary check, typing the canary line into this input first. Implies `--canary`. |
 | `--csp` | off (on with `--canary`) | Run the [CSP check](#csp---csp). |
-| `--input <selector>` | none | Time a [chat-style page](#chat-style-pages---input---prompt): type `--prompt` into this input and send it. Makes `--measure` and `--measure-selector` optional. |
-| `--prompt <text>` | required with `--input` | The message to send. |
+| `--input <selector>` | the only text box | Where to type `--prompt`. Without it, Caliper uses the page's only visible text box (textarea, text input or contenteditable) and prints `typing into <textarea> textarea[name="chat"], the only text box on the page — to use another: --input "<css>"`. With several it stops and lists them as `--input` flags; with none it says so. |
+| `--prompt <text>` | none | Time a [chat-style page](#chat-style-pages---input---prompt): type this and send it. Makes `--measure` and `--measure-selector` optional. |
 | `--server-timings <origin>` | off | With `CALIPER_TOKEN` set, add [marked visits](#marked-visit---server-timings) that stamp the AI request to this origin. |
 | `--server-runs <n>` | `3` | Number of marked visits, 1 to 10. Only with `--server-timings`. |
 
@@ -480,7 +481,12 @@ These limits were written for whole pages or interactions; applying them to one 
 caliper audit https://your-app.example.com/chat --input "#msg" --prompt "hello" --output "#messages"
 ```
 
-Caliper types the prompt into `--input`, then sends it by clicking `--measure` or `--measure-selector` if given, or by pressing Enter in the input. If Enter doesn't send on your page, pass one of them. The click or keydown starts the timer. `--output` can be the message list: Caliper watches it for added nodes and text changes.
+Caliper types the prompt into `--input` (or the page's only text box), then sends it by clicking `--measure` or `--measure-selector` if given. Without them:
+
+- **A `<textarea>` in a form with exactly one button:** that button sends, and Caliper prints `sending with <button> "Send", the only button in the <textarea>'s form (Enter in a <textarea> adds a line break) — to use another: …`.
+- **Otherwise:** Enter. If Enter in a `<textarea>` only added a line break (its text is then your prompt and a new line, the browser's own Enter, so the page didn't send), Caliper stops at once with `Enter added a line break to the <textarea> …` and lists every visible button with the flag that picks it: `--measure "^Send$"` for a named one, `--measure-selector "button.icon-send"` for one with no name.
+
+**When a button name matches nothing** (`--step`, `--measure`), the error lists the named buttons it saw and the ones without a name, each with a selector that matches only it: `Buttons without a name (a name can't match them; use a selector): <button> --step-selector "button.toggle-btn"`. Selectors are the first unique one of `#id`, `tag.class`, `tag[name="…"]`, `tag[aria-label="…"]`, `tag[placeholder="…"]`, else an `:nth-of-type` path from `<body>`; a path breaks if the page's structure changes, so prefer giving the element an id. Tested with `npm run test:compose` (a toggle with hidden text like Google's example chat app, a textarea where Enter adds a line, two text boxes). The click or keydown starts the timer. `--output` can be the message list: Caliper watches it for added nodes and text changes.
 
 - **Only new visible text counts.** An added node or text edit counts only if it shows text. An image loading (an avatar swapping in), an empty element, an attribute change, or text hidden by CSS (a hover tooltip) never counts, before or after the reply starts.
 - **Your own message doesn't count.** Any added node whose text contains the prompt is treated as your message bubble and ignored whole, with anything else in it (an avatar fallback such as "Me", your name). Known limit: if your page re-renders the whole message list as one new node when the reply arrives, that node contains your prompt too, so it isn't counted; the run then reports no output change after the AI request's first body byte instead of a number.

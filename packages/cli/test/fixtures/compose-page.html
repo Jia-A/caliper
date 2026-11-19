@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Compose fixture</title>
+<style>.tip { visibility: hidden; }</style>
+</head>
+<body>
+<!-- What the two stranger-test apps needed (caliper-test-3 A1, A2, and App 1's textarea):
+     - a streaming toggle whose only text is visibility:hidden, so it has no accessible name and
+       can't be clicked as a --step by name (Google's example chat app);
+     - a <textarea> with no Enter handler: Enter adds a new line, only the Send button sends
+       (the AI SDK template). The reply streams into #messages, "[stream] …" with the toggle on,
+       "[whole] …" with it off.
+     ?form=0  no form: the textarea, a "Send" button and an icon-only button, both of which send
+     ?boxes=2 also a search box, so there are two text boxes -->
+<header><button class="toggle-btn" type="button"><span class="tip">Streaming response Off</span></button></header>
+<div id="messages"></div>
+<div id="slot"></div>
+<script>
+  const params = new URLSearchParams(location.search);
+  const slot = document.getElementById("slot");
+  let streaming = false;
+  document.querySelector(".toggle-btn").addEventListener("click", () => (streaming = !streaming));
+  slot.innerHTML = params.get("form") === "0"
+    ? `<textarea name="chat" rows="2"></textarea><button type="button" class="send">Send</button><button type="button" class="icon-send"><svg width="10" height="10"><path d="M0 0L10 5L0 10z"/></svg></button>`
+    : `<form id="composer"><textarea name="chat" rows="2"></textarea><button type="submit">Send</button></form>`;
+  if (params.get("boxes") === "2") slot.insertAdjacentHTML("afterbegin", `<input type="search" id="find" placeholder="Search">`);
+  const box = slot.querySelector("textarea");
+
+  async function send() {
+    const prompt = box.value.trim();
+    if (!prompt) return;
+    box.value = "";
+    const reply = document.createElement("div");
+    document.getElementById("messages").append(reply);
+    const res = await fetch("/chat/stream", { method: "POST", body: JSON.stringify({ prompt }) });
+    const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+    let text = streaming ? "[stream] " : "[whole] ";
+    let buffer = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += value;
+      const events = buffer.split("\n\n");
+      buffer = events.pop();
+      for (const e of events) {
+        const data = e.replace(/^data: /, "");
+        if (data !== "[DONE]") text += JSON.parse(data).t;
+        reply.textContent = text;
+      }
+    }
+  }
+  slot.querySelector("form")?.addEventListener("submit", (e) => (e.preventDefault(), send()));
+  for (const b of slot.querySelectorAll("button.send, button.icon-send")) b.addEventListener("click", send);
+</script>
+</body>
+</html>

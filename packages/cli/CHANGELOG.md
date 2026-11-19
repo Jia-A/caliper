@@ -20,6 +20,10 @@ Fixes from a test by someone new to Caliper, on two apps they didn't write (an A
 
 ### Added
 
+- **`--step-selector <css>`:** a step clicked by CSS selector, for a button with no name. Google's example chat app turns streaming on with a toggle whose only text is `visibility: hidden`, so `--step` couldn't click it at all. Exactly one match, printed; runs in order with `--step`. Tested with `npm run test:compose`.
+- **Unnamed buttons are listed with a selector.** When a button name matches nothing, the error now adds `Buttons without a name (a name can't match them; use a selector): <button> --step-selector "button.toggle-btn"`, and never says `Buttons I saw: none` when the page has buttons. Tested with `npm run test:compose` and `npm run test:loadhints`.
+- **What to type into and what to click, picked when there's one, listed when there are several.** `--prompt` without `--input` uses the page's only visible text box and prints it, or lists several as `--input` flags. A `<textarea>` with no `--measure` sends with its form's only button, printed with the flags to change it. Otherwise Enter, and if Enter only added a line break to the `<textarea>`, Caliper stops right away and lists every button with the flag that picks it (0.6.0 waited for `--timeout`, 60 s by default). Tested with `npm run test:compose`.
+- **`--help`** describes these, says correctly that 2 or more `--request` matches make a run "not identified" (it said "the first match is used"), describes the first word as the first new visible text, and ends with one example.
 - **README:** `npx caliper-ai audit …` works without a global install, and the Quick start says to skip `caliper login` and `--auth` for an app with no login.
 - **`first word shows`:** each run prints the text it timed as the first word, and the report's "Before the reply" table (now shown for every audit) has a "First word shows" column, so you can check it's the reply. Tested with `npm run test:firstword`.
 

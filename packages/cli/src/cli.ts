@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { parseArgs, type ParseArgsConfig } from "node:util";
 import { CliError, messageOf } from "./errors.js";
+import type { Measure } from "./types.js";
 
 const DEFAULT_REPORT = "caliper-report.html";
 
@@ -9,15 +10,15 @@ const USAGE = `Usage:
       Open a browser, log in by hand, save the session.
 
   caliper audit <url> (--measure <text> | --measure-selector <css>) --output <selector>
-  caliper audit <url> --input <selector> --prompt <text> --output <selector>
+  caliper audit <url> --prompt <text> --output <selector> [--input <selector>]
       [--measure <text> | --measure-selector <css>]
-      [--step <text>]... [--runs 3] [--headed] [--auth <path>] [--timeout 60000]
+      [--step <text> | --step-selector <css>]... [--runs 3] [--headed] [--auth <path>] [--timeout 60000]
       [--request <"METHOD /path" | regex>] [--report <path> | --no-report] [--settle-ms 2000] [--stop <text>] [--double]
       [--canary] [--canary-input <selector>] [--csp] [--server-timings <origin> [--server-runs 3]]
       Measure time from clicking the --measure button to first painted output,
       and break it down using the AI request (auto-detected, or --request: "POST
-      /generate" for that method and exact path, or a regex on the URL; the first
-      match is used, and a run where none matches is reported as not identified).
+      /generate" for that method and exact path, or a regex on the URL; a run where
+      none matches, or 2 or more do, is reported as not identified).
       If the first run's pick is unclear (under 95% of the output changes from its
       first body byte, or another request's bytes within 250 ms before 50% or
       more of them: Caliper's own thresholds), Caliper lists the candidates and,
@@ -40,11 +41,16 @@ const USAGE = `Usage:
       it, paste the printed line into content the AI reads.
       --csp reads the page's Content-Security-Policy and reports where images may
       load from (on by default with --canary).
-      --input and --prompt time a chat-style page instead: Caliper types --prompt
-      into --input and sends it with the --measure button, or Enter without one.
-      --output may then be the message list; the first word is its first change
-      after the AI request's first byte, so your own message and placeholders like
-      "Thinking…" don't count. Not yet combinable with --stop, --double or --canary.
+      --prompt times a chat-style page instead: Caliper types it into --input (or,
+      without --input, the page's only visible text box, which it names; with
+      several it lists them) and sends it with the --measure button. Without one:
+      a <textarea>'s only form button if it has exactly one (named), else Enter; if
+      Enter only adds a line break to a <textarea>, Caliper stops and lists the
+      buttons with the flags to pick one.
+      --output may then be the message list; the first word is its first new
+      visible text after the AI request's first byte, so your own message (an
+      avatar or name in it included), images, hidden text and placeholders like
+      "Thinking…" don't count. Each run prints what it timed ("first word shows"). Not yet combinable with --stop, --double or --canary.
       --server-timings <origin> (with CALIPER_TOKEN set) adds --server-runs marked
       visits (default 3, 1 to 10) after the runs: in each, the first request after
       the click that matches the AI request the runs picked (method, origin, path;
@@ -64,7 +70,15 @@ const USAGE = `Usage:
       chat-style runs (--input/--prompt) only. It isn't tested with --stop, --double or
       --canary yet. Not together with --measure.
 
-  --step, --measure and --stop are button names, matched as case-insensitive regexes.`;
+  --step-selector clicks the one element a CSS selector matches, as a step, for a
+      button with no name (no text or aria-label); --step and --step-selector run
+      in the order given. When a button name matches nothing, the error lists the
+      buttons it saw, and those without a name with a selector for each.
+
+  --step, --measure and --stop are button names, matched as case-insensitive regexes.
+
+Example (a chat page on your machine; prints what it typed into and clicked):
+  caliper audit http://localhost:3000 --prompt "hello" --output "#messages" --runs 2`;
 
 type OptionsConfig = NonNullable<ParseArgsConfig["options"]>;
 
@@ -76,7 +90,8 @@ type Values<O extends OptionsConfig> = ReturnType<
 interface Command<O extends OptionsConfig> {
   options: O;
   optionalValues?: Record<string, string>;
-  run(args: { url: string; values: Values<O> }): Promise<void>;
+  // order: every option as given, in command-line order (for --step / --step-selector).
+  run(args: { url: string; values: Values<O>; order: { name: string; value: string | undefined }[] }): Promise<void>;
 }
 
 // Keeps each command's option types precise instead of widening them to one shared shape.
@@ -101,6 +116,7 @@ const COMMANDS = {
       "measure-selector": { type: "string" },
       output: { type: "string" },
       step: { type: "string", multiple: true, default: [] },
+      "step-selector": { type: "string", multiple: true, default: [] },
       runs: { type: "string", default: "3" },
       headed: { type: "boolean", default: false },
       auth: { type: "string" },
@@ -120,21 +136,21 @@ const COMMANDS = {
       "server-runs": { type: "string" },
     },
     optionalValues: { report: DEFAULT_REPORT },
-    async run({ url, values }) {
+    async run({ url, values, order }) {
       // Every audit that stops ends by saying there's no report (unless --no-report), from the
       // flag checks on: a missing --auth file, a bad --stop, no Chromium, an error mid-run.
       try {
         if (values.measure !== undefined && values["measure-selector"] !== undefined) {
           throw new CliError("audit: pass --measure <text> or --measure-selector <css>, not both.");
         }
-        if (!values.measure && !values["measure-selector"] && !values.input) {
-          throw new CliError("audit: --measure <text> or --measure-selector <css> (or --input <selector>) is required.");
+        const chatRun = values.input !== undefined || values.prompt !== undefined;
+        if (!values.measure && !values["measure-selector"] && !chatRun) {
+          throw new CliError("audit: --measure <text> or --measure-selector <css> (or --prompt <text> for a chat-style page) is required.");
         }
         if (!values.output) throw new CliError("audit: --output <selector> is required.");
         if (values["no-report"] && values.report !== undefined) throw new CliError("audit: pass --report <path> or --no-report, not both.");
         if (values.input && values.prompt === undefined) throw new CliError("audit: --input needs --prompt <text>.");
-        if (values.prompt !== undefined && !values.input) throw new CliError("audit: --prompt needs --input <selector>.");
-        if (values.input) {
+        if (chatRun) {
           const clash = (["stop", "double", "canary", "canary-input"] as const).find((f) => values[f]);
           if (clash) throw new CliError(`audit: --${clash} can't be combined with --input yet.`);
         }
@@ -154,7 +170,8 @@ const COMMANDS = {
           url,
           measure: values.measure ? { name: values.measure } : values["measure-selector"] ? { selector: values["measure-selector"] } : undefined,
           output: values.output,
-          steps: values.step,
+          // --step and --step-selector, clicked in the order given.
+          steps: order.flatMap((o): Measure[] => (o.name === "step" ? [{ name: o.value! }] : o.name === "step-selector" ? [{ selector: o.value! }] : [])),
           runs: positiveInt(values.runs, "--runs"),
           headed: values.headed,
           auth: values.auth,
@@ -167,7 +184,7 @@ const COMMANDS = {
           canary: values.canary,
           canaryInput: values["canary-input"],
           csp: values.csp,
-          chat: values.input ? { input: values.input, prompt: values.prompt! } : undefined,
+          chat: chatRun ? { input: values.input, prompt: values.prompt! } : undefined,
           serverTimings,
         });
       } catch (err) {
@@ -231,6 +248,7 @@ async function runCommand<O extends OptionsConfig>(name: string, command: Comman
       options: { ...command.options, help: { type: "boolean", short: "h" } },
       allowPositionals: true,
       strict: true,
+      tokens: true,
     });
   } catch (err) {
     throw new CliError(`${name}: ${messageOf(err)}\n\n${USAGE}`);
@@ -247,7 +265,8 @@ async function runCommand<O extends OptionsConfig>(name: string, command: Comman
     throw new CliError(`${name}: expected exactly one <url>, got ${positionals.length}.\n\n${USAGE}`);
   }
 
-  await command.run({ url: positionals[0]!, values: parsed.values as Values<O> });
+  const order = (parsed.tokens ?? []).flatMap((t) => (t.kind === "option" ? [{ name: t.name, value: t.value }] : []));
+  await command.run({ url: positionals[0]!, values: parsed.values as Values<O>, order });
 }
 
 async function main(argv: string[]): Promise<void> {

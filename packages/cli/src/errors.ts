@@ -17,7 +17,13 @@ export class PageLoadError extends CliError {
 // A --step or --measure button that never appeared, with the named buttons that were on the
 // page (null when they couldn't be read). audit() adds things to check before it's printed.
 export class ButtonNotFoundError extends CliError {
-  constructor(message: string, readonly pattern: RegExp, readonly seen: string[] | null) {
+  constructor(
+    message: string,
+    readonly pattern: RegExp,
+    readonly seen: string[] | null,
+    readonly unnamed: { tag: string; selector: string }[] = [], // visible buttons with no name, each with a selector that matches only it
+    readonly selectorFlag = "--measure-selector" // the flag that clicks one of those
+  ) {
     super(message);
     this.name = "ButtonNotFoundError";
   }

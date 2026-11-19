@@ -69,7 +69,7 @@ const DONE_CAP_MS = 60_000;
 
 /** A chat-style trigger: type the prompt into the input, then send it. */
 export interface ChatOptions {
-  input: string;
+  input: string | undefined; // undefined: the page's only text box, found on the first run and kept here
   prompt: string;
 }
 
@@ -77,7 +77,7 @@ export interface AuditOptions {
   url: string;
   measure: Measure | undefined; // required without chat (cli.ts)
   output: string;
-  steps: string[];
+  steps: Measure[]; // --step (a button name) and --step-selector (one CSS match), in the order given
   runs: number;
   headed: boolean;
   auth?: string; // --auth; undefined: no saved session
@@ -112,7 +112,7 @@ interface MeasureOptions {
   url: string;
   measure: Measure | undefined; // required without chat (cli.ts)
   output: string;
-  steps: string[];
+  steps: Measure[]; // --step (a button name) and --step-selector (one CSS match), in the order given
   timeout: number;
   settleMs: number;
   request: RequestMatcher | null; // --request, or the request the developer chose when asked
@@ -369,9 +369,10 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
       const html = renderReport({
         url,
         measure,
-        chat: chat ?? null,
+        // No --input: the text box the first run picked (none if no run got that far).
+        chat: chat ? { input: chat.input ?? "(no text box picked: no run got that far)", prompt: chat.prompt } : null,
         output,
-        steps,
+        steps: steps.map((s) => ("name" in s ? s.name : `${s.selector} (selector)`)),
         startedAt,
         summary,
         runs: loaded.map(({ run, result, parts }) => ({ run, total: result.ms, ...parts, reply: reportReply(result) })),
@@ -1064,13 +1065,20 @@ async function markedVisit(
 
 // Loads the page, clicks the --step buttons, types --prompt into --input and installs the chat
 // watcher. Returns the send: a click on the --measure button if given, else Enter in --input.
-async function prepareChatRun(page: Page, { url, measure, output, steps, timeout }: MeasureOptions, { input, prompt }: ChatOptions): Promise<() => Promise<void>> {
+async function prepareChatRun(page: Page, { url, measure, output, steps, timeout }: MeasureOptions, chat: ChatOptions): Promise<() => Promise<void>> {
   await loadAndStep(page, url, steps, timeout);
 
-  const button = measure ? await findMeasure(page, measure, timeout) : null;
+  const { prompt } = chat;
+  // No --input: the page's only text box, said once; several or none is an error listing them.
+  if (chat.input === undefined) chat.input = await pickTextBox(page);
+  const input = chat.input;
   await checkSelector(page, output, "--output");
   await checkSelector(page, input, "--input");
   const field = page.locator(input);
+  // No --measure and a <textarea>: Enter there adds a line break unless the page handles it. The
+  // form's only button is the send; else Enter, checked right after it's pressed.
+  const isTextarea = await field.evaluate((el) => el.tagName === "TEXTAREA").catch(() => false);
+  const button = measure ? await findMeasure(page, measure, timeout) : isTextarea ? await formSendButton(page, input) : null;
   try {
     // fill() focuses and types without a click or Enter, so the watcher still waits for the send.
     await field.fill(prompt);
@@ -1144,7 +1152,20 @@ async function prepareChatRun(page: Page, { url, measure, output, steps, timeout
 
   // A full Resource Timing buffer (default 250 entries) would drop the AI request's entry.
   await page.evaluate(() => performance.setResourceTimingBufferSize(100_000));
-  return button ? () => button.click() : () => field.press("Enter");
+  if (button) return () => button.click();
+  return async () => {
+    await field.press("Enter");
+    // The browser's own Enter in a <textarea>: a line break after the prompt. A page that sends
+    // on Enter clears the box or stops that default, so this is the page not sending.
+    if (isTextarea && (await field.inputValue().catch(() => null)) === `${prompt}\n`) {
+      throw new CliError(
+        [
+          "Enter added a line break to the <textarea> (its text is now your prompt and a new line), so the page didn't take it as a send.",
+          ...(await buttonChoices(page, "--measure")),
+        ].join("\n")
+      );
+    }
+  };
 }
 
 // When a request's first byte arrived: its first body chunk on the wire, else its response headers.
@@ -1246,7 +1267,7 @@ async function prepareRun(page: Page, { url, measure, output, steps, timeout, se
   return target;
 }
 
-async function loadAndStep(page: Page, url: string, steps: string[], timeout: number): Promise<void> {
+async function loadAndStep(page: Page, url: string, steps: Measure[], timeout: number): Promise<void> {
   try {
     await page.goto(url);
   } catch (err) {
@@ -1255,8 +1276,8 @@ async function loadAndStep(page: Page, url: string, steps: string[], timeout: nu
   }
 
   for (const step of steps) {
-    const button = await findButton(page, step, "--step", timeout);
-    await button.click();
+    const target = "name" in step ? await findButton(page, step.name, "--step", timeout) : await findBySelector(page, step.selector, "--step-selector", timeout);
+    await target.click();
   }
 }
 
@@ -2014,9 +2035,13 @@ const measureFlag = (m: Measure) => ("name" in m ? `--measure "${m.name}"` : `--
 // printed, since it may have no name to recognise it by.
 async function findMeasure(page: Page, measure: Measure, timeout: number): Promise<Locator> {
   if ("name" in measure) return findButton(page, measure.name, "--measure", timeout);
+  return findBySelector(page, measure.selector, "--measure-selector", timeout);
+}
 
-  const { selector } = measure;
-  await checkSelector(page, selector, "--measure-selector");
+// The one element a --measure-selector or --step-selector matches, printed (a step's line says
+// which flag); 0 or 2+ matches is an error naming the count.
+async function findBySelector(page: Page, selector: string, flag: string, timeout: number): Promise<Locator> {
+  await checkSelector(page, selector, flag);
   const target = page.locator(`css=${selector}`);
   try {
     await target.first().waitFor({ state: "attached", timeout });
@@ -2026,7 +2051,7 @@ async function findMeasure(page: Page, measure: Measure, timeout: number): Promi
   const count = await target.count();
   if (count !== 1) {
     throw new CliError(
-      `--measure-selector "${selector}" matches ${count} elements${count === 0 ? ` (waited ${timeout} ms)` : ""}; it must match exactly one.`
+      `${flag} "${selector}" matches ${count} elements${count === 0 ? ` (waited ${timeout} ms)` : ""}; it must match exactly one.`
     );
   }
 
@@ -2038,7 +2063,7 @@ async function findMeasure(page: Page, measure: Measure, timeout: number): Promi
   }));
   const clip = (s: string) => (s.length > 60 ? `${s.slice(0, 59)}…` : s);
   const name = el.label ? `aria-label ${JSON.stringify(clip(el.label))}` : el.text ? JSON.stringify(clip(el.text)) : "(no text or aria-label)";
-  console.log(`clicking <${el.tag}${el.id ? ` id="${el.id}"` : ""}> ${name}`);
+  console.log(`clicking <${el.tag}${el.id ? ` id="${el.id}"` : ""}> ${name}${flag === "--step-selector" ? ` for ${flag} "${selector}"` : ""}`);
   return target;
 }
 
@@ -2055,7 +2080,8 @@ async function findButton(page: Page, text: string, flag: string, timeout: numbe
     await button.waitFor({ timeout });
   } catch (err) {
     if (err instanceof Error && err.name === "TimeoutError") {
-      throw new ButtonNotFoundError(`No button matching ${name} (${flag}) appeared within ${timeout} ms.`, name, await seenButtons(page));
+      const unnamed = (await pageButtons(page).catch(() => [])).filter((b) => b.name === null).map((b) => ({ tag: b.tag, selector: b.selector }));
+      throw new ButtonNotFoundError(`No button matching ${name} (${flag}) appeared within ${timeout} ms.`, name, await seenButtons(page), unnamed, flag === "--step" ? "--step-selector" : "--measure-selector");
     }
     if (/strict mode violation/.test(messageOf(err))) {
       const count = await button.count();
@@ -2066,6 +2092,99 @@ async function findButton(page: Page, text: string, flag: string, timeout: numbe
     throw err;
   }
   return button;
+}
+
+// Visible elements of one kind, each with a CSS selector checked to match only it: the first
+// of #id, tag.class, tag[name="…"], tag[aria-label="…"] that's unique, else a path of
+// :nth-of-type from <body>. Runs in the page.
+async function pageCandidates(page: Page, kind: "button" | "textbox", within?: string): Promise<{ tag: string; selector: string }[]> {
+  return page.evaluate(
+    ([kind, within]) => {
+      const one = (sel: string) => {
+        try {
+          return document.querySelectorAll(sel).length === 1;
+        } catch {
+          return false;
+        }
+      };
+      const cssFor = (el: Element): string => {
+        const tag = el.tagName.toLowerCase();
+        if (el.id && one(`#${CSS.escape(el.id)}`)) return `#${CSS.escape(el.id)}`;
+        for (const c of el.classList) if (one(`${tag}.${CSS.escape(c)}`)) return `${tag}.${CSS.escape(c)}`;
+        for (const attr of ["name", "aria-label", "placeholder"]) {
+          const v = el.getAttribute(attr);
+          if (v && one(`${tag}[${attr}=${JSON.stringify(v)}]`)) return `${tag}[${attr}=${JSON.stringify(v)}]`;
+        }
+        const parts: string[] = [];
+        for (let e: Element | null = el; e && e !== document.body; e = e.parentElement) {
+          const same = [...(e.parentElement?.children ?? [])].filter((x) => x.tagName === e!.tagName);
+          parts.unshift(`${e.tagName.toLowerCase()}:nth-of-type(${same.indexOf(e) + 1})`);
+          if (one(`body > ${parts.join(" > ")}`)) return `body > ${parts.join(" > ")}`;
+        }
+        return `body > ${parts.join(" > ")}`;
+      };
+      const query =
+        kind === "button"
+          ? 'button, [role="button"], input[type="button"], input[type="submit"]'
+          : 'textarea, input:not([type]), input[type="text"], input[type="search"], input[type="email"], input[type="url"], [contenteditable=""], [contenteditable="true"]';
+      const root = within ? (document.querySelector(within)?.closest("form") ?? null) : document;
+      if (!root) return [];
+      return [...root.querySelectorAll(query)]
+        .filter((el) => el.checkVisibility() && !(el as HTMLInputElement).disabled && !(el as HTMLInputElement).readOnly)
+        .map((el) => ({ tag: el.tagName.toLowerCase(), selector: cssFor(el) }))
+        .filter((c) => one(c.selector));
+    },
+    [kind, within ?? null] as const
+  );
+}
+
+// The visible buttons, with their accessible names as Playwright's name matching sees them (the
+// aria snapshot of each); null when a button has none.
+async function pageButtons(page: Page, within?: string): Promise<{ tag: string; selector: string; name: string | null }[]> {
+  const found = await pageCandidates(page, "button", within);
+  return Promise.all(
+    found.slice(0, 20).map(async (b) => {
+      const snap = await page.locator(`css=${b.selector}`).ariaSnapshot({ timeout: 2000 }).catch(() => "");
+      const m = snap.split("\n")[0]!.match(/^- \w+ "((?:[^"\\]|\\.)*)"/);
+      return { ...b, name: m ? JSON.parse(`"${m[1]}"`) : null };
+    })
+  );
+}
+
+const regexFor = (name: string) => `^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`;
+const shellQuote = (s: string) => JSON.stringify(s);
+
+// Every visible button with a flag that picks only it, for an error that says what to type.
+async function buttonChoices(page: Page, flag: "--measure" | "--step"): Promise<string[]> {
+  const buttons = await pageButtons(page).catch(() => []);
+  if (!buttons.length) return ["No visible buttons on the page."];
+  const selectorFlag = flag === "--step" ? "--step-selector" : "--measure-selector";
+  return [
+    `Buttons on the page; pass one:`,
+    ...buttons.map((b) => (b.name !== null ? `  ${flag} ${shellQuote(regexFor(b.name))}   (<${b.tag}> named ${JSON.stringify(b.name)})` : `  ${selectorFlag} ${shellQuote(b.selector)}   (<${b.tag}> with no name)`)),
+  ];
+}
+
+// No --input: the only visible text box, said; else an error listing them, or saying there's none.
+async function pickTextBox(page: Page): Promise<string> {
+  const boxes = await pageCandidates(page, "textbox");
+  if (boxes.length === 1) {
+    console.log(`typing into <${boxes[0]!.tag}> ${boxes[0]!.selector}, the only text box on the page — to use another: --input "<css>"`);
+    return boxes[0]!.selector;
+  }
+  if (boxes.length === 0) throw new CliError('No visible text box (textarea, text input or contenteditable) on the page to type --prompt into. Pass --input "<css>" for the field your page uses.');
+  throw new CliError(`${boxes.length} text boxes on the page; pick one: ${boxes.map((b) => `--input ${shellQuote(b.selector)} (<${b.tag}>)`).join(" · ")}`);
+}
+
+// The send for a <textarea> without --measure: the only button in its form, said with the flags
+// to change it; null (Enter) when there's no form or it has 0 or 2+ buttons.
+async function formSendButton(page: Page, input: string): Promise<Locator | null> {
+  const buttons = await pageButtons(page, input).catch(() => []);
+  if (buttons.length !== 1) return null;
+  const b = buttons[0]!;
+  const shown = b.name !== null ? `<${b.tag}> ${JSON.stringify(b.name)}` : `<${b.tag}> ${b.selector}`;
+  console.log(`sending with ${shown}, the only button in the <textarea>'s form (Enter in a <textarea> adds a line break) — to use another: --measure "<name>" or --measure-selector "<css>"`);
+  return page.locator(`css=${b.selector}`);
 }
 
 // The named buttons on the page now, from the same accessibility tree getByRole searches; null
@@ -2091,7 +2210,7 @@ function withButtonHints(err: ButtonNotFoundError, url: string, auth: string | u
     }
     login = { file: auth, expired: expiredLoginCookies(state, url, Date.now()) };
   }
-  const lines = buttonHints({ seen: err.seen, pattern: err.pattern, login, url });
+  const lines = buttonHints({ seen: err.seen, unnamed: err.unnamed, selectorFlag: err.selectorFlag, pattern: err.pattern, login, url });
   return new CliError([err.message, ...(lines.length ? ["Things to check:", ...lines.map((l) => `  - ${l}`)] : [])].join("\n"));
 }
 
