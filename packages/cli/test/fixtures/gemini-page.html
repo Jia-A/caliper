@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Gemini example fixture</title></head>
+<body>
+<!-- The DOM sequence of Google's example chat app (client-react ConversationDisplayArea.js and
+     App.js handleStreamingChat), without React: Enter in input.chat_msg_input hides the welcome
+     area, adds your bubble (an <img> and your message), then fetches /gemini/stream (plain text,
+     like its Express route; ?hang=1: /gemini/hang, which never answers) and shows .tempResponse (an <img>, then <p><p>answer</p></p> filled
+     chunk by chunk); at the end the answer moves into a "model" bubble. -->
+<div class="chat-area">
+  <div class="welcome-area"><p class="welcome-1">Hi,</p><p class="welcome-2">How can I help you today?</p></div>
+  <span id="checkpoint"></span>
+</div>
+<input class="chat_msg_input" type="text" name="chat" placeholder="Enter a message.">
+<script>
+  const area = document.querySelector(".chat-area");
+  const checkpoint = document.getElementById("checkpoint");
+  const input = document.querySelector(".chat_msg_input");
+  const icon = "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==";
+  // <p><p>text</p></p> built with createElement, as React does (innerHTML would un-nest them).
+  const nested = (text) => {
+    const outer = document.createElement("p");
+    const inner = document.createElement("p");
+    inner.textContent = text;
+    outer.append(inner);
+    return outer;
+  };
+  const bubble = (role, text) => {
+    const div = document.createElement("div");
+    div.className = role;
+    div.innerHTML = `<img alt="Icon" src="${icon}">`;
+    div.append(nested(text));
+    return div;
+  };
+  input.addEventListener("keydown", async (e) => {
+    if (e.key !== "Enter" || !input.value) return;
+    const prompt = input.value;
+    input.value = "";
+    area.querySelector(".welcome-area").replaceWith(Object.assign(document.createElement("div"), { className: "welcome-area", style: "display: none" }));
+    area.insertBefore(bubble("user", prompt), checkpoint);
+    const res = await fetch(new URLSearchParams(location.search).has("hang") ? "/gemini/hang" : "/gemini/stream", { method: "POST", body: JSON.stringify({ chat: prompt, history: [] }) });
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    const temp = document.createElement("div");
+    temp.className = "tempResponse";
+    temp.innerHTML = `<img src="${icon}" alt="Icon">`;
+    area.insertBefore(temp, checkpoint);
+    let answer = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      answer += decoder.decode(value, { stream: true });
+      const p = temp.querySelector("p p");
+      if (p) p.textContent = answer;
+      else temp.append(nested(answer));
+    }
+    temp.remove();
+    area.insertBefore(bubble("model", answer), checkpoint);
+  });
+</script>
+</body>
+</html>

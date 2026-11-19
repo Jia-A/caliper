@@ -418,7 +418,7 @@ async function measureOnce(page: Page, options: MeasureOptions): Promise<RunResu
     await target.click();
 
     // 3. Wait for the in-page watcher to see the output change.
-    const { clickAt, firstPaintAt } = await waitForFirstWord(page, options);
+    const { clickAt, firstPaintAt } = await waitForFirstWord(page, options, wire);
 
     // 4. Watch the whole reply, then pick the AI request and time it.
     return await finishRun(page, options, { clickAt, firstChangeAt: firstPaintAt, network, wire, deadline, chat: false });
@@ -440,7 +440,7 @@ async function measureChatOnce(page: Page, options: MeasureOptions, chat: ChatOp
     const deadline = Date.now() + options.timeout; // --timeout counts from the send
     await send();
     const clickAt = await pageWait(page, () => window.__caliperSentAt, options.timeout + STALL_GRACE_MS, "the send to register");
-    const firstChangeAt = await waitForChange(page, options, clickAt);
+    const firstChangeAt = await waitForChange(page, options, clickAt, wire);
     return await finishRun(page, options, { clickAt, firstChangeAt, network, wire, deadline, chat: true });
   } finally {
     await wire.stop();
@@ -479,11 +479,11 @@ async function pageWait<T>(page: Page, fn: () => T | Promise<T>, ms: number, wha
 }
 
 // The chat watcher's first counted change after the send.
-async function waitForChange(page: Page, { output, timeout }: MeasureOptions, clickAt: number): Promise<number> {
+async function waitForChange(page: Page, { output, timeout }: MeasureOptions, clickAt: number, wire: Wire): Promise<number> {
   for (;;) {
     const [now, first] = await page.evaluate(() => [performance.now(), window.__caliperChanges[0]?.at ?? null] as const);
     if (first !== null) return first;
-    if (now - clickAt > timeout) throw new CliError(`Timed out after ${timeout} ms: "${output}" never changed after sending.`);
+    if (now - clickAt > timeout) throw new CliError(`Timed out after ${timeout} ms: "${output}" never changed after sending.${inFlightLines(wire, clickAt, now)}`);
     await sleep(OBSERVE_POLL_MS);
   }
 }
@@ -1023,7 +1023,8 @@ async function markedVisit(
     loadFailed = err instanceof PageLoadError;
     error = err instanceof FailedRequestError ? `AI request failed: ${err.message}`
       : err instanceof UnidentifiedRequestError ? `AI request not identified: ${err.message}`
-      : messageOf(err).split("\n")[0]!.trim();
+      // The visit's line already says what the stamped request got: no request list again.
+      : messageOf(err).split("\n")[0]!.replace(/ Requests since the (click|send): .*$/, "").trim();
   } finally {
     await page.unrouteAll({ behavior: "ignoreErrors" });
     await page.close();
@@ -1166,6 +1167,25 @@ async function prepareChatRun(page: Page, { url, measure, output, steps, timeout
   };
 }
 
+// For a timeout with no output change: every request since the trigger and where it stands at
+// now (page clock), so "never changed" says whether the AI request was still waiting.
+function inFlightLines(wire: Wire, since: number, now: number): string {
+  const seen = wire.requests().filter((w) => w.sentAt >= since - 5 && !w.url.startsWith("data:"));
+  if (seen.length === 0) return " No request was sent after it.";
+  const state = (w: WireRequest) =>
+    w.failedAt !== null ? `failed (${w.errorText ?? "no reason given"})`
+    : w.status === null ? `still open, no response (waiting ${Math.round(now - w.sentAt)} ms)`
+    : w.finishedAt === null ? `${w.status}, still open (${w.bodyBytes} body bytes so far)`
+    : `${w.status}, finished`;
+  const shown = seen.slice(0, 12).map((w) => `${w.method} ${w.url} → ${state(w)}`);
+  const silent = seen.filter((w) => w.failedAt === null && w.status === null);
+  const hint =
+    silent.length === 1 ? " If that's your AI request, it never answered: check its server's log."
+    : silent.length > 1 ? " If one of those still open is your AI request, it never answered: check its server's log."
+    : "";
+  return ` Requests since the send: ${shown.join(", ")}${seen.length > 12 ? `, and ${seen.length - 12} more` : ""}.${hint}`;
+}
+
 // When a request's first byte arrived: its first body chunk on the wire, else its response headers.
 function replyFirstByte(r: RequestTiming, wire: Wire): number | null {
   return wire.match(r)?.chunks[0]?.at ?? r.firstByte;
@@ -1291,15 +1311,17 @@ async function checkSelector(page: Page, selector: string, flag: string): Promis
   if (!selectorOk) throw new CliError(`${flag} "${selector}" is not a valid CSS selector.`);
 }
 
-async function waitForFirstWord(page: Page, { measure, output, timeout }: MeasureOptions): Promise<PageTiming> {
+// wire: the run's capture (started just before the click), to list its requests on a timeout.
+async function waitForFirstWord(page: Page, { measure, output, timeout }: MeasureOptions, wire?: Wire): Promise<PageTiming> {
   try {
     return await pageWait(page, () => window.__caliperTiming, timeout + STALL_GRACE_MS, "the first output change");
   } catch (err) {
     if (!/No output within/.test(messageOf(err))) throw err;
-    const exists = await page.evaluate((sel) => !!document.querySelector(sel), output);
+    const [exists, now] = await page.evaluate((sel) => [!!document.querySelector(sel), performance.now()] as const, output);
+    const requests = wire ? inFlightLines(wire, -Infinity, now).replace("since the send", "since the click") : "";
     throw new CliError(
       exists
-        ? `Timed out after ${timeout} ms: "${output}" never changed after clicking ${measureFlag(measure!)}.`
+        ? `Timed out after ${timeout} ms: "${output}" never changed after clicking ${measureFlag(measure!)}.${requests}`
         : `Timed out after ${timeout} ms: no element matches --output "${output}".`
     );
   }
@@ -1821,6 +1843,8 @@ interface WireRequest {
   failedAt: number | null;
   type: string; // Chrome's resource type: "Fetch", "XHR", "Image", "Document", …
   mimeType: string | null; // the response's, once headers arrived
+  status: number | null; // the response's HTTP status, once headers arrived
+  errorText: string | null; // Chrome's reason when it failed (net::ERR_…)
 }
 
 // An image is never the AI request: its bytes arriving just before an output change (an avatar
@@ -1853,11 +1877,16 @@ async function startWireCapture(page: Page, timeOrigin: number) {
       failedAt: null,
       type: e.type ?? "Other",
       mimeType: null,
+      status: null,
+      errorText: null,
     });
   });
   cdp.on("Network.responseReceived", (e) => {
     const w = wire.get(e.requestId);
-    if (w) w.mimeType = e.response.mimeType || null;
+    if (w) {
+      w.mimeType = e.response.mimeType || null;
+      w.status = e.response.status;
+    }
   });
   cdp.on("Network.dataReceived", (e) => {
     const w = wire.get(e.requestId);
@@ -1871,7 +1900,10 @@ async function startWireCapture(page: Page, timeOrigin: number) {
   });
   cdp.on("Network.loadingFailed", (e) => {
     const w = wire.get(e.requestId);
-    if (w) w.failedAt = toPage(e.timestamp);
+    if (w) {
+      w.failedAt = toPage(e.timestamp);
+      w.errorText = e.errorText || null;
+    }
   });
   await cdp.send("Network.enable");
 

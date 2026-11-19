@@ -57,6 +57,7 @@
 //   /failed/user-icon.png    a 1×1 PNG (your avatar)
 //   /failed/stream           503, {"error":"This model is currently experiencing high demand"} (POST)
 // For picking what to type into and click (A1, A2, textarea send): /compose (compose-page.html)
+// For the Gemini example chat app's DOM sequence: /gemini (gemini-page.html), /gemini/stream (plain text)
 // For a page that renders no frames (requestAnimationFrame never calls back): /norender
 // Run on its own with `node test/fixtures/server.mjs [port]`, or import startFixtureServer().
 
@@ -77,6 +78,7 @@ const FAILED_PAGE = readFileSync(new URL("./failed-page.html", import.meta.url),
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
 const NORENDER_PAGE = readFileSync(new URL("./norender-page.html", import.meta.url), "utf8");
 const COMPOSE_PAGE = readFileSync(new URL("./compose-page.html", import.meta.url), "utf8");
+const GEMINI_PAGE = readFileSync(new URL("./gemini-page.html", import.meta.url), "utf8");
 const BUTTONS_PAGE = readFileSync(new URL("./buttons-page.html", import.meta.url), "utf8");
 
 // The streamed reply: headers at once, the first token after a pause, then a token every 60 ms.
@@ -174,7 +176,7 @@ function ambiguousRoute(req, res, url) {
   res.writeHead(404).end("not found");
 }
 
-const PAGES = { "/stream-nostore": STREAM_PAGE, "/chat": CHAT_PAGE, "/sidecall": SIDECALL_PAGE, "/icon": ICON_PAGE, "/buttons": BUTTONS_PAGE, "/avatar": AVATAR_PAGE, "/failed": FAILED_PAGE, "/norender": NORENDER_PAGE, "/compose": COMPOSE_PAGE };
+const PAGES = { "/stream-nostore": STREAM_PAGE, "/chat": CHAT_PAGE, "/sidecall": SIDECALL_PAGE, "/icon": ICON_PAGE, "/buttons": BUTTONS_PAGE, "/avatar": AVATAR_PAGE, "/failed": FAILED_PAGE, "/norender": NORENDER_PAGE, "/compose": COMPOSE_PAGE, "/gemini": GEMINI_PAGE };
 const STREAMS = { "/chat/stream": "no-cache", "/chat/stream-nostore": "no-store" };
 
 const VARIANTS = {
@@ -338,6 +340,25 @@ export function startFixtureServer(port = 0, { caliperToken = null, caliperStatu
     if (STREAMS[path] && req.method === "POST") {
       req.resume(); // the body isn't used
       streamReply(res, STREAMS[path]);
+      return;
+    }
+    if (path === "/gemini/hang" && req.method === "POST") {
+      req.resume(); // never answered: a model call that doesn't come back (closed with the server)
+      return;
+    }
+    if (path === "/gemini/stream" && req.method === "POST") {
+      // Plain text, like the Gemini example's Express route: the first chunk after 800 ms.
+      req.resume();
+      res.writeHead(200, { "content-type": "text/plain", "cache-control": "no-cache" });
+      (async () => {
+        await sleep(800);
+        for (const t of REPLY) {
+          if (res.destroyed) return;
+          res.write(t);
+          await sleep(TOKEN_MS);
+        }
+        res.end();
+      })();
       return;
     }
     if (path === "/failed/user-icon.png") {

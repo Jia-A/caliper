@@ -78,3 +78,37 @@ try {
 
 if (failures.length) console.log(stdout.replace(/^/gm, "     | "));
 process.exitCode = failures.length ? 1 : 0;
+
+// Google's example chat app's DOM sequence (gemini-page.html): the reply is timed from its own
+// text, and a reply that never comes says which request is still open (caliper-test-3, App 2).
+{
+  const srv = await startFixtureServer();
+  const failed = [];
+  const say = (ok, what, out) => {
+    console.log(`${ok ? "PASS" : "FAIL"} ${what}`);
+    if (!ok) {
+      failed.push(what);
+      console.log(out.replace(/^/gm, "     | "));
+    }
+  };
+  const audit = async (path, timeout) => {
+    try {
+      const { stdout, stderr } = await run(process.execPath, [cli, "audit", `${srv.url}${path}`, "--prompt", "Explain how a rainbow forms.", "--output", ".chat-area",
+        "--runs", "2", "--auth", auth, "--settle-ms", "500", "--timeout", String(timeout), "--no-report"], { timeout: 120_000 });
+      return { code: 0, out: `${stdout}${stderr}` };
+    } catch (err) {
+      return { code: err.code ?? 1, out: `${err.stdout ?? ""}${err.stderr ?? ""}` };
+    }
+  };
+  try {
+    const ok = await audit("/gemini", 15000);
+    const words = [...ok.out.matchAll(/^\s+first word shows\s+(".*")$/gm)].map((m) => JSON.parse(m[1]));
+    say(ok.code === 0 && words.length === 2 && words.every((w) => w.startsWith("Hello!")), `gemini page: both runs timed from the reply's text (got ${JSON.stringify(words)})`, ok.out);
+    const hang = await audit("/gemini?hang=1", 4000);
+    say(hang.code !== 0 && /Timed out after 4000 ms: "\.chat-area" never changed after sending\. Requests since the send: POST http:\/\/127\.0\.0\.1:\d+\/gemini\/hang → still open, no response \(waiting \d+ ms\)\. If that's your AI request, it never answered: check its server's log\./.test(hang.out),
+      "gemini page, reply never comes: the timeout names the request still open", hang.out);
+  } finally {
+    await srv.close();
+  }
+  if (failed.length) process.exitCode = 1;
+}
