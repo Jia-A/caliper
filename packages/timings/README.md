@@ -1,15 +1,60 @@
-# caliper-timings
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Jia-A/caliper/main/.github/assets/logo.svg" width="72" height="72" alt="Caliper logo">
+</p>
 
-The server side of [Caliper](https://github.com/Jia-A/caliper)'s server timings. Caliper (`caliper-ai`) measures an AI feature in a real browser. With this on your server, it can also show what happened inside one marked request: how long it waited on the database, on the model, or on any step you mark.
+<h1 align="center">caliper-timings</h1>
 
-Light enough to stay in production, deployed dark:
+<p align="center">The server half of <a href="https://github.com/Jia-A/caliper">Caliper</a>: what happened inside one marked request.</p>
 
-- No runtime dependencies.
-- The core uses only `Date.now()`, Web Streams and `crypto.subtle`.
-- Off unless `CALIPER_TOKEN` is set.
-- Unmarked requests are never touched.
+<p align="center">
+  <a href="https://www.npmjs.com/package/caliper-timings"><img alt="npm caliper-timings" src="https://img.shields.io/npm/v/caliper-timings?label=caliper-timings&color=4c7656"></a>
+  <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-4c7656">
+  <img alt="Node version" src="https://img.shields.io/node/v/caliper-timings?color=4c7656">
+  <img alt="No runtime dependencies" src="https://img.shields.io/badge/runtime%20dependencies-0-555">
+  <img alt="Built with Claude Code" src="https://img.shields.io/badge/built%20with-Claude%20Code-D97757?logo=claude&logoColor=white">
+</p>
 
-The wire format is in [SPEC.md](SPEC.md), so other languages can implement it too.
+<p align="center">
+  <a href="https://caliper-audit.vercel.app/report">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Jia-A/caliper/main/.github/assets/timings-dark.png">
+      <img alt="Inside the server, from a real Caliper report: postgres 506 ms over its 100 ms limit, model call to first bytes sent 540 ms over its 450 ms limit, and the Request Map with each prompt part's size and source." src="https://raw.githubusercontent.com/Jia-A/caliper/main/.github/assets/timings-light.png" width="760">
+    </picture>
+  </a>
+</p>
+
+<p align="center"><a href="https://caliper-audit.vercel.app/report">The full report this is from</a> · <a href="https://caliper-audit.vercel.app">caliper-audit.vercel.app</a></p>
+
+## The browser can't see inside your server
+
+caliper-timings can. On a request Caliper marks, it times the steps you mark (a database query, the model call, the model's first chunk) on your server's clock, and measures each prompt part's size and who wrote it, never its text. Caliper reads the record back and shows it next to the browser's timings, never added to them.
+
+It's off unless you set your own `CALIPER_TOKEN`, and requests Caliper didn't mark are never touched. No runtime dependencies: the core uses only `Date.now()`, Web Streams and `crypto.subtle`. The wire format is in [SPEC.md](SPEC.md), so other languages can implement it too.
+
+## What it records, and what it never records
+
+| Records | Never records |
+|---|---|
+| The ms of each mark you set, from when `start()` ran | The text of any message or prompt part |
+| The response status | Request or response bodies |
+| Each prompt message's role and size in UTF-8 bytes | A role that could be text: anything but a lowercase name is stored as `?` |
+| Each named part's name, size, whether its text was found in its message, and its source (`app`, `user`, `outside`) | A part name that could be text (stored as `?`), or a source other than `app`, `user`, `outside` (dropped, with a problem naming the part by number) |
+| Problems it hit (a bad mark name, an unreadable message), by number only | Anything for a request Caliper didn't mark |
+
+## Run against
+
+| Platform | How it was run |
+|---|---|
+| Node `node:http` | This README's Node sample, installed from the 0.6.1 tarball, in a stranger test (Nov 20, 2026). |
+| Express | Google's example Gemini chat app's server, through the Node adapter (caliper-timings 0.6.0, Nov 19, 2026). |
+| Next.js App Router | Vercel production: [caliper-audit](https://caliper-audit.vercel.app)'s `/api/chat` (then at caliper-demo.vercel.app), caliper-timings 0.6.0, Nov 14, 2026, where a marked visit's record came back. And locally with `next dev`: an AI SDK app (Next.js 16) and [examples/next-app-router](https://github.com/Jia-A/caliper/tree/main/examples/next-app-router) (Next.js 16.2.6). |
+| Cloudflare Workers | Quill's backend (Hono, Workers AI), with the Workers adapter and its Durable Object store. |
+| Vercel AI SDK, with `modelFirstChunk` | The AI SDK app with 0.6.1 (Nov 19, 2026): the model's first chunk at 3065 ms, where the first bytes sent were the SDK's envelope at 3 ms. |
+| Gemini SDK `parts` | Measured since 0.6.1, tested with fixtures only. The live Gemini app hasn't run on 0.6.1 yet: its marked visit ran on 0.6.0, with messages mapped to `content` by hand. |
+
+## How it was built
+
+Jiya Agrawal designed Caliper and made every product decision: what to measure, the honesty rules (every number is measured; when Caliper can't tell, it says so), and what the report may claim. She tested it as a stranger on apps she didn't write, and those findings shaped 0.6.1. Claude Code wrote much of the implementation and the tests.
 
 ## Install
 
@@ -283,7 +328,7 @@ export async function GET(request) {
 - **`defer: (p) => after(() => p)`**, with `after` from `next/server` (Next.js 15.1+), keeps the function alive for the save after the response. Below 15.1, or outside Next.js on Vercel, use `waitUntil` from `@vercel/functions`.
 - **One store for both routes**, from `lib/caliper.js`. With `MemoryStore`, a store created in each route file can be two separate maps, and the timings route then answers 404 for a record that was saved.
 - **The AI SDK route's wrapping** (status, status text, every header and the bytes unchanged, saved at the first chunk) is tested with a stand-in for `toUIMessageStreamResponse()`'s response, not the AI SDK itself (`npm test`, test/fetch.test.ts). The same lines ran on a real Next.js 16 + AI SDK 6 app in our stranger test.
-- **Checked by hand once, not by an automated test:** Next.js 16.2.6 on 127.0.0.1, with memory and with a local stand-in for Upstash's REST API; see [examples/next-app-router](https://github.com/Jia-A/caliper/tree/main/examples/next-app-router). Not yet on Vercel or with real Upstash. The Pages Router isn't covered.
+- **Checked by hand, not by an automated test:** Next.js 16.2.6 on 127.0.0.1, with memory and with a local stand-in for Upstash's REST API (see [examples/next-app-router](https://github.com/Jia-A/caliper/tree/main/examples/next-app-router)); and once on Vercel production, caliper-audit's `/api/chat` with caliper-timings 0.6.0 (Nov 14, 2026), where a marked visit's record came back. Which store answered there wasn't recorded: that route uses Upstash when its env vars are set, else memory. Real Upstash isn't otherwise tested. The Pages Router isn't covered.
 
 ## Core (`caliper-timings`)
 
