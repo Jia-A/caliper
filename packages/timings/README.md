@@ -14,6 +14,41 @@
   <img alt="Built with Claude Code" src="https://img.shields.io/badge/built%20with-Claude%20Code-D97757?logo=claude&logoColor=white">
 </p>
 
+## The browser can't see inside your server
+
+caliper-timings can. On a request Caliper marks, it times the steps you mark (a database query, the model call, the model's first chunk) on your server's clock, and measures each prompt part's size and who wrote it, never its text. Caliper reads the record back and shows it next to the browser's timings, never added to them.
+
+It's off unless you set your own `CALIPER_TOKEN`, and requests Caliper didn't mark are never touched. No runtime dependencies: the core uses only `Date.now()`, Web Streams and `crypto.subtle`. The wire format is in [SPEC.md](SPEC.md), so other languages can implement it too.
+
+**Cost, as measured:** a marked request reached its first byte a median **1.2 ms** later than an unmarked one, and unmarked requests showed **no difference** (median 0.0 ms). 20 pairs each, one `node:http` app on 127.0.0.1, Node 22.22, one Mac; see [Measured cost](#measured-cost).
+
+## Add a few lines, get this
+
+The AI SDK route from [Next.js App Router](#nextjs-app-router-and-vercel) below, with only the Caliper lines kept (`// …` marks what's left out):
+
+```js
+// app/api/chat/route.js: AI SDK
+import { after } from "next/server";
+import { finish, start } from "caliper-timings/upstash";
+import { store } from "../../../lib/caliper.js";
+
+export async function POST(request) {
+  const run = await start(request, { token: process.env.CALIPER_TOKEN, store, defer: (p) => after(() => p) });
+  // …
+  run?.prompt([{ role: "system", content: SYSTEM }, ...modelMessages]);
+  run?.mark("modelCallSent");
+  const result = streamText({ model, system: SYSTEM, messages: modelMessages, onChunk: () => run?.mark("modelFirstChunk") });
+
+  const response = result.toUIMessageStreamResponse();
+  if (!run || !response.body) return response;
+  return finish(run, new Response(run.watchFirstChunk(response.body), { status: response.status, statusText: response.statusText, headers: response.headers }));
+}
+```
+
+Plus one route that answers Caliper's lookups (`/__caliper/timings/:id`) and a token: see [Install](#install).
+
+What Caliper then shows, from a real report:
+
 <p align="center">
   <a href="https://caliper-audit.vercel.app/report">
     <picture>
@@ -25,11 +60,28 @@
 
 <p align="center"><a href="https://caliper-audit.vercel.app/report">The full report this is from</a> · <a href="https://caliper-audit.vercel.app">caliper-audit.vercel.app</a></p>
 
-## The browser can't see inside your server
+<p align="center"><sub>This one is from Quill's backend (Hono on Cloudflare Workers), which marks its own steps, <code>postgresStart</code> and <code>postgresEnd</code> among them, recorded with caliper-timings 0.6.0, before <code>modelFirstChunk</code> existed.</sub></p>
 
-caliper-timings can. On a request Caliper marks, it times the steps you mark (a database query, the model call, the model's first chunk) on your server's clock, and measures each prompt part's size and who wrote it, never its text. Caliper reads the record back and shows it next to the browser's timings, never added to them.
+## What the browser sees, and what this adds
 
-It's off unless you set your own `CALIPER_TOKEN`, and requests Caliper didn't mark are never touched. No runtime dependencies: the core uses only `Date.now()`, Web Streams and `crypto.subtle`. The wire format is in [SPEC.md](SPEC.md), so other languages can implement it too.
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant S as Your server
+    participant D as Database
+    participant M as Model
+    B->>S: request (the click)
+    rect rgba(156, 195, 164, 0.18)
+    Note over S,M: The browser can't see this part. caliper-timings marks it.
+    S->>D: query (dbStart)
+    D-->>S: rows (dbEnd)
+    S->>M: model call (modelCallSent)
+    M-->>S: first chunk (modelFirstChunk)
+    end
+    S-->>B: first bytes sent (firstChunk)
+```
+
+<p align="center"><sub>The browser sees one wait; caliper-timings splits it. With the AI SDK, the first bytes go out earlier, as its <code>{"type":"start"}</code> envelope, which is why <code>modelFirstChunk</code> is marked separately.</sub></p>
 
 ## What it records, and what it never records
 
