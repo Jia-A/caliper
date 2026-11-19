@@ -440,7 +440,7 @@ async function measureChatOnce(page: Page, options: MeasureOptions, chat: ChatOp
     const network = startNetworkCapture(page);
     const deadline = Date.now() + options.timeout; // --timeout counts from the send
     await send();
-    const clickAt = await page.evaluate(() => window.__caliperSentAt);
+    const clickAt = await pageWait(page, () => window.__caliperSentAt, options.timeout + STALL_GRACE_MS, "the send to register");
     const firstChangeAt = await waitForChange(page, options, clickAt);
     return await finishRun(page, options, { clickAt, firstChangeAt, network, wire, deadline, chat: true });
   } finally {
@@ -450,6 +450,34 @@ async function measureChatOnce(page: Page, options: MeasureOptions, chat: ChatOp
 
 // How often Caliper looks at the recorded changes and requests while a reply comes in.
 const OBSERVE_POLL_MS = 50;
+
+// The in-page watchers run on animation frames, and their own timeouts do too. A page that stops
+// rendering frames (a throttled or frozen renderer) would leave a wait on them pending forever:
+// seen three times in the 0.6.1 test suite, reproduced with test/fixtures/norender-page.html.
+// So each such wait also has this much past its in-page limit, then Caliper checks for a frame.
+const STALL_GRACE_MS = 10_000;
+const FRAME_PROBE_MS = 2000;
+
+// Waits for a promise the page's watcher settles, at most ms; then says why it didn't (CliError).
+async function pageWait<T>(page: Page, fn: () => T | Promise<T>, ms: number, what: string): Promise<T> {
+  const STALLED = Symbol("stalled");
+  const timer = new AbortController();
+  try {
+    const got = await Promise.race([page.evaluate(fn), sleep(ms, STALLED, { signal: timer.signal })]);
+    if (got !== STALLED) return got as T;
+  } finally {
+    timer.abort();
+  }
+  const frame = await Promise.race([
+    page.evaluate(() => new Promise<boolean>((resolve) => requestAnimationFrame(() => resolve(true)))).catch(() => false),
+    sleep(FRAME_PROBE_MS, false),
+  ]);
+  throw new CliError(
+    frame
+      ? `Stopped waiting for ${what} after ${ms} ms: the page answered nothing (it still renders frames, so Caliper can't tell why). Not timed.`
+      : `Stopped waiting for ${what} after ${ms} ms: the page stopped rendering frames (requestAnimationFrame didn't run within ${FRAME_PROBE_MS / 1000} s), so Caliper can't see the output change. Not timed.`
+  );
+}
 
 // The chat watcher's first counted change after the send.
 async function waitForChange(page: Page, { output, timeout }: MeasureOptions, clickAt: number): Promise<number> {
@@ -1246,7 +1274,7 @@ async function checkSelector(page: Page, selector: string, flag: string): Promis
 
 async function waitForFirstWord(page: Page, { measure, output, timeout }: MeasureOptions): Promise<PageTiming> {
   try {
-    return await page.evaluate(() => window.__caliperTiming);
+    return await pageWait(page, () => window.__caliperTiming, timeout + STALL_GRACE_MS, "the first output change");
   } catch (err) {
     if (!/No output within/.test(messageOf(err))) throw err;
     const exists = await page.evaluate((sel) => !!document.querySelector(sel), output);
@@ -1326,7 +1354,7 @@ async function stopOnce(page: Page, options: MeasureOptions, stopPattern: RegExp
     const stopAt = await page.evaluate(() => window.__caliperStopClickAt);
 
     // (1) Pixels: the watcher resolves once the output has been unchanged for settle-ms.
-    const done = await page.evaluate(() => window.__caliperDone);
+    const done = await pageWait(page, () => window.__caliperDone, DONE_CAP_MS + options.timeout + STALL_GRACE_MS, "the output to settle");
     const outputStoppedAfter = done.settled ? Math.max(0, done.doneAt - stopAt) : null;
     await sleep(NETWORK_SETTLE_MS); // let the last network events reach us
 
@@ -1480,7 +1508,7 @@ async function doubleOnce(page: Page, options: MeasureOptions): Promise<DoubleRe
 
     // Let the output settle, then pick request 2 from what was sent after click 2 to the same
     // endpoint as request 1 (method + URL path; the query string may differ).
-    await page.evaluate(() => window.__caliperDone);
+    await pageWait(page, () => window.__caliperDone, DONE_CAP_MS + options.timeout + STALL_GRACE_MS, "the output to settle");
     const until = await page.evaluate(() => performance.now());
     const { requests: sent } = await network2.stop({ clickAt, firstPaintAt: until });
     if (!r1) return { kind: "clicked", afterFirstWord, network: null };
@@ -1615,7 +1643,7 @@ async function canaryOnce(page: Page, options: MeasureOptions, input: string | u
       if (!(err instanceof CliError)) throw err;
       return { kind: "no-first-word", error: err.message };
     }
-    const done = await page.evaluate(() => window.__caliperDone);
+    const done = await pageWait(page, () => window.__caliperDone, DONE_CAP_MS + options.timeout + STALL_GRACE_MS, "the output to settle");
     await sleep(CANARY_IMAGE_MS);
     const text = await page.evaluate(() => window.__caliperRead());
 

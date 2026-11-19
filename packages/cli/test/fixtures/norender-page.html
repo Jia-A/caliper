@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>No frames fixture</title></head>
+<body>
+<!-- A page whose requestAnimationFrame never calls back, as when the browser stops rendering
+     frames (a throttled or frozen renderer). Caliper's watchers count on frames, so without a
+     guard a run here waits forever. Generate streams /chat/stream into #out. -->
+<button id="generate">Generate</button>
+<div id="out"></div>
+<script>
+  window.requestAnimationFrame = () => 0;
+  document.getElementById("generate").addEventListener("click", async () => {
+    const res = await fetch("/chat/stream", { method: "POST", body: "{}" });
+    const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      document.getElementById("out").textContent += value.length;
+    }
+  });
+</script>
+</body>
+</html>

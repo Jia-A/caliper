@@ -56,6 +56,7 @@
 //   /failed                  the page (failed-page.html; ?api=<url> posts there instead)
 //   /failed/user-icon.png    a 1×1 PNG (your avatar)
 //   /failed/stream           503, {"error":"This model is currently experiencing high demand"} (POST)
+// For a page that renders no frames (requestAnimationFrame never calls back): /norender
 // Run on its own with `node test/fixtures/server.mjs [port]`, or import startFixtureServer().
 
 import { readFileSync } from "node:fs";
@@ -73,6 +74,7 @@ const AMBIGUOUS_PAGE = readFileSync(new URL("./ambiguous-page.html", import.meta
 const AVATAR_PAGE = readFileSync(new URL("./avatar-page.html", import.meta.url), "utf8");
 const FAILED_PAGE = readFileSync(new URL("./failed-page.html", import.meta.url), "utf8");
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+const NORENDER_PAGE = readFileSync(new URL("./norender-page.html", import.meta.url), "utf8");
 const BUTTONS_PAGE = readFileSync(new URL("./buttons-page.html", import.meta.url), "utf8");
 
 // The streamed reply: headers at once, the first token after a pause, then a token every 60 ms.
@@ -170,7 +172,7 @@ function ambiguousRoute(req, res, url) {
   res.writeHead(404).end("not found");
 }
 
-const PAGES = { "/stream-nostore": STREAM_PAGE, "/chat": CHAT_PAGE, "/sidecall": SIDECALL_PAGE, "/icon": ICON_PAGE, "/buttons": BUTTONS_PAGE, "/avatar": AVATAR_PAGE, "/failed": FAILED_PAGE };
+const PAGES = { "/stream-nostore": STREAM_PAGE, "/chat": CHAT_PAGE, "/sidecall": SIDECALL_PAGE, "/icon": ICON_PAGE, "/buttons": BUTTONS_PAGE, "/avatar": AVATAR_PAGE, "/failed": FAILED_PAGE, "/norender": NORENDER_PAGE };
 const STREAMS = { "/chat/stream": "no-cache", "/chat/stream-nostore": "no-store" };
 
 const VARIANTS = {
