@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.6.1 — unreleased
+## 0.6.1 — 2026-11-20
 
 Fixes from a test by someone new to Caliper, on two apps they didn't write (an AI SDK app on Next.js, and Google's Gemini example chat app). Tested on local fixtures that copy what those apps did.
 
