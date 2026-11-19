@@ -349,7 +349,11 @@ function promptView({ compared, lines, none }: PromptBlock): PromptView {
     const where = (r: string, w: string) => (r.includes(" (") ? `${r.slice(0, r.indexOf(" ("))} ${w}${r.slice(r.indexOf(" ("))}` : `${r} ${w}`);
     return reasons.map((r) => (statuses.every((s) => s === r) ? r : where(r, inVisits(shown.filter((_, k) => statuses[k] === r).map((c) => c.visit))))).join("; ");
   };
-  const share = (bytes: number) => (!many && totals[0]! > 0 ? `${Math.round((bytes / totals[0]!) * 100)}%` : "");
+  // A share of a total that leaves a message out would be too big, so with any message not
+  // measured there's no percentage (caliper-test-3 #7: "system 766 bytes 100%" of 1 of 2).
+  const partial = shown.some((c) => c.messages.some((m) => m.bytes === null));
+  const share = (bytes: number) =>
+    many || totals[0]! <= 0 ? "" : partial ? "share ? (not every message was measured)" : `${Math.round((bytes / totals[0]!) * 100)}%`;
   const note = (label: string): PromptRow => ({ kind: "note", label, values: [], stats: null, tail: "" });
   // Sources only when some message has named parts: then every part, rest and unnamed message has one.
   const sources = shown.some((c) => c.messages.some((m) => m.parts !== undefined));
@@ -434,7 +438,7 @@ function promptView({ compared, lines, none }: PromptBlock): PromptView {
   const rows: PromptRow[] = [
       ...roles.flatMap((role, i) => {
         const values = shown.map((c) => c.messages[i]!.bytes);
-        const statuses = values.map((v) => (v === null ? "not measured (content wasn't a string)" : ""));
+        const statuses = values.map((v) => (v === null ? "not measured (see problems reported by the server)" : ""));
         const message: PromptRow = { kind: "message", label: `${i + 1} ${role}`, values: cells(values), stats: stats(values), tail: many ? tailOf(statuses) : values[0] === null ? statuses[0]! : share(values[0]!) };
         if (sources && shown.every((c) => c.messages[i]!.parts === undefined)) message.source = UNKNOWN("no parts named");
         return [message, ...partRows(i)];

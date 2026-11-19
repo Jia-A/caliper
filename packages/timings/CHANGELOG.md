@@ -6,6 +6,8 @@
 
 - **`modelFirstChunk`, a reserved mark for the model's first chunk.** On AI SDK apps, `firstChunk` is the `{"type":"start"}` envelope `toUIMessageStreamResponse()` writes before the model answers (2 ms after the model call on the app we tested). Mark the model's own first chunk with `onChunk: () => run?.mark("modelFirstChunk")` in `streamText`. Only the first call counts, and a record already saved at `firstChunk` is saved again with it. Saves now run one after another, so the newest record is the one stored. Caliper (caliper-ai 0.6.1) shows "model call → model's first chunk". SPEC v1: a new reserved name; readers that don't know it show it as a plain mark. Tested with `npm test` (`test/modelchunk.test.ts`).
 
+- **Prompt sizes from SDK message shapes.** `run.prompt()` measures a message whose content is a list of text parts (`content: [{ type: "text", text }]`: AI SDK model messages, OpenAI, Anthropic) or, with no `content`, Gemini's `parts: [{ text }]`, as the sum of its text. 0.6.0 recorded `null` for these, so an AI SDK app passing its model messages got no user-message sizes. A message with any part that isn't text gets `null`, never a partial sum, with a problem naming the part. The README shows what to pass for the AI SDK and the Gemini SDK. Tested with `npm test` (`test/sdkshapes.test.ts`) and end to end in caliper-ai's `npm run test:prompt`.
+
 ### Fixed
 
 - **README: the Chromium install command** is now `npx playwright@1.64.1 install chromium`, the build caliper-ai uses (it was unpinned, which the caliper-ai README warns against).

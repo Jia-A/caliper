@@ -270,12 +270,12 @@ test("prompt sizes: one row per message with its role, bytes and share of the to
   assert.ok(lines(block).indexOf(SIZES_HEAD(1)) < lines(block).indexOf(FIRST_BYTES), block);
 });
 
-test("prompt sizes: a message with no size says so, and the total counts the measured ones only", () => {
+test("prompt sizes: a message with no size says so, no share is a % of a partial total, and the total counts the measured ones only", () => {
   const prompt = { messages: [{ role: "system", bytes: 100 }, { role: "?", bytes: null }, { role: "user", bytes: 300 }] };
   assert.deepEqual(promptLines(text(visits({ marks: QUILL_MARKS, prompt }), 1)).slice(1), [
-    "    1 system                           100 bytes   25%",
-    "    2 ?                                  – bytes   not measured (content wasn't a string)",
-    "    3 user                             300 bytes   75%",
+    "    1 system                           100 bytes   share ? (not every message was measured)",
+    "    2 ?                                  – bytes   not measured (see problems reported by the server)",
+    "    3 user                             300 bytes   share ? (not every message was measured)",
     "    total (2 of 3 measured)            400 bytes",
   ]);
 });
@@ -341,7 +341,8 @@ test("HTML: prompt sizes are a table with the terminal's rows: bytes and share p
 test("HTML: a message with no size, and the total of the measured ones", () => {
   const prompt = { messages: [{ role: "system", bytes: 100 }, { role: "?", bytes: null }, { role: "user", bytes: 300 }] };
   const rows = htmlRows(requestMap(report(visits({ marks: QUILL_MARKS, prompt }), 1)));
-  assert.deepEqual(rows.get("2 ?"), ["–", "not measured (content wasn't a string)"]);
+  assert.deepEqual(rows.get("2 ?"), ["–", "not measured (see problems reported by the server)"]);
+  assert.deepEqual(rows.get("1 system"), ["100", "share ? (not every message was measured)"]);
   assert.deepEqual(rows.get("total (2 of 3 measured)"), ["400", ""]);
 });
 
@@ -409,7 +410,7 @@ test("prompt sizes, several visits: a message not measured in some shows –, an
   const at = lines(block).findIndex((l) => l.startsWith("  prompt sizes"));
   assert.deepEqual(lines(block).slice(at + 2, at + 5), [
     "    1 system                           100   100   min 100 · median 100 · max 100 bytes",
-    "    2 user                             300     – bytes   not measured in marked visit 2 (content wasn't a string)",
+    "    2 user                             300     – bytes   not measured in marked visit 2 (see problems reported by the server)",
     "    total (measured only)              400   100   min 100 · median 250 · max 400 bytes",
   ]);
 });

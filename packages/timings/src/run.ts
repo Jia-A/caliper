@@ -21,6 +21,7 @@ export type RunOptions = {
 };
 
 const MAX_PROBLEMS = 20;
+const PART_TYPE = /^[a-z][a-z_-]{0,31}$/; // image, file, tool-call, tool_result, …
 const MAX_PROMPT_MESSAGES = 1000;
 const MAX_PARTS_PER_MESSAGE = 50;
 const utf8 = new TextEncoder();
@@ -103,12 +104,15 @@ export class CaliperRun {
     }
   }
 
-  // Problems name the message by number only: its role or text could be anything.
-  #size(message: unknown, n: number): [PromptMessageSize, unknown] {
+  // Problems name the message by number only: its role or text could be anything. Returns the
+  // entry and the message's text (for checking named parts), or undefined when it wasn't measured.
+  #size(message: unknown, n: number): [PromptMessageSize, string | undefined] {
     let role: unknown;
-    let content: unknown;
+    let text: string | null;
     try {
-      ({ role, content } = (message ?? {}) as { role?: unknown; content?: unknown });
+      const m = (message ?? {}) as { role?: unknown; content?: unknown; parts?: unknown };
+      role = m.role;
+      text = this.#text(m.content, m.parts, n);
     } catch {
       this.#problem(`prompt message ${n}: reading it failed; recorded as "?" with no size`);
       return [{ role: "?", bytes: null }, undefined];
@@ -116,8 +120,41 @@ export class CaliperRun {
     if (!isValidRole(role)) {
       this.#problem(`prompt message ${n}: role isn't a lowercase name of up to 32 letters or _ (e.g. system, user, assistant); recorded as "?"`);
     }
-    if (typeof content !== "string") this.#problem(`prompt message ${n}: content isn't a string; size not measured`);
-    return [{ role: isValidRole(role) ? role : "?", bytes: typeof content === "string" ? utf8.encode(content).length : null }, content];
+    return [{ role: isValidRole(role) ? role : "?", bytes: text === null ? null : utf8.encode(text).length }, text ?? undefined];
+  }
+
+  // A message's text, or null when it can't be measured (with a problem). content as a string;
+  // or a list of parts, as SDKs send them: content: [{ type: "text", text }] (AI SDK model
+  // messages, OpenAI, Anthropic), or, with no content, parts: [{ text }] (Gemini). Text parts
+  // are joined as they are; any part that isn't text makes the whole message unmeasured, never
+  // a partial sum.
+  #text(content: unknown, parts: unknown, n: number): string | null {
+    if (typeof content === "string") return content;
+    const list = Array.isArray(content) ? content : content === undefined && Array.isArray(parts) ? parts : null;
+    if (list === null) {
+      this.#problem(`prompt message ${n}: content isn't text or a list of text parts; size not measured`);
+      return null;
+    }
+    if (list.length === 0) {
+      this.#problem(`prompt message ${n}: no text parts; size not measured`);
+      return null;
+    }
+    let text = "";
+    for (let j = 0; j < list.length; j++) {
+      const part = list[j] as { type?: unknown; text?: unknown } | null;
+      const type = part === null || typeof part !== "object" ? undefined : part.type;
+      const value = part === null || typeof part !== "object" ? undefined : part.text;
+      if (typeof value === "string" && (type === undefined || type === "text")) {
+        text += value;
+        continue;
+      }
+      // A type is shown only when it looks like an SDK's part type (image, tool-call): anything
+      // else could be text.
+      const named = typeof type === "string" && PART_TYPE.test(type) ? ` is ${JSON.stringify(type)}, not text` : " isn't text";
+      this.#problem(`prompt message ${n}: part ${j + 1}${named}; size not measured`);
+      return null;
+    }
+    return text;
   }
 
   // Named parts, added to their message's entry. Problems name a part by number only: its name
@@ -164,7 +201,7 @@ export class CaliperRun {
       const content = contents[at];
       let found: boolean | null = null;
       if (typeof text !== "string") this.#problem(`prompt part ${n}: text isn't a string; size not measured and not checked`);
-      else if (typeof content !== "string") this.#problem(`prompt part ${n}: message ${at + 1}'s content isn't a string, so the part couldn't be checked`);
+      else if (typeof content !== "string") this.#problem(`prompt part ${n}: message ${at + 1}'s text wasn't measured, so the part couldn't be checked`);
       else found = content.includes(text);
       if (source !== undefined && !isValidSource(source)) this.#problem(`prompt part ${n}: source isn't "app", "user" or "outside"; recorded without a source`);
       const size: PromptPartSize = { name: isValidRole(name) ? name : "?", bytes: typeof text === "string" ? utf8.encode(text).length : null, found, ...(isValidSource(source) && { source }) };

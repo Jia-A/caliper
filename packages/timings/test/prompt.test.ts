@@ -72,10 +72,10 @@ test('a role that isn\'t a short lowercase name is recorded as "?", with a probl
   assert.deepEqual(record.problems, [1, 2, 3, 4, 5].map((n) => `prompt message ${n}: role isn't a lowercase name of up to 32 letters or _ (e.g. system, user, assistant); recorded as "?"`));
 });
 
-test("content that isn't a string: bytes null, and a problem; never estimated", async () => {
+test("content that isn't text or a list of parts: bytes null, and a problem; never estimated", async () => {
   const record = await recordAfter((run) =>
     run.prompt([
-      { role: "user", content: [{ type: "text", text: "hi" }] },
+      { role: "user", content: 42 },
       { role: "user" },
       { role: "user", content: null },
     ])
@@ -85,7 +85,7 @@ test("content that isn't a string: bytes null, and a problem; never estimated", 
     { role: "user", bytes: null },
     { role: "user", bytes: null },
   ]);
-  assert.deepEqual(record.problems, [1, 2, 3].map((n) => `prompt message ${n}: content isn't a string; size not measured`));
+  assert.deepEqual(record.problems, [1, 2, 3].map((n) => `prompt message ${n}: content isn't text or a list of text parts; size not measured`));
 });
 
 test("not a list: no prompt field, and a problem", async () => {

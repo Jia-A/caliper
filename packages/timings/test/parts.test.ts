@@ -80,11 +80,11 @@ test("text that isn't a string: no size and not checked (null), with a problem; 
   assert.deepEqual(problems, [1, 2].map((n) => `prompt part ${n}: text isn't a string; size not measured and not checked`));
 });
 
-test("a message whose content isn't a string: the part's size is measured, but it can't be checked (found null)", async () => {
-  const messages = [{ role: "user", content: [{ type: "text", text: "Title: A title" }] }];
+test("a message whose text wasn't measured (an image part): the part's size is measured, but it can't be checked (found null)", async () => {
+  const messages = [{ role: "user", content: [{ type: "text", text: "Title: A title" }, { type: "image", image: "x" }] }];
   const { record, problems } = await problemsFor([{ message: 0, name: "title", text: TITLE }], messages);
   assert.deepEqual(record.prompt!.messages[0]!.parts, [{ name: "title", bytes: 14, found: null }]);
-  assert.ok(problems.includes("prompt part 1: message 1's content isn't a string, so the part couldn't be checked"), JSON.stringify(problems));
+  assert.ok(problems.includes("prompt part 1: message 1's text wasn't measured, so the part couldn't be checked"), JSON.stringify(problems));
 });
 
 test("a message index that isn't one of the messages: the part isn't recorded, with a problem", async () => {
