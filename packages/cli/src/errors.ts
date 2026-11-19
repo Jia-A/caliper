@@ -25,10 +25,22 @@ export class ButtonNotFoundError extends CliError {
 
 // A timed run whose AI request couldn't be identified: no request's body bytes explain the
 // output changes, or two explain them equally. The run reports it and isn't timed.
+// details: more lines to print under the message (the requests the run saw, any that failed).
 export class UnidentifiedRequestError extends Error {
+  details: string[] = [];
   constructor(message: string) {
     super(message);
     this.name = "UnidentifiedRequestError";
+  }
+}
+
+// A timed run whose AI request was identified (by timing or --request) but failed: a network
+// error before any body bytes, or an HTTP status of 400 or more. What the page showed is an
+// error, not a reply, so the run isn't timed. The message names the request and how it failed.
+export class FailedRequestError extends UnidentifiedRequestError {
+  constructor(message: string) {
+    super(message);
+    this.name = "FailedRequestError";
   }
 }
 

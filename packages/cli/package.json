@@ -59,6 +59,7 @@
     "test:ambiguous": "npm run -s build >/dev/null && node test/ambiguous.test.mjs",
     "test:prompt": "npm run -s build >/dev/null && node test/prompt.test.mjs",
     "test:browser": "npm run -s build >/dev/null && node test/browser.test.mjs",
-    "test:firstword": "npm run -s build >/dev/null && node test/firstword.test.mjs"
+    "test:firstword": "npm run -s build >/dev/null && node test/firstword.test.mjs",
+    "test:failed": "npm run -s build >/dev/null && node test/failed.test.mjs"
   }
 }

@@ -226,8 +226,8 @@ function input(server: ServerReport | null): ReportInput {
   return {
     url: "http://127.0.0.1/marked", measure: { name: "^generate$" }, chat: null, output: "#out", steps: [], startedAt: new Date(0),
     summary: { cold: 500, coldUnidentified: false, median: null, worst: 500, warm: 0, warmFailed: 0, warmUnidentified: 0 },
-    runs: [{ run: 1, total: 500, request: null, segments: [], clock: null, reply: { firstByte: null, preReply: [] } }],
-    failed: [], unidentified: [], stop: null, double: null, canary: null, csp: null,
+    runs: [{ run: 1, total: 500, request: null, segments: [], clock: null, reply: { firstByte: null, preReply: [], firstWord: "Hello" } }],
+    failed: [], unidentified: [], requestFailed: [], stop: null, double: null, canary: null, csp: null,
     streaming: { status: "unknown", verdict: "Inconclusive", checks: [], notes: [] }, checks: [], server, advice: [],
     hints: { browser: null, server: null },
     verdict: ["People waited a median of 500 ms for the first word (1 warm run)."],

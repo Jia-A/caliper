@@ -137,11 +137,13 @@ export type Breakdown =
 export interface Summary {
   cold: number | null;
   coldUnidentified: boolean; // run 1 loaded, but its AI request wasn't identified
+  coldRequestFailed: boolean; // run 1 loaded, but its AI request failed
   median: number | null;
   worst: number;
   warm: number; // warm runs in the median
   warmFailed: number; // warm runs left out because the page failed to load
   warmUnidentified: number; // warm runs left out because their AI request wasn't identified
+  warmRequestFailed: number; // warm runs left out because their AI request failed
 }
 
 /**
@@ -290,5 +292,6 @@ export interface DoneSummary {
   span: number | null;
   warm: number; // warm runs measured
   unsettled: number; // warm runs left out because they never settled
-  unidentified: number; // warm runs not measured because their AI request wasn't identified
+  unidentified: number; // warm runs not measured because their AI request wasn't identified or failed
+  requestFailed: number; // of those, the ones whose AI request failed
 }

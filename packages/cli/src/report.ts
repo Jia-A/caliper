@@ -37,7 +37,8 @@ export interface ReportInput {
   summary: Summary | null; // null when no run was measured
   runs: ReportRun[]; // the runs whose page loaded
   failed: number[]; // run numbers whose page failed to load
-  unidentified: number[]; // run numbers whose AI request wasn't identified
+  unidentified: number[]; // run numbers whose AI request wasn't identified, or failed
+  requestFailed: number[]; // of those, the ones whose AI request failed
   stop: (StopReport & { pattern: string }) | null; // null without --stop
   double: DoubleReport | null; // null without --double
   canary: (CanaryReport & { input: string | undefined }) | null; // null without --canary
@@ -73,7 +74,7 @@ const SEGMENTS: { key: SegmentKey; legend: string }[] = [
 
 // Top to bottom: the verdict; each side's bar and where to look (browser, then the server, never
 // merged); the checks; then everything else in a collapsed Details.
-export function renderReport({ url, measure, chat, output, steps, startedAt, summary, runs, failed, unidentified, stop, double, canary, csp, checks, server, hints, verdict, bars, advice }: ReportInput): string {
+export function renderReport({ url, measure, chat, output, steps, startedAt, summary, runs, failed, unidentified, requestFailed, stop, double, canary, csp, checks, server, hints, verdict, bars, advice }: ReportInput): string {
   const timeline: ChartRun[] = runs.map((run) => ({ ...run, bars: barSegments(run) }));
   const scale = Math.max(...runs.map((r) => r.total), 1);
   const ticks = niceTicks(scale);
@@ -104,7 +105,8 @@ export function renderReport({ url, measure, chat, output, steps, startedAt, sum
       <dt>Date</dt><dd>${esc(startedAt.toLocaleString("en-US", { dateStyle: "medium", timeStyle: "long" }))}</dd>
       <dt>Runs</dt><dd>${runs.length + failed.length + unidentified.length}${[
         failed.length ? ` (${failed.map((n) => `run ${n}`).join(", ")} failed to load)` : "",
-        unidentified.length ? ` (${unidentified.map((n) => `run ${n}`).join(", ")}: AI request not identified, timing inconclusive)` : "",
+        requestFailed.length ? ` (${requestFailed.map((n) => `run ${n}`).join(", ")}: AI request failed, not timed)` : "",
+        unidentified.length > requestFailed.length ? ` (${unidentified.filter((n) => !requestFailed.includes(n)).map((n) => `run ${n}`).join(", ")}: AI request not identified, timing inconclusive)` : "",
       ].join("")}</dd>
     </dl>
   </header>
@@ -134,11 +136,11 @@ export function renderReport({ url, measure, chat, output, steps, startedAt, sum
     <summary>Details: every run, the data, request matching${server ? ", server marks" : ""}</summary>
     <div class="tiles">
       ${summary ? `${tile(
-        summary.cold !== null ? "Cold (run 1)" : summary.coldUnidentified ? "Cold (run 1: AI request not identified)" : "Cold (run 1 failed to load)",
+        summary.cold !== null ? "Cold (run 1)" : summary.coldRequestFailed ? "Cold (run 1: AI request failed)" : summary.coldUnidentified ? "Cold (run 1: AI request not identified)" : "Cold (run 1 failed to load)",
         summary.cold
       )}
       ${tile(medianLabel(summary, runs.length + failed.length + unidentified.length), summary.median)}
-      ${tile("Worst (all runs)", summary.worst)}` : tile("AI request not identified in any run", null)}
+      ${tile("Worst (all runs)", summary.worst)}` : tile(requestFailed.length === unidentified.length && requestFailed.length ? "AI request failed in every run" : "AI request not identified in any run", null)}
     </div>
 
     <section aria-labelledby="timeline-h">
@@ -501,8 +503,12 @@ function checksBody({ verdict, fix, checks, notes }: Pick<CheckReport, "verdict"
 
 const runName = (n: number) => `run&nbsp;${n}${n === 1 ? " (cold)" : ""}`;
 
-function medianLabel({ warm, warmFailed, warmUnidentified }: Summary, total: number): string {
-  const lost = [warmFailed ? `${warmFailed} failed to load` : "", warmUnidentified ? `${warmUnidentified} AI request not identified` : ""].filter(Boolean);
+function medianLabel({ warm, warmFailed, warmUnidentified, warmRequestFailed }: Summary, total: number): string {
+  const lost = [
+    warmFailed ? `${warmFailed} failed to load` : "",
+    warmRequestFailed ? `${warmRequestFailed} AI request failed` : "",
+    warmUnidentified ? `${warmUnidentified} AI request not identified` : "",
+  ].filter(Boolean);
   if (lost.length) return warm === 1 ? `The one warm run (${lost.join(", ")})` : `Median (${warm} warm runs, ${lost.join(", ")})`;
   if (warm === 1) return "The one warm run";
   return total > 2 ? `Median (runs 2–${total})` : total === 2 ? "Median (run 2)" : "Median (needs 2+ runs)";

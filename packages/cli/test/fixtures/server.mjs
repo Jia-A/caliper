@@ -50,6 +50,10 @@
 //   /avatar          the page (avatar-page.html): your bubble has a "Me" avatar fallback; on the
 //                    envelope it swaps to an <img> and a hidden tooltip is added
 //   /avatar/stream   the reply (POST SSE): {"type":"start"} at once, text-delta tokens from AVATAR_TEXT_MS
+// For a failed AI request next to an image (A7 of the 0.6.0 stranger test):
+//   /failed                  the page (failed-page.html; ?api=<url> posts there instead)
+//   /failed/user-icon.png    a 1×1 PNG (your avatar)
+//   /failed/stream           503, {"error":"This model is currently experiencing high demand"} (POST)
 // Run on its own with `node test/fixtures/server.mjs [port]`, or import startFixtureServer().
 
 import { readFileSync } from "node:fs";
@@ -65,6 +69,8 @@ const ICON_PAGE = readFileSync(new URL("./icon-page.html", import.meta.url), "ut
 const MARKED_PAGE = readFileSync(new URL("./marked-page.html", import.meta.url), "utf8");
 const AMBIGUOUS_PAGE = readFileSync(new URL("./ambiguous-page.html", import.meta.url), "utf8");
 const AVATAR_PAGE = readFileSync(new URL("./avatar-page.html", import.meta.url), "utf8");
+const FAILED_PAGE = readFileSync(new URL("./failed-page.html", import.meta.url), "utf8");
+const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
 const BUTTONS_PAGE = readFileSync(new URL("./buttons-page.html", import.meta.url), "utf8");
 
 // The streamed reply: headers at once, the first token after a pause, then a token every 60 ms.
@@ -162,7 +168,7 @@ function ambiguousRoute(req, res, url) {
   res.writeHead(404).end("not found");
 }
 
-const PAGES = { "/stream-nostore": STREAM_PAGE, "/chat": CHAT_PAGE, "/sidecall": SIDECALL_PAGE, "/icon": ICON_PAGE, "/buttons": BUTTONS_PAGE, "/avatar": AVATAR_PAGE };
+const PAGES = { "/stream-nostore": STREAM_PAGE, "/chat": CHAT_PAGE, "/sidecall": SIDECALL_PAGE, "/icon": ICON_PAGE, "/buttons": BUTTONS_PAGE, "/avatar": AVATAR_PAGE, "/failed": FAILED_PAGE };
 const STREAMS = { "/chat/stream": "no-cache", "/chat/stream-nostore": "no-store" };
 
 const VARIANTS = {
@@ -307,6 +313,16 @@ export function startFixtureServer(port = 0, { caliperToken = null, caliperStatu
     if (STREAMS[path] && req.method === "POST") {
       req.resume(); // the body isn't used
       streamReply(res, STREAMS[path]);
+      return;
+    }
+    if (path === "/failed/user-icon.png") {
+      res.writeHead(200, { "content-type": "image/png", "cache-control": "no-store" }).end(PNG);
+      return;
+    }
+    if (path === "/failed/stream" && req.method === "POST") {
+      req.resume();
+      res.writeHead(503, { "content-type": "application/json", "cache-control": "no-store" });
+      res.end(JSON.stringify({ error: "This model is currently experiencing high demand" }));
       return;
     }
     if (path === "/avatar/stream" && req.method === "POST") {

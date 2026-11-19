@@ -148,7 +148,7 @@ test("one value: no \"median\", in the scope or the evidence", () => {
 });
 
 test("browser: no warm run, no median: says why, no hints", () => {
-  const list = browserHints([]);
+  const list = browserHints([], 1);
   assert.deepEqual(list.hints, []);
   assert.equal(list.none, "No warm run was measured (runs 2 and later), so there's no median to compare. Use --runs 2 or more.");
 });
@@ -185,7 +185,7 @@ function input(hints: HintList | null, server: ReportInput["server"], serverList
     bars: { browser: null, server: null },
     url: "http://127.0.0.1/x", measure: { name: "^go$" }, chat: null, output: "#out", steps: [], startedAt: new Date(0),
     summary: { cold: 500, coldUnidentified: false, median: 500, worst: 500, warm: 1, warmFailed: 0, warmUnidentified: 0 },
-    runs: [], failed: [], unidentified: [], stop: null, double: null, canary: null, csp: null,
+    runs: [], failed: [], unidentified: [], requestFailed: [], stop: null, double: null, canary: null, csp: null,
     streaming: { status: "unknown", verdict: "Inconclusive", checks: [], notes: [] }, checks: [], server, advice: [],
     hints: { browser: hints, server: serverList },
     ...extra,
@@ -348,11 +348,20 @@ test("verdict: a side with nothing over its limit says so; no server line withou
 });
 
 test("verdict: no warm run, no visit that succeeded: says why, never a number it didn't measure", () => {
-  assert.deepEqual(verdictLines({ median: null, warm: 0, browser: browserHints([]), server: { list: null } }), [
-    "No warm run was measured, so there's no median wait. Use --runs 2 or more.",
+  assert.deepEqual(verdictLines({ median: null, warm: 0, runs: 1, browser: browserHints([], 1), server: { list: null } }), [
+    "No warm run was measured (runs 2 and later), so there's no median wait. Use --runs 2 or more.",
     "In the browser: no hints (no warm run was measured).",
     "Inside the server: no hints (no marked visit succeeded).",
   ]);
+});
+
+test("verdict: --runs 2 or more but no warm run timed (failed or not identified): never says to use --runs 2", () => {
+  const lines = verdictLines({ median: null, warm: 0, runs: 2, browser: browserHints([], 2), server: null });
+  assert.deepEqual(lines, [
+    "No warm run was timed (runs 2 and later; see each run above for why), so there's no median wait.",
+    "In the browser: no hints (no warm run was timed).",
+  ]);
+  assert.equal(browserHints([], 3).none, "No warm run was timed (runs 2 and later; see each run above for why), so there's no median to compare.");
 });
 
 test("browser bar: the warm run nearest the median, its segments in order, over-limit ones marked", () => {
@@ -435,7 +444,7 @@ test("HTML: the details are collapsed by default and hold the per-run timeline, 
 
 test("HTML: the Data table has a row per segment and a column per run, so it fits", () => {
   const html = renderReport(input(null, null, null, {
-    runs: [1, 2, 3].map((n) => ({ run: n, total: 410, request: { method: "POST", url: "http://x/r", status: 200, contentType: null }, reasons: [], from: 1, clock: "ok", segments: [{ key: "click" as const, label: "click → request sent", ms: 10 }, { key: "streaming" as const, label: "headers → first paint", ms: 400 }], reply: { firstByte: null, preReply: [] } })),
+    runs: [1, 2, 3].map((n) => ({ run: n, total: 410, request: { method: "POST", url: "http://x/r", status: 200, contentType: null }, reasons: [], from: 1, clock: "ok", segments: [{ key: "click" as const, label: "click → request sent", ms: 10 }, { key: "streaming" as const, label: "headers → first paint", ms: 400 }], reply: { firstByte: null, preReply: [], firstWord: "Hello" } })),
   }));
   const table = html.slice(html.indexOf('aria-labelledby="table-h"'));
   assert.ok(/<thead><tr>\s*<th scope="col">Segment \(ms\)<\/th><th scope="col" class="num">run&nbsp;1 \(cold\)<\/th><th scope="col" class="num">run&nbsp;2<\/th><th scope="col" class="num">run&nbsp;3<\/th>/.test(table), table.slice(0, 600));

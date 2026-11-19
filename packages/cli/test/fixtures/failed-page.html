@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Failed request fixture</title>
+</head>
+<body>
+<!-- Copies Google's example chat app when its server was down or Gemini answered 503
+     (caliper-test-3, A7). Enter adds your bubble with your avatar image (a real PNG request),
+     waits for it to load, then POSTs the reply:
+       ?api=<url>   to that URL instead (the test passes a port nothing listens on: connection refused)
+       otherwise    to /failed/stream, which answers 503 with a JSON error
+     Either way the page shows an "Error occurred" bubble, so the avatar's bytes are the latest
+     before the only output change. Neither the image nor the error is a reply to time. -->
+<div id="messages"></div>
+<input id="msg" size="60" placeholder="Message">
+<script>
+  const messages = document.getElementById("messages");
+  const input = document.getElementById("msg");
+  const api = new URLSearchParams(location.search).get("api") ?? "/failed/stream";
+
+  input.addEventListener("keydown", async (event) => {
+    if (event.key !== "Enter" || !input.value.trim()) return;
+    const prompt = input.value;
+    input.value = "";
+    const mine = document.createElement("div");
+    mine.className = "msg user";
+    const img = document.createElement("img");
+    img.alt = "";
+    img.src = `/failed/user-icon.png?n=${Math.random()}`;
+    const p = document.createElement("p");
+    p.textContent = prompt;
+    mine.append(img, p);
+    messages.append(mine);
+    await new Promise((resolve) => (img.onload = img.onerror = resolve));
+
+    const bubble = document.createElement("div");
+    bubble.className = "msg bot";
+    try {
+      const res = await fetch(api, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt }) });
+      if (!res.ok) throw new Error((await res.json()).error);
+      bubble.textContent = await res.text();
+    } catch (err) {
+      bubble.textContent = "Error occurred";
+    }
+    messages.append(bubble);
+  });
+</script>
+</body>
+</html>

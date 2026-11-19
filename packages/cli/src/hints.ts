@@ -167,11 +167,14 @@ const list = (side: HintList["side"], scope: string, measured: Measured[], none 
 };
 
 /** Browser hints from the warm runs (2..N) that were measured: each segment's median over them. */
-export function browserHints(warm: { total: number; segments: Segment[] }[]): HintList {
+// Why there's no warm median: too few runs asked for, or warm runs that weren't timed.
+export const noWarm = (runs: number, what: string) =>
+  runs < 2 ? `No warm run was measured (runs 2 and later), so there's no ${what}. Use --runs 2 or more.`
+  : `No warm run was timed (runs 2 and later; see each run above for why), so there's no ${what}.`;
+
+export function browserHints(warm: { total: number; segments: Segment[] }[], runs = 2): HintList {
   const scope = warm.length === 1 ? "1 warm run" : `median of ${warm.length} warm runs`;
-  if (warm.length === 0) {
-    return list("browser", scope, [], "No warm run was measured (runs 2 and later), so there's no median to compare. Use --runs 2 or more.");
-  }
+  if (warm.length === 0) return list("browser", scope, [], noWarm(runs, "median to compare"));
   const hints: Measured[] = [];
   for (const [key, layer] of Object.entries(BROWSER) as [SegmentKey, (typeof BROWSER)[SegmentKey] & {}][]) {
     // Each run's value as the terminal prints it (whole ms), so the median is the median of the
@@ -336,9 +339,11 @@ export function formatHints({ side, scope, hints, none }: HintList): string {
  * The verdict: the median wait, then one line per side, from its top hint. The sides are never
  * merged or compared. server: null without --server-timings; list null when no visit succeeded.
  */
-export function verdictLines({ median, warm, browser, server }: {
+export function verdictLines({ median, warm, runs, browser, server }: {
   median: number | null;
   warm: number;
+  runs: number; // --runs
+
   browser: HintList | null;
   server: { list: HintList | null } | null;
 }): string[] {
@@ -349,11 +354,11 @@ export function verdictLines({ median, warm, browser, server }: {
   };
   return [
     median === null
-      ? "No warm run was measured, so there's no median wait. Use --runs 2 or more."
+      ? noWarm(runs, "median wait")
       : warm === 1
         ? `People waited ${median} ms for the first word in the one warm run.`
         : `People waited a median of ${median} ms for the first word (${warm} warm runs).`,
-    side("In the browser", browser, "no warm run was measured"),
+    side("In the browser", browser, runs < 2 ? "no warm run was measured" : "no warm run was timed"),
     ...(server ? [side("Inside the server", server.list, "no marked visit succeeded")] : []),
   ];
 }

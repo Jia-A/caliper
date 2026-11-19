@@ -6,7 +6,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { BrowserContext, Locator, Page, Request, Response } from "playwright";
 import { launchChromium } from "./browser.js";
 import { combineImageRules, describeRule, imageRule, splitPolicies, type ImageRule } from "./csp.js";
-import { ButtonNotFoundError, CliError, messageOf, PageLoadError, UnidentifiedRequestError } from "./errors.js";
+import { ButtonNotFoundError, CliError, FailedRequestError, messageOf, PageLoadError, UnidentifiedRequestError } from "./errors.js";
 import { buttonHints, buttonNames, expiredLoginCookies, loadFailureHints } from "./loadhints.js";
 import { adviceItems, formatAdvice } from "./advice.js";
 import { browserBar, browserHints, coldGaps, formatHints, serverBar, serverHints, STREAMS_MIN_MS, streamingVerdict, verdictLines, type HintList } from "./hints.js";
@@ -192,7 +192,8 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
     const startedAt = new Date();
     const loaded: LoadedRun[] = [];
     const failed: number[] = []; // run numbers whose page failed to load
-    const unidentified: number[] = []; // run numbers whose AI request wasn't identified
+    const unidentified: number[] = []; // run numbers whose AI request wasn't identified, or failed
+    const requestFailed: number[] = []; // of those, the ones whose AI request failed
     const checkCsp = csp || canary || !!canaryInput;
     let cspResult: CspResult | null = null;
 
@@ -212,8 +213,9 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
         } catch (err) {
           if (err instanceof UnidentifiedRequestError) {
             unidentified.push(i);
-            console.log(`${runLabel(i)} — AI request not identified, timing inconclusive`);
-            console.log(`    ${err.message}`);
+            if (err instanceof FailedRequestError) requestFailed.push(i);
+            console.log(`${runLabel(i)} — ${err instanceof FailedRequestError ? "AI request failed, not timed" : "AI request not identified, timing inconclusive"}`);
+            for (const line of [err.message, ...err.details]) console.log(`    ${line}`);
             if (checkCsp && !cspResult) cspResult = await readCsp(page, documentResponse);
             continue;
           }
@@ -244,14 +246,18 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
     }
 
     // With no run measured there's no number to summarize, but the checks still run.
-    const summary = loaded.length ? summarize(loaded, failed, unidentified) : null;
-    console.log(summary ? formatSummary(summary) : "Inconclusive — AI request not identified in any run, so no timing");
-    const doneSummary = summarizeDone(loaded.filter((r) => r.run > 1).map((r) => r.result), unidentified.filter((n) => n > 1).length);
+    const summary = loaded.length ? summarize(loaded, failed, unidentified, requestFailed) : null;
+    console.log(summary ? formatSummary(summary) : noTiming(unidentified, requestFailed));
+    const doneSummary = summarizeDone(
+      loaded.filter((r) => r.run > 1).map((r) => r.result),
+      unidentified.filter((n) => n > 1).length,
+      requestFailed.filter((n) => n > 1).length
+    );
     const streamingReport = describeStreaming(doneSummary);
     console.log(formatDoneSummary(doneSummary, streamingReport));
     // Medians of the warm runs that were measured, like the summary; none with no run measured.
     const browserList: HintList | null = loaded.length
-      ? browserHints(loaded.filter((r) => r.run > 1).map(({ result, parts }) => ({ total: result.ms, segments: parts.segments })))
+      ? browserHints(loaded.filter((r) => r.run > 1).map(({ result, parts }) => ({ total: result.ms, segments: parts.segments })), runs)
       : null;
     if (browserList) console.log(formatHints(browserList));
 
@@ -259,7 +265,7 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
     if (serverTimings) {
       // Its own fresh page, after the timed runs, which are never stamped.
       const options = { url, measure, output, steps, timeout, settleMs, request: locked, chat };
-      serverReport = await markedVisits(context, options, serverTimings, loaded, failed, unidentified);
+      serverReport = await markedVisits(context, options, serverTimings, loaded, failed, unidentified, requestFailed);
     }
     // From the server block only: never compared with the browser list.
     const serverList: HintList | null = serverReport?.block ? serverHints(serverReport.block) : null;
@@ -350,6 +356,7 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
     const verdict = verdictLines({
       median: summary?.median ?? null,
       warm: summary?.warm ?? 0,
+      runs,
       browser: browserList,
       server: serverTimings ? { list: serverList } : null,
     });
@@ -370,6 +377,7 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
         runs: loaded.map(({ run, result, parts }) => ({ run, total: result.ms, ...parts, reply: reportReply(result) })),
         failed,
         unidentified,
+        requestFailed,
         stop: stopReport && { pattern: stop!, ...stopReport },
         double: doubleReport,
         canary: canaryReport && { input: canaryInput, ...canaryReport },
@@ -482,15 +490,15 @@ async function finishRun(
   { settleMs, timeout, request, decide }: MeasureOptions,
   { clickAt, firstChangeAt, network, wire, deadline: until, chat }: RunCapture
 ): Promise<RunResult> {
-  let deadline = until;
+  const wait = { deadline: until }; // pushed back by the time spent answering a question
   let capped = false;
   for (;;) {
     const [now, seen] = await page.evaluate(() => [performance.now(), window.__caliperChanges] as const);
-    const requests = wire.requests();
-    const open = requests.some((w) => w.finishedAt === null && w.failedAt === null);
+    const open = wire.requests().some((w) => w.finishedAt === null && w.failedAt === null);
     const quiet = now - Math.max(seen.at(-1)?.at ?? 0, firstChangeAt) >= settleMs;
-    if (!open && quiet && explainsAny(seen, requests)) break;
-    if (now - clickAt > timeout && !explainsAny(seen, requests)) break; // ends unidentified
+    const explained = explainsAny(seen, wire.candidates());
+    if (!open && quiet && explained) break;
+    if (now - clickAt > timeout && !explained) break; // ends unidentified
     if (now - firstChangeAt > DONE_CAP_MS) {
       capped = true;
       break;
@@ -503,6 +511,55 @@ async function finishRun(
   });
   const { requests, timeOrigin } = await network.stop({ clickAt, firstPaintAt: Infinity });
 
+  try {
+    return await pickAndTime(page, changes, requests, timeOrigin, { request, decide }, { clickAt, wire, capped, chat, wait });
+  } catch (err) {
+    if (err instanceof UnidentifiedRequestError && !(err instanceof FailedRequestError)) err.details = seenLines(requests);
+    throw err;
+  }
+}
+
+// What a request ended as: "200 text/event-stream", "503 application/json", "failed (net::…)".
+function endedAs(r: RequestTiming): string {
+  if (r.status !== null) return `${r.status} ${r.contentType ?? ""}`.trimEnd();
+  return r.failure ? `failed (${r.failure})` : "no response yet";
+}
+
+// How the request failed, or null: a network error before any body bytes arrived, or HTTP 400+.
+// A stream cut after bytes arrived isn't this: what arrived was shown and is timed.
+function failureOf(r: RequestTiming, w: WireRequest | null): string | null {
+  if (r.status !== null && r.status >= 400) return endedAs(r);
+  if (r.failure && !r.abortedAfterBody && !(w && w.chunks.length > 0)) return endedAs(r);
+  return null;
+}
+
+const shortUrl = (url: string) => (url.startsWith("data:") ? `${url.slice(0, 20)}…` : url);
+const SEEN_MAX = 12;
+
+// A run that's not identified: every request it saw, and any that failed, "if it's your AI
+// request" — Caliper can't tell that it was.
+function seenLines(requests: RequestTiming[]): string[] {
+  const image = (r: RequestTiming) => r.resourceType === "image" || !!r.contentType?.startsWith("image/") || r.url.startsWith("data:image/");
+  const listed = requests.slice(0, SEEN_MAX).map((r) => `${r.method} ${shortUrl(r.url)} → ${endedAs(r)}${image(r) ? " (an image: never the AI request)" : ""}`);
+  const more = requests.length > SEEN_MAX ? `, and ${requests.length - SEEN_MAX} more` : "";
+  const failed = requests.filter((r) => !image(r) && failureOf(r, null) !== null);
+  return [
+    `requests seen: ${listed.join(", ") || "none"}${more}`,
+    ...failed.map(
+      (r) => `this request failed: ${r.method} ${shortUrl(r.url)} (${r.status ?? r.failure}) — if it's your AI request, the run can't be timed: fix the failure (your server's log will say why) and rerun.`
+    ),
+  ];
+}
+
+// Steps 2–4 of finishRun: pick the AI request, check it didn't fail, then the first word and done.
+async function pickAndTime(
+  page: Page,
+  changes: ContainerChange[],
+  requests: RequestTiming[],
+  timeOrigin: number,
+  { request, decide }: Pick<MeasureOptions, "request" | "decide">,
+  { clickAt, wire, capped, chat, wait }: { clickAt: number; wire: Wire; capped: boolean; chat: RunCapture["chat"]; wait: { deadline: number } }
+): Promise<RunResult> {
   let matcher = request;
   let pick: ScoredRequest | null = null;
   if (!matcher) {
@@ -511,7 +568,7 @@ async function finishRun(
       // The answer can take minutes; --timeout still counts only the page's own waiting.
       const askedAt = Date.now();
       matcher = await decide(found);
-      deadline += Date.now() - askedAt;
+      wait.deadline += Date.now() - askedAt;
     } else if (found.tie) {
       throw new UnidentifiedRequestError(`${found.tie[0]} and ${found.tie[1]} each explain ${found.candidates[0]!.points} output change(s)`);
     }
@@ -533,10 +590,15 @@ async function finishRun(
     pick = { request: matches[0]!, reasons: [matchReason(matcher!)], from: requests.length };
   }
   const w = wire.match(pick.request);
-  pick.share = w ? shareOf(w, changes, wire.requests()) : null;
+  // An error isn't a reply: what the page showed for it isn't timed.
+  const failure = failureOf(pick.request, w);
+  if (failure) {
+    throw new FailedRequestError(`${pick.request.method} ${pick.request.url} → ${failure}`);
+  }
+  pick.share = w ? shareOf(w, changes, wire.candidates()) : null;
   const ended = w ? w.finishedAt !== null || w.failedAt !== null : pick.request.end !== null;
   // Its Resource Timing entry only appears once it completes; a capped run may still be open.
-  if (ended) pick.request = await waitUntilFinished(page, pick.request, timeOrigin, deadline, wire);
+  if (ended) pick.request = await waitUntilFinished(page, pick.request, timeOrigin, wait.deadline, wire);
 
   const r = pick.request;
   const firstByteAt = replyFirstByte(r, wire);
@@ -642,7 +704,7 @@ interface Correlation {
 // from its first body byte on is under SHARE_MIN, or another request's bytes came within
 // CORRELATION_MS before RIVAL_MAX or more of them.
 function correlate(changes: ContainerChange[], requests: RequestTiming[], wire: Wire): Correlation {
-  const all = wire.requests();
+  const all = wire.candidates();
   const explained = new Map<WireRequest, number>();
   for (const change of changes) {
     const best = latestBytes(change, all);
@@ -827,7 +889,8 @@ async function markedVisits(
   { origin, token, runs }: ServerTimingsOptions,
   loaded: LoadedRun[],
   failed: number[],
-  unidentified: number[]
+  unidentified: number[],
+  requestFailed: number[]
 ): Promise<ServerReport> {
   const lines: string[] = [];
   const say = (line: string) => {
@@ -843,7 +906,7 @@ async function markedVisits(
   if (unidentified.length) {
     const inconclusive = [
       ...failed.map((run) => ({ run, why: "page failed to load" })),
-      ...unidentified.map((run) => ({ run, why: "AI request not identified" })),
+      ...unidentified.map((run) => ({ run, why: requestFailed.includes(run) ? "AI request failed" : "AI request not identified" })),
     ].sort((a, b) => a.run - b.run);
     return unknown(`${inconclusive.map((r) => `run ${r.run}: ${r.why}`).join("; ")} — no match key, so no marked visit`);
   }
@@ -931,7 +994,9 @@ async function markedVisit(
   } catch (err) {
     if (!(err instanceof CliError || err instanceof UnidentifiedRequestError)) throw err;
     loadFailed = err instanceof PageLoadError;
-    error = err instanceof UnidentifiedRequestError ? `AI request not identified: ${err.message}` : messageOf(err).split("\n")[0]!.trim();
+    error = err instanceof FailedRequestError ? `AI request failed: ${err.message}`
+      : err instanceof UnidentifiedRequestError ? `AI request not identified: ${err.message}`
+      : messageOf(err).split("\n")[0]!.trim();
   } finally {
     await page.unrouteAll({ behavior: "ignoreErrors" });
     await page.close();
@@ -1705,7 +1770,15 @@ interface WireRequest {
   bodyBytes: number; // decoded body bytes (dataLength), comparable to Resource Timing's decodedBodySize
   finishedAt: number | null;
   failedAt: number | null;
+  type: string; // Chrome's resource type: "Fetch", "XHR", "Image", "Document", …
+  mimeType: string | null; // the response's, once headers arrived
 }
+
+// An image is never the AI request: its bytes arriving just before an output change (an avatar
+// loading as the page shows an error) are left out of the matching. Seen on Google's example
+// chat app (caliper-test-3 A7), where a PNG was the only request with bytes near the change.
+const isImage = (w: { type: string; mimeType: string | null; url: string }) =>
+  w.type === "Image" || !!w.mimeType?.startsWith("image/") || w.url.startsWith("data:image/");
 
 // When each response chunk arrived, from Chrome's own network events (CDP). Playwright
 // doesn't expose per-chunk timing, and it's what shows bytes still arriving after Stop.
@@ -1729,7 +1802,13 @@ async function startWireCapture(page: Page, timeOrigin: number) {
       bodyBytes: 0,
       finishedAt: null,
       failedAt: null,
+      type: e.type ?? "Other",
+      mimeType: null,
     });
+  });
+  cdp.on("Network.responseReceived", (e) => {
+    const w = wire.get(e.requestId);
+    if (w) w.mimeType = e.response.mimeType || null;
   });
   cdp.on("Network.dataReceived", (e) => {
     const w = wire.get(e.requestId);
@@ -1750,6 +1829,8 @@ async function startWireCapture(page: Page, timeOrigin: number) {
   return {
     // Every request seen since the capture started.
     requests: () => [...wire.values()],
+    // The ones that can be the AI request: every request but images.
+    candidates: () => [...wire.values()].filter((w) => !isImage(w)),
     // The same URL and method, sent closest to when Playwright says the request was issued.
     match(r: RequestTiming): WireRequest | null {
       const same = [...wire.values()].filter((w) => w.url === r.url && w.method === r.method);
@@ -2544,9 +2625,12 @@ function formatSummaryBlock(entries: SummaryEntry[]): string {
 }
 
 // The streaming verdict over the warm runs, shared by the terminal summary and the report.
-function describeStreaming({ done, span, warm, unsettled, unidentified }: DoneSummary): CheckReport {
+function describeStreaming({ done, span, warm, unsettled, unidentified, requestFailed }: DoneSummary): CheckReport {
   const report = (r: Pick<CheckReport, "status" | "verdict" | "fix">): CheckReport => ({ ...r, checks: [], notes: [] });
-  if (warm === 0 && unidentified > 0) return report({ status: "unknown", verdict: "Inconclusive — AI request not identified in the warm runs" });
+  if (warm === 0 && unidentified > 0) {
+    const why = requestFailed === unidentified ? "the AI request failed" : requestFailed ? "AI request failed or not identified" : "AI request not identified";
+    return report({ status: "unknown", verdict: `Inconclusive — ${why} in the warm runs` });
+  }
   if (warm === 0) return report({ status: "unknown", verdict: "Inconclusive — no warm runs for a median (use --runs 2 or more)" });
   if (done === null || span === null) {
     return report({ status: "unknown", verdict: `Inconclusive — no warm run settled within ${DONE_CAP_MS / 1000}s` });
@@ -2592,24 +2676,26 @@ function ms(value: number): number {
 // Median covers the warm runs (2..N) that were measured; cold is run 1 on its own, null if it
 // failed to load or its AI request wasn't identified; worst covers every measured run. Called
 // with at least one measured run.
-function summarize(loaded: LoadedRun[], failed: number[], unidentified: number[]): Summary {
+function summarize(loaded: LoadedRun[], failed: number[], unidentified: number[], requestFailed: number[]): Summary {
   const cold = loaded[0]!.run === 1 ? loaded[0]!.result.ms : null;
   const warm = loaded.filter((r) => r.run > 1).map((r) => r.result.ms);
   const worst = Math.max(...loaded.map((r) => r.result.ms));
   return {
     cold,
-    coldUnidentified: unidentified.includes(1),
+    coldUnidentified: unidentified.includes(1) && !requestFailed.includes(1),
+    coldRequestFailed: requestFailed.includes(1),
     median: median(warm),
     worst,
     warm: warm.length,
     warmFailed: failed.filter((n) => n > 1).length,
-    warmUnidentified: unidentified.filter((n) => n > 1).length,
+    warmUnidentified: unidentified.filter((n) => n > 1 && !requestFailed.includes(n)).length,
+    warmRequestFailed: requestFailed.filter((n) => n > 1).length,
   };
 }
 
 // Same warm-runs rule for done and span, given the warm runs that were measured. Runs that never
 // settled have no done time, so they are left out and counted.
-function summarizeDone(warm: RunResult[], unidentified: number): DoneSummary {
+function summarizeDone(warm: RunResult[], unidentified: number, requestFailed: number): DoneSummary {
   const settled = warm.flatMap(({ timing, done }) =>
     done.settled ? [{ done: done.doneAt - timing.clickAt, span: done.doneAt - timing.firstPaintAt }] : []
   );
@@ -2619,6 +2705,7 @@ function summarizeDone(warm: RunResult[], unidentified: number): DoneSummary {
     warm: warm.length,
     unsettled: warm.length - settled.length,
     unidentified,
+    requestFailed,
   };
 }
 
@@ -2629,13 +2716,23 @@ function median(values: number[]): number | null {
   return Math.round(sorted.length % 2 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2);
 }
 
-function formatSummary({ cold, coldUnidentified, median, worst, warm, warmFailed, warmUnidentified }: Summary): string {
+// With no run timed: why, per run.
+function noTiming(unidentified: number[], requestFailed: number[]): string {
+  if (requestFailed.length === 0) return "Inconclusive — AI request not identified in any run, so no timing";
+  if (requestFailed.length === unidentified.length) return "Inconclusive — the AI request failed in every run, so no timing";
+  const runs = (ns: number[]) => ns.map((n) => `run ${n}`).join(", ");
+  return `Inconclusive — no run timed (AI request failed: ${runs(requestFailed)}; not identified: ${runs(unidentified.filter((n) => !requestFailed.includes(n)))})`;
+}
+
+function formatSummary({ cold, coldUnidentified, coldRequestFailed, median, worst, warm, warmFailed, warmUnidentified, warmRequestFailed }: Summary): string {
   const coldPart =
     cold !== null ? `cold ${cold} ms`
+    : coldRequestFailed ? "cold: run 1 AI request failed"
     : coldUnidentified ? "cold: run 1 AI request not identified"
     : "cold: run 1 failed to load";
   const reasons = [
     warmFailed ? `${warmFailed} failed to load` : "",
+    warmRequestFailed ? `${warmRequestFailed} AI request failed` : "",
     warmUnidentified ? `${warmUnidentified} AI request not identified` : "",
   ].filter(Boolean);
   const lost = reasons.length ? ` (${reasons.join(", ")})` : "";
