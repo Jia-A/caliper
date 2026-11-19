@@ -7,9 +7,9 @@ import type { BrowserContext, Locator, Page, Request, Response } from "playwrigh
 import { launchChromium } from "./browser.js";
 import { combineImageRules, describeRule, imageRule, splitPolicies, type ImageRule } from "./csp.js";
 import { ButtonNotFoundError, CliError, FailedRequestError, messageOf, PageLoadError, UnidentifiedRequestError } from "./errors.js";
-import { buttonHints, buttonNames, expiredLoginCookies, loadFailureHints } from "./loadhints.js";
+import { buttonHints, buttonNames, expiredLoginCookies, loadFailureHints, triggerLine } from "./loadhints.js";
 import { adviceItems, formatAdvice } from "./advice.js";
-import { browserBar, browserHints, coldGaps, formatHints, serverBar, serverHints, STREAMS_MIN_MS, streamingVerdict, verdictLines, type HintList } from "./hints.js";
+import { browserBar, browserHints, coldGaps, coldOpposite, formatHints, serverBar, serverHints, STREAMS_MIN_MS, streamingVerdict, verdictLines, type HintList } from "./hints.js";
 import { formatServerBlock, parseServerRecord, plural, serverBlock, UI_STREAM_HEADER, type ServerRecord, type ServerReport } from "./serverblock.js";
 import { adviceCount, renderReport, type ReportReply } from "./report.js";
 import type {
@@ -179,10 +179,8 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
   }
 
   // The endpoint isn't known until the runs pick it, so this counts triggers, not requests.
-  if (serverTimings) {
-    const total = runs + serverTimings.runs;
-    console.log(`This audit triggers the AI feature up to ${total} times for timing (${runs} timed + ${serverTimings.runs} marked).`);
-  }
+  const triggers = triggerLine({ runs, marked: serverTimings?.runs ?? 0, stop: !!stop, double: !!double, canary: !!(canary || canaryInput) });
+  if (triggers) console.log(triggers);
 
   const browser = await launchChromium({ headless: !headed });
 
@@ -348,7 +346,7 @@ export async function audit({ url, measure, output, steps, runs, headed, auth, t
         const first = loaded.find((r) => r.run === 1);
         const warmRuns = loaded.filter((r) => r.run > 1);
         if (!first || !summary || summary.cold === null || summary.median === null || !warmRuns.length) return null;
-        return { total: summary.cold, warmMedian: summary.median, warm: summary.warm, gaps: coldGaps(first.parts, warmRuns.map((r) => r.parts)) };
+        return { total: summary.cold, warmMedian: summary.median, warm: summary.warm, gaps: coldGaps(first.parts, warmRuns.map((r) => r.parts)), opposite: coldOpposite(first.parts, warmRuns.map((r) => r.parts)) };
       })(),
     });
     console.log(formatSummaryBlock(entries));

@@ -89,3 +89,20 @@ export function buttonHints({ seen, unnamed = [], selectorFlag = "--measure-sele
   }
   return lines;
 }
+
+// The audit's first line when it does more than the timed runs: how many times it can trigger the
+// AI feature, counting every click that sends (the Stop check sends once; double-send clicks the
+// trigger twice; the canary run sends once). null with only the timed runs. "up to": a run that
+// fails earlier sends nothing.
+export function triggerLine({ runs, marked, stop, double, canary }: { runs: number; marked: number; stop: boolean; double: boolean; canary: boolean }): string | null {
+  const parts = [
+    `${runs} timed`,
+    ...(marked ? [`${marked} marked`] : []),
+    ...(stop ? ["1 Stop check"] : []),
+    ...(double ? ["2 double-send"] : []),
+    ...(canary ? ["1 canary"] : []),
+  ];
+  if (parts.length === 1) return null;
+  const total = runs + marked + (stop ? 1 : 0) + (double ? 2 : 0) + (canary ? 1 : 0);
+  return `This audit triggers the AI feature up to ${total} times (${parts.join(" + ")}).`;
+}

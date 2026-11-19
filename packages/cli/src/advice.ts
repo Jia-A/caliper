@@ -27,7 +27,8 @@ export interface AdviceInput {
   prompt: PromptView | null; // null without --server-timings, or with no visit that succeeded
   // The first run against the warm runs' median (summary), and hints.ts coldGaps; null when either
   // wasn't measured.
-  cold: { total: number; warmMedian: number; warm: number; gaps: ColdGap[] } | null;
+  // opposite: segments the first run was faster in, by more than their limit (hints.ts coldOpposite).
+  cold: { total: number; warmMedian: number; warm: number; gaps: ColdGap[]; opposite?: ColdGap[] } | null;
 }
 
 const OWASP_LLM01 = "https://genai.owasp.org/llmrisk/llm01-prompt-injection/";
@@ -58,10 +59,17 @@ export function adviceItems({ streaming, firstWord, prompt, cold }: AdviceInput)
     const each = cold.gaps.map((g) =>
       `${g.label}: ${g.cold} ms on the first run, ${g.warm === null ? "not in the warm runs" : `${g.warm} ms warm`} (+${g.gap} ms, more than its ${g.limit} ms limit).`);
     const limits = [...new Map(cold.gaps.map((g) => [g.limit, `${g.limit} ms: ${g.basis}`])).values()];
+    // A segment's gap bigger than the whole gap means others went the other way: name them, so the
+    // reader doesn't take that one segment for the whole difference.
+    const whole = cold.total - cold.warmMedian;
+    const biggest = cold.gaps.reduce((a, g) => (g.gap > a.gap ? g : a));
+    const opposite = biggest.gap > whole && cold.opposite?.length
+      ? ` Other segments moved the other way, so ${biggest.label} isn't the whole difference: ${cold.opposite.map((g) => `${g.label}: ${g.cold} ms on the first run, ${g.warm} ms warm (−${-g.gap} ms)`).join("; ")}.`
+      : "";
     items.push(item(
       "first-run",
       `The first run (a fresh browser) waited ${cold.total - cold.warmMedian} ms longer for the first word than ${than} (${cold.total} vs ${cold.warmMedian} ms).`,
-      `${each.join(" ")} Caliper can't tell why from timings alone.`,
+      `${each.join(" ")}${opposite} Caliper can't tell why from timings alone.`,
       "Caliper's own reasoning: each segment's Where-to-look limit, applied to the gap between the first run and the warm runs, " +
         `from 1 first run and ${cold.warm === 1 ? "1 warm run" : `${cold.warm} warm runs`}. ${limits.join(" ")}`,
     ));

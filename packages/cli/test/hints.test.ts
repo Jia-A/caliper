@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { browserBar, browserHints, coldGaps, formatHints, serverBar, serverHints, STREAMS_MIN_MS, streamingVerdict, verdictLines, type Bar, type HintList } from "../src/hints.ts";
+import { browserBar, browserHints, coldGaps, coldOpposite, formatHints, serverBar, serverHints, STREAMS_MIN_MS, streamingVerdict, verdictLines, type Bar, type HintList } from "../src/hints.ts";
 import { adviceItems, formatAdvice, STREAMS_MIN_MS as ADVICE_STREAMS_MIN_MS } from "../src/advice.ts";
 import { renderReport, serverTop, type ReportInput } from "../src/report.ts";
 import { formatServerBlock, parseServerRecord, serverBlock, type ServerRecord } from "../src/serverblock.ts";
@@ -110,7 +110,7 @@ test("an app-named span gets the generic text, whatever its name", () => {
   assert.ok(!/database|postgres|sql/i.test([postgres.about, ...postgres.checks].join(" ")), postgres.checks.join(" | "));
   // Short lines carry it too.
   const two = serverHints(block({ marks: { aStart: 0, aEnd: 300, bStart: 300, bEnd: 500, firstChunk: 600 } }));
-  assert.ok(formatHints(two).includes(`    b: 200 ms — 2.0× its 100 ms limit, in 1 of 1 marked visits — ${APP_SPAN}`), formatHints(two));
+  assert.ok(formatHints(two).includes(`    b: 200 ms — 2.0× its 100 ms limit, in 1 of 1 marked visit — ${APP_SPAN}`), formatHints(two));
 });
 
 test("unattributed is never hinted", () => {
@@ -137,12 +137,12 @@ test("browser: a segment in only some warm runs says how many it was measured in
   const list = browserHints([run({ ttfb: 10, connection: 300 }), run({ ttfb: 10 }), run({ ttfb: 10 })]);
   assert.deepEqual(labels(list), ["connection setup"]);
   // The share is of that run's own total (300 of 310), not of the median total of all three (10).
-  assert.equal(formatHints(list).split("\n")[1], "    connection setup: 300 ms — 3.0× its 100 ms limit, in 1 of 1 warm runs (measured in 1 of 3); 97% of the browser total");
+  assert.equal(formatHints(list).split("\n")[1], "    connection setup: 300 ms — 3.0× its 100 ms limit, in 1 of 1 warm run (measured in 1 of 3); 97% of the browser total");
 });
 
 test("one value: no \"median\", in the scope or the evidence", () => {
   const one = browserHints([run({ ttfb: 900 })]);
-  assert.equal(formatHints(one).split("\n").slice(0, 2).join("\n"), "Where to look — browser (1 warm run)\n    browser: response headers received: 900 ms — 1.5× its 600 ms limit, in 1 of 1 warm runs; 100% of the browser total");
+  assert.equal(formatHints(one).split("\n").slice(0, 2).join("\n"), "Where to look — browser (1 warm run)\n    browser: response headers received: 900 ms — 1.5× its 600 ms limit, in 1 of 1 warm run; 100% of the browser total");
   const server = formatHints(serverHints(block({ marks: { aStart: 0, aEnd: 300 } })));
   assert.ok(!server.includes("median"), server);
 });
@@ -174,7 +174,7 @@ test("server: no first bytes sent recorded: share unknown, and says why", () => 
   const [h] = serverHints(block({ marks: { dbStart: 0, dbEnd: 300 } })).hints;
   assert.equal(h!.share, null);
   assert.equal(h!.shareOf, "server: first bytes sent wasn't recorded, so no share");
-  assert.ok(formatHints(serverHints(block({ marks: { dbStart: 0, dbEnd: 300 } }))).includes("— 3.0× its 100 ms limit, in 1 of 1 marked visits; server: first bytes sent wasn't recorded, so no share"));
+  assert.ok(formatHints(serverHints(block({ marks: { dbStart: 0, dbEnd: 300 } }))).includes("— 3.0× its 100 ms limit, in 1 of 1 marked visit; server: first bytes sent wasn't recorded, so no share"));
 });
 
 // --- HTML ---
@@ -215,7 +215,7 @@ test("HTML: no server hints without --server-timings", () => {
 test("HTML: the full hint has evidence, basis, things to check and the disclaimer", () => {
   const b = block({ marks: { modelCallSent: 0, firstChunk: 700 } });
   const html = serverTop({ lines: [], block: b }, serverHints(b), serverBar(b));
-  for (const want of ["model call → first bytes sent: 700 ms — 1.6× its 450 ms limit, in 1 of 1 marked visits", "MLPerf Inference", CAVEAT, "Things to check", DISCLAIMER]) {
+  for (const want of ["model call → first bytes sent: 700 ms — 1.6× its 450 ms limit, in 1 of 1 marked visit", "MLPerf Inference", CAVEAT, "Things to check", DISCLAIMER]) {
     assert.ok(html.includes(want), `has: ${want}\n${html}`);
   }
 });
@@ -277,7 +277,7 @@ test("Quill-like numbers: postgres 532 ms (5.3× its 100) gets the full hint, no
 const BEFORE_ONE = "It ended before the model call was sent (postgresEnd 547 ms, model call sent 547 ms), so all 547 ms of it came before the model call.";
 test("Quill's Nov 13 record: postgres ended at the model call, so the full hint says all of it came before the model call", () => {
   const text = formatHints(serverHints(block({ marks: { postgresStart: 0, postgresEnd: 547, modelCallSent: 547, firstChunk: 1356 } }))).split("\n");
-  assert.equal(text[1], "    postgres: 547 ms — 5.5× its 100 ms limit, in 1 of 1 marked visits; 40% of the time to server: first bytes sent");
+  assert.equal(text[1], "    postgres: 547 ms — 5.5× its 100 ms limit, in 1 of 1 marked visit; 40% of the time to server: first bytes sent");
   assert.equal(text[2], `    ${APP_SPAN}`);
   assert.equal(text[3], `    ${BEFORE_ONE}`);
 });
@@ -693,4 +693,36 @@ test("modelFirstChunk: the model hint is model call → model's first chunk, its
   assert.equal(model!.median, 1000);
   assert.equal(model!.share, 71); // 1000 of 1400 ms, rounded
   assert.equal(model!.shareOf, "the time to the model's first chunk");
+});
+
+test('verdict: a segment whose name starts with its side isn\'t said twice ("In the browser: browser: …", caliper-test-3 A9)', () => {
+  const browser = browserHints([run({ click: 10, ttfb: 4140, streaming: 15 }), run({ click: 10, ttfb: 4140, streaming: 15 })], 3);
+  const line = verdictLines({ median: 4165, warm: 2, runs: 3, browser, server: null })[1]!;
+  assert.ok(line.startsWith("In the browser: response headers received — "), line);
+});
+
+test('one warm run or one marked visit: "in 1 of 1 warm run", never "1 of 1 warm runs"', () => {
+  const browser = browserHints([run({ click: 10, ttfb: 4140, streaming: 15 })], 2);
+  const verdict = verdictLines({ median: 4165, warm: 1, runs: 2, browser, server: null })[1]!;
+  assert.ok(verdict.endsWith("in 1 of 1 warm run."), verdict);
+  assert.ok(formatHints(browser).includes("in 1 of 1 warm run") && !formatHints(browser).includes("1 of 1 warm runs"), formatHints(browser));
+  const server = serverHints(block({ marks: { modelCallSent: 0, firstChunk: 900 } }));
+  assert.ok(formatHints(server).includes("in 1 of 1 marked visit") && !formatHints(server).includes("1 of 1 marked visits"), formatHints(server));
+});
+
+test("advice, first run: when a segment's gap is bigger than the whole gap, segments that moved the other way are named with their numbers (Quill, Nov 14)", () => {
+  // Quill 2026-11-14: first word 1646 vs 1514 ms; CORS preflight +183 only on the first run,
+  // response headers +256 (under its 600 ms limit), headers → first paint 276 vs 585 ms (−309).
+  const cold = run({ click: 10, preflight: 183, ttfb: 1171, streaming: 276 });
+  const warm = run({ click: 10, ttfb: 915, streaming: 585 });
+  const gaps = coldGaps(cold, [warm]);
+  const opposite = coldOpposite(cold, [warm]);
+  assert.deepEqual(opposite.map(({ label, cold, warm, gap }) => ({ label, cold, warm, gap })), [{ label: "headers → first paint", cold: 276, warm: 585, gap: -309 }]);
+  const text = adviceItems({ ...NO_DATA, cold: { total: 1640, warmMedian: 1510, warm: 1, gaps, opposite } })[0]!.text;
+  assert.ok(text.includes("Other segments moved the other way, so CORS preflight isn't the whole difference: headers → first paint: 276 ms on the first run, 585 ms warm (−309 ms)."), text);
+  // The demo: the one gap (3473) isn't bigger than the whole (3484), so no such line.
+  const demoCold = run({ click: 9.6, ttfb: 5196.3, streaming: 14.7 });
+  const demoWarm = run({ click: 1.8, ttfb: 1723.0, streaming: 12.6 });
+  const demo = adviceItems({ ...NO_DATA, cold: { total: 5221, warmMedian: 1737, warm: 1, gaps: coldGaps(demoCold, [demoWarm]), opposite: coldOpposite(demoCold, [demoWarm]) } })[0]!.text;
+  assert.ok(!demo.includes("other way"), demo);
 });

@@ -279,7 +279,7 @@ function checkVisits(c, n, ok) {
   const { label, runs, out, loads, stamped, asked, lookups, lines } = c;
   const text = out.stdout;
   const k = ok.length;
-  const count = `This audit triggers the AI feature up to ${runs + n} times for timing (${runs} timed + ${n} marked).`;
+  const count = `This audit triggers the AI feature up to ${runs + n} times (${runs} timed + ${n} marked).`;
   const at = text.split("\n").indexOf(count);
   check(at !== -1 && at < text.indexOf("run 1"), `(${label}) prints "${count}" before any run`, out);
   checkPrecheck(c);

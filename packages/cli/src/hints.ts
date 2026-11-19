@@ -234,6 +234,22 @@ export function coldGaps(cold: { segments: Segment[] }, warm: { segments: Segmen
   return gaps;
 }
 
+// The segments the first run was FASTER in, by more than their own limit (the same limit as
+// coldGaps, the other way): gap is negative. Only segments in both the first run and the warm runs.
+export function coldOpposite(cold: { segments: Segment[] }, warm: { segments: Segment[] }[]): ColdGap[] {
+  if (!warm.length) return [];
+  const out: ColdGap[] = [];
+  for (const [key, layer] of Object.entries(BROWSER) as [SegmentKey, (typeof BROWSER)[SegmentKey] & {}][]) {
+    const first = cold.segments.find((s) => s.key === key);
+    if (!first || first.ms === null) continue;
+    const w = median(warm.flatMap(({ segments }) => segments.filter((s) => s.key === key && s.ms !== null).map((s) => Math.round(s.ms!))));
+    if (w === null) continue;
+    const c = Math.round(first.ms);
+    if (w - c > layer.limit.ms) out.push({ label: first.label, cold: c, warm: w, gap: c - w, limit: layer.limit.ms, basis: layer.limit.basis });
+  }
+  return out;
+}
+
 // The row's median over the visits that recorded it: the table's median, or its only value.
 const rowMedian = (row: ServerRow) => row.stats?.median ?? row.values.find((v) => v !== null)!;
 
@@ -303,7 +319,9 @@ function times(h: Measured): string {
 }
 
 // "<label>: median 532 ms — 5.3× its 100 ms limit, in 3 of 3 marked visits"
-const over = (h: Measured) => `${h.label}: ${value(h)} — ${times(h)} its ${h.limit} ms limit, in ${h.over} of ${h.of} ${h.unit}${h.measuredNote}`;
+// "1 of 1 warm run", "2 of 3 warm runs": the unit agrees with the total.
+const unitOf = (of: number, unit: string) => (of === 1 ? unit.replace(/s$/, "") : unit);
+const over = (h: Measured) => `${h.label}: ${value(h)} — ${times(h)} its ${h.limit} ms limit, in ${h.over} of ${h.of} ${unitOf(h.of, h.unit)}${h.measuredNote}`;
 
 // The full hint's evidence line.
 function evidence(h: Measured): string {
@@ -353,7 +371,9 @@ export function verdictLines({ median, warm, runs, browser, server }: {
   const side = (name: string, list: HintList | null, why: string) => {
     if (!list || (!list.hints.length && !list.within)) return `${name}: no hints (${why}).`;
     const top = list.hints[0];
-    return top ? `${name}: ${top.label} — ${top.ratio} its limit, in ${top.over} of ${top.of} ${top.unit}.` : `${name}: nothing over its limit.`;
+    // "In the browser: browser: response headers received" says the side twice; drop the label's own.
+    const label = top ? top.label.replace(/^(browser|server): /, "") : "";
+    return top ? `${name}: ${label} — ${top.ratio} its limit, in ${top.over} of ${top.of} ${unitOf(top.of, top.unit)}.` : `${name}: nothing over its limit.`;
   };
   return [
     median === null

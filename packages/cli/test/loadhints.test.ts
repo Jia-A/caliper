@@ -124,3 +124,15 @@ test("only cookies for the audited site count", () => {
   assert.deepEqual(expiredLoginCookies(state, PAGE, NOW), [secs(2026, 1, 2) * 1000]);
   assert.deepEqual(expiredLoginCookies({ cookies: "nope" }, PAGE, NOW), []);
 });
+
+test("trigger count: every click that sends counts, --stop as 1 and --double as 2 (it clicks twice); singular when 1", async () => {
+  const { triggerLine } = await import("../src/loadhints.ts");
+  // Quill, 2026-11-14: --runs 2 --server-runs 1 --stop --double said "up to 3 times".
+  assert.equal(triggerLine({ runs: 2, marked: 1, stop: true, double: true, canary: false }),
+    "This audit triggers the AI feature up to 6 times (2 timed + 1 marked + 1 Stop check + 2 double-send).");
+  assert.equal(triggerLine({ runs: 3, marked: 3, stop: false, double: false, canary: false }),
+    "This audit triggers the AI feature up to 6 times (3 timed + 3 marked).");
+  assert.equal(triggerLine({ runs: 1, marked: 0, stop: false, double: false, canary: true }),
+    "This audit triggers the AI feature up to 2 times (1 timed + 1 canary).");
+  assert.equal(triggerLine({ runs: 1, marked: 0, stop: false, double: false, canary: false }), null, "no line when it's just the timed runs");
+});
