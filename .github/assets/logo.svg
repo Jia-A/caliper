@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <rect width="32" height="32" rx="7" fill="#141514"/>
+  <mask id="o" maskUnits="userSpaceOnUse" x="0" y="0" width="32" height="32"><rect width="32" height="32" fill="#fff"/><path d="M14.5 16L32 9.6V22.4z" fill="#000"/></mask>
+  <ellipse cx="16" cy="16" rx="7.1" ry="7.6" fill="none" stroke="#9cc3a4" stroke-width="4.6" mask="url(#o)"/>
+</svg>
