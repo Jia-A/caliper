@@ -18,7 +18,7 @@
 
 caliper-timings can. On a request Caliper marks, it times the steps you mark (a database query, the model call, the model's first chunk) on your server's clock, and measures each prompt part's size and who wrote it, never its text. Caliper reads the record back and shows it next to the browser's timings, never added to them.
 
-It's off unless you set your own `CALIPER_TOKEN`, and requests Caliper didn't mark are never touched. No runtime dependencies: the core uses only `Date.now()`, Web Streams and `crypto.subtle`. The wire format is in [SPEC.md](SPEC.md), so other languages can implement it too.
+It's off unless you set your own `CALIPER_TOKEN`, and requests Caliper didn't mark are never touched. No runtime dependencies: the core uses only `Date.now()`, Web Streams and `crypto.subtle`. The wire format is in [SPEC.md](https://github.com/Jia-A/caliper/blob/main/packages/timings/SPEC.md), so other languages can implement it too.
 
 **Cost, as measured:** a marked request reached its first byte a median **1.2 ms** later than an unmarked one, and unmarked requests showed **no difference** (median 0.0 ms). 20 pairs each, one `node:http` app on 127.0.0.1, Node 22.22, one Mac; see [Measured cost](#measured-cost).
 

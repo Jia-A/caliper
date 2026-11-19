@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.2 — 2026-11-20
+
+### Fixed
+
+- **The HTML report's server bar runs to the model's first chunk when it comes after first bytes sent.** On an AI SDK app (caliper-timings 0.6.1's `modelFirstChunk`), the envelope is first bytes sent (3 ms on the app we tested) and the model's first chunk comes later (3065 ms). 0.6.1 used first bytes as the bar's axis, so its title read `3 ms from arrival to server: first bytes sent` and the 3064 ms model span was drawn on that scale. The axis is now the later of the two, and the title names it (`… 3065 ms from arrival to the model's first chunk`). The terminal output and the tables were already right. Tested with `npm run test:hints`.
+
+### Changed
+
+- **README:** a product-page top (logo, badges, a screenshot of a real report, its numbers as a table, features, limits, how it was built), so the npm page matches GitHub. Install and everything below are unchanged. Images use absolute URLs.
+
 ## 0.6.1 — 2026-11-20
 
 Fixes from a test by someone new to Caliper, on two apps they didn't write (an AI SDK app on Next.js, and Google's Gemini example chat app). Tested on local fixtures that copy what those apps did.

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.2 — 2026-11-20
+
+No code changes. Published so the npm page shows the current README.
+
+### Changed
+
+- **README:** a product-page top: a trimmed copy of the tested AI SDK route, a screenshot of a real report's server section, a sequence diagram of what the browser can't see, the measured cost (marked +1.2 ms median to first byte, unmarked no difference; 20 pairs, one machine), what it records and never records, and where it has been run. Next.js is now listed as checked once on Vercel production (caliper-timings 0.6.0, Nov 14, 2026), with which store answered there not recorded. Install and the code samples are unchanged. Images and the SPEC link in the top section use absolute URLs; npm shows the diagram as a code block (it doesn't render Mermaid).
+
 ## 0.6.1 — 2026-11-20
 
 ### Added
