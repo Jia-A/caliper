@@ -41,3 +41,6 @@ caliper-report.html
 
 # build output
 dist/
+
+# personal interview handbook (local only)
+docs/handbook/
